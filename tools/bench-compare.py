@@ -25,13 +25,9 @@ SUITES = {
 }
 PREFIX = "IMPASTO_BENCH_JSON "
 EXPERIMENTS = {
-    "IMPASTO_CANVAS_CURVES", "IMPASTO_CANVAS_DIRECT", "IMPASTO_CANVAS_STENCIL", "IMPASTO_COMPUTE_BLUR", "IMPASTO_DARKEN_STEMS",
-    "IMPASTO_DITHER", "IMPASTO_EARLY_Z", "IMPASTO_GRADIENT_LUT",
-    "IMPASTO_IMAGE_CACHE_MB", "IMPASTO_IMAGE_UPLOAD", "IMPASTO_LCD_RGB", "IMPASTO_PAINT_UNIFORM",
-    "IMPASTO_PREWARM", "IMPASTO_RETAIN_OFFSCREEN", "IMPASTO_SHADOW_2D",
-    "IMPASTO_SHADOW_HOLLOW", "IMPASTO_SPECIALIZE_PAINT", "IMPASTO_PARALLEL_PREPARE",
-    "IMPASTO_LATE_ACQUIRE", "IMPASTO_RENDER_GRAPH", "IMPASTO_SPATIAL_BATCH", "IMPASTO_STATE_TABLE",
-    "IMPASTO_TEXT_GAMMA", "IMPASTO_TEXT_MSDF", "IMPASTO_TRANSIENT_ATTACHMENTS",
+    "IMPASTO_PREWARM", "IMPASTO_LATE_ACQUIRE", "IMPASTO_PARALLEL_PREPARE",
+    "IMPASTO_GPU_VALIDATE", "IMPASTO_SURFACE_COLOR", "IMPASTO_SURFACE_LATENCY",
+    "IMPASTO_PRESENT_MODE",
 }
 
 
@@ -97,8 +93,22 @@ def fingerprint(report):
         **{key: value for key, value in report["environment"].items() if key != "git_sha"},
         "viewport": report["viewport"],
         "dpr": report["dpr"],
+        "output_format": report["output_format"],
         "sample_count": len(report["samples"]),
     }
+
+
+def metric_summary(report, metric):
+    summary = report["steady_state_us"][metric]
+    if "p99" in summary and "max" in summary:
+        return summary
+    values = sorted(
+        value for sample in report["samples"][1:]
+        if (value := sample["cpu_us"].get(metric, sample.get(metric))) is not None
+    )
+    if len(values) != summary["samples"] or not values:
+        return summary
+    return {**summary, "p99": values[(len(values) * 99 + 99) // 100 - 1], "max": values[-1]}
 
 
 def compare(pairs):
@@ -115,11 +125,13 @@ def compare(pairs):
         summary = {}
         for metric in sorted(common):
             values = {}
-            for percentile in ("p50", "p95"):
+            metrics = [(metric_summary(base, metric), metric_summary(head, metric)) for base, head in runs]
+            percentiles = set.intersection(*(set(result) for pair in metrics for result in pair))
+            for percentile in ("p50", "p95", "p99", "max"):
+                if percentile not in percentiles:
+                    continue
                 timings = [
-                    (base["steady_state_us"][metric][percentile],
-                     head["steady_state_us"][metric][percentile])
-                    for base, head in runs
+                    (base[percentile], head[percentile]) for base, head in metrics
                 ]
                 deltas = [(head / base - 1) * 100 for base, head in timings if base > 0]
                 values[percentile] = {
@@ -129,9 +141,8 @@ def compare(pairs):
                     "median_delta_pct": statistics.median(deltas) if deltas else None,
                 }
             values["sample_counts"] = [
-                {"base": base["steady_state_us"][metric]["samples"],
-                 "head": head["steady_state_us"][metric]["samples"]}
-                for base, head in runs
+                {"base": base["samples"], "head": head["samples"]}
+                for base, head in metrics
             ]
             summary[metric] = values
         summaries[scene] = summary
@@ -200,6 +211,11 @@ def main():
     if args.warmup_frames < 0:
         parser.error("--warmup-frames must be nonnegative")
     checkouts = {"base": args.base.resolve(), "head": args.head.resolve()}
+    target = os.environ.get("CARGO_TARGET_DIR")
+    if target and checkouts["base"] != checkouts["head"]:
+        targets = {(checkout / target).resolve() for checkout in checkouts.values()}
+        if len(targets) == 1:
+            parser.error("checkouts share CARGO_TARGET_DIR; use independent build directories")
     shared = {key: os.environ[key] for key in EXPERIMENTS if key in os.environ}
     experiments = {
         "base": {**shared, **dict(args.base_env)},

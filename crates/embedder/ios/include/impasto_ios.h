@@ -123,6 +123,17 @@ void impasto_ios_pen(ImpastoIOSHost *host, uint64_t surface, uint64_t pointer,
                      uint32_t phase, float x, float y, double seconds, float force,
                      float radius, float altitude, float azimuth, uint32_t modifiers);
 
+typedef struct ImpastoIOSPointerPoint {
+    float x, y;
+    double seconds;
+} ImpastoIOSPointerPoint;
+
+/// The latest point is dispatched. The borrowed history is copied during the call.
+void impasto_ios_pointer_move(ImpastoIOSHost *host, uint64_t surface, uint64_t pointer,
+                              uint32_t kind, ImpastoIOSPointerPoint latest, uint32_t buttons,
+                              uint32_t modifiers, float force, float radius, float altitude,
+                              float azimuth, const ImpastoIOSPointerPoint *history, size_t length);
+
 #ifdef __cplusplus
 }
 #endif

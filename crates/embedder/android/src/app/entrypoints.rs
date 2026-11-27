@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use embedder::{Command, FrameToken, Lifecycle};
 use engine::session::{InputEvent as EditEvent, Key};
-use jni::objects::{JIntArray, JObject, JString};
+use jni::objects::{JDoubleArray, JIntArray, JObject, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::{Env, EnvUnowned};
 use ndk::asset::AssetManager;
@@ -795,9 +795,9 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeMetrics(
 }
 
 #[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
-pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePointer(
-    _env: EnvUnowned<'_>,
-    _class: JObject<'_>,
+pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePointer<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
     handle: jlong,
     phase: jint,
     pointer_id: jlong,
@@ -811,12 +811,18 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePointer(
     wheel_x: f32,
     wheel_y: f32,
     density: f32,
+    positions: JDoubleArray<'local>,
+    history_count: jint,
 ) {
+    use engine::input::{PointerHistory, PointerSample};
+
     let Some(host) = host(handle) else {
         return;
     };
-    let Some((x, y)) = scene_point(x, y, density) else {
-        return;
+    let (x, y) = match scene_point(x, y, density) {
+        Some(point) => point,
+        None if phase == 3 => (f32::NAN, f32::NAN),
+        None => return,
     };
     let kind = match kind {
         1 => engine::input::PointerKind::Mouse,
@@ -855,22 +861,49 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePointer(
     } else {
         button
     };
-    host.link
-        .post(Command::Pointer(engine::input::PointerEvent {
-            pointer: engine::input::PointerId(pointer_id as u64),
-            kind,
-            phase,
-            x,
-            y,
-            time_ms: time_ms as f64,
-            button,
-            buttons: engine::input::Buttons::from_bits(buttons as u8),
-            modifiers: engine::input::Modifiers::from_bits(modifiers as u8),
-            dx: 0.0,
-            dy: 0.0,
-            zoom: 0.0,
-            pen: None,
-        }));
+    let event = engine::input::PointerEvent {
+        pointer: engine::input::PointerId(pointer_id as u64),
+        kind,
+        phase,
+        x,
+        y,
+        time_ms: time_ms as f64,
+        button,
+        buttons: engine::input::Buttons::from_bits(buttons as u8),
+        modifiers: engine::input::Modifiers::from_bits(modifiers as u8),
+        dx: 0.0,
+        dy: 0.0,
+        zoom: 0.0,
+        pen: None,
+    };
+    if phase == engine::input::Phase::Move
+        && let Ok(count) = usize::try_from(history_count)
+        && (1..=PointerHistory::CAPACITY).contains(&count)
+    {
+        let mut packed = [0.0; PointerHistory::CAPACITY * 3];
+        let values = &mut packed[..count * 3];
+        let read = with_env(&mut env, |env| {
+            if positions.len(env)? < values.len() {
+                return Ok(false);
+            }
+            positions.get_region(env, 0, values)?;
+            Ok(true)
+        });
+        if read {
+            let mut history = Box::new(PointerHistory::default());
+            for &[x, y, time_ms] in values.as_chunks::<3>().0 {
+                if let Some((x, y)) = scene_point(x as f32, y as f32, density)
+                    && time_ms.is_finite()
+                    && time_ms < event.time_ms
+                {
+                    history.push(PointerSample { x, y, time_ms });
+                }
+            }
+            host.link.post(Command::PointerMoves { event, history });
+            return;
+        }
+    }
+    host.link.post(Command::Pointer(event));
 }
 
 #[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]

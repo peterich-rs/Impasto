@@ -1,5 +1,5 @@
 import { View as HostView, Stack as HostStack, Scroll as HostScroll } from "@impasto/solid-renderer/host";
-import { createTrackedEffect, createSignal, onCleanup } from "solid-js";
+import { createTrackedEffect, createSignal, onCleanup, untrack } from "solid-js";
 import {
   Text,
   bindNodeRef,
@@ -93,7 +93,7 @@ export function FieldShell(props: FieldProps): NodeHandle {
       return scene.textCommand(id, name, extra, recordUndo);
     },
     onChange: (value) => props.onChange?.(value),
-    validate: props.validate,
+    validate: (value) => props.validate?.(value),
     maxLength: () => props.maxLength,
     focus: () => {
       if (node !== 0) {
@@ -105,7 +105,7 @@ export function FieldShell(props: FieldProps): NodeHandle {
     },
     allowChange: () => !frozen(),
   });
-  props.controller?.(controller);
+  untrack(() => props.controller?.(controller));
   createTrackedEffect(() => {
     const id = leaf();
     if (id !== 0) {

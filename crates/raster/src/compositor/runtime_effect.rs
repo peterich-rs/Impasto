@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytemuck::Zeroable;
 use engine::scene::{BACKDROP_TEXTURE, MAX_SHADER_TEXTURES, ShaderProgramId};
 
-use super::{Attachment, Coverage, Frame, Image, PassBinding, RuntimeBinding, pipelines};
+use super::{Coverage, DrawPipeline, Frame, Image, pipelines};
 use crate::Status;
 use crate::arena::Extra;
 use crate::compiler::{Affine, PictureBounds};
@@ -69,7 +69,7 @@ impl Frame<'_> {
             }
         }
         let compositor = &mut self.compositor;
-        let mut views = std::array::from_fn(|_| Attachment::Physical(compositor.white.clone()));
+        let mut views = std::array::from_fn(|_| compositor.white.clone());
         let mut backdrops = [false; MAX_SHADER_TEXTURES];
         for (index, source) in textures.iter().take(MAX_SHADER_TEXTURES).enumerate() {
             if source.as_ref() == BACKDROP_TEXTURE {
@@ -82,12 +82,12 @@ impl Frame<'_> {
             } else if let Some(image) = self.scene.textures.get(source)
                 && image.nv12().is_none()
             {
-                views[index] = Attachment::Physical(image.view().clone());
+                views[index] = image.view().clone();
                 params.mappings[index] = [0.0, 0.0, 1.0, 1.0];
                 params.sample_modes[index] = if image.premultiplied_srgb { 2 } else { 1 };
             }
         }
-        let material = PassBinding::Runtime(Box::new(RuntimeBinding { views, backdrops }));
+        let material = self.runtime_texture_group(views, backdrops);
         let time = if program.animated {
             self.compositor.effect_seconds
         } else {
@@ -100,17 +100,14 @@ impl Frame<'_> {
 
         // Normal draws share the enclosing render pass. During a capture the
         // effect gets timestamp boundaries so its cost can be attributed.
-        let measuring = self.capture.is_some();
+        let measuring = self.capture.is_some() && !(self.late_acquire && target.view == self.root);
         if measuring {
             self.flush_target(&target.view);
         }
         self.read_mask(target, clip);
-        if let Some(backdrop) = &backdrop {
-            self.pending_pass(target).read(backdrop);
-        }
         self.record(
             target,
-            pipeline,
+            DrawPipeline::Runtime(pipeline),
             globals,
             material,
             Some(mask),

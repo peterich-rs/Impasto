@@ -1,8 +1,9 @@
 import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
-import { createRenderEffect, createSignal, onCleanup } from "solid-js";
+import { createRenderEffect, createSignal, onCleanup, useContext } from "solid-js";
 import {
   directionFor,
   scene,
+  SubtreeVisibleContext,
   overlayParent,
   removeNode,
   restoreFocus,
@@ -35,6 +36,7 @@ export function Dialog(props: DialogProps): NodeHandle {
     fontWeight: theme().weight.emphasis, writingDirection: directionFor(theme().locale),
   }));
   const panelRef = createNodeRef(() => props.ref);
+  const visible = useContext(SubtreeVisibleContext);
   let placeholder = 0;
   const [contentNode, setContentNode] = createSignal(0);
   let layer: Layer | null = null;
@@ -244,8 +246,15 @@ export function Dialog(props: DialogProps): NodeHandle {
     }
   }
   createRenderEffect(
-    () => ({ open: props.open, mounted: contentNode() !== 0 }),
-    ({ open, mounted }) => { if (mounted) sync(open); },
+    () => ({ open: props.open, mounted: contentNode() !== 0, visible: visible() }),
+    ({ open, mounted, visible }) => {
+      if (!visible) {
+        epoch += 1;
+        closeLayer();
+      } else if (mounted) {
+        sync(open);
+      }
+    },
   );
   onCleanup(closeLayer);
   return (
@@ -253,22 +262,8 @@ export function Dialog(props: DialogProps): NodeHandle {
       ref={(node) => {
         if (node === null) return;
         placeholder = node;
-        scene.patchStyle(node, {
-          minWidth: 0,
-          minHeight: 0,
-        });
-        scene.patchStyle(node, {
-          maxWidth: 0,
-          maxHeight: 0,
-        });
       }}
-      style={{
-        overflow: "clip",
-        minWidth: 0,
-        minHeight: 0,
-        maxWidth: 0,
-        maxHeight: 0,
-      }}
+      style={{ display: "none" }}
     >
       <HostView ref={(node) => setContentNode(node ?? 0)}>{props.children}</HostView>
     </HostStack>

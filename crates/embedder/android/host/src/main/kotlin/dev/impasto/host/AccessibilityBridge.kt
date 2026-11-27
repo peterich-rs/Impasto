@@ -58,15 +58,15 @@ internal class AccessibilityBridge(
     fun update(
         ids: LongArray, roles: IntArray, labels: Array<String>, values: Array<String>,
         flags: IntArray, actions: IntArray, selection: IntArray, scroll: FloatArray, descriptions: Array<String>,
-        parents: LongArray, bounds: FloatArray,
+        parents: LongArray, bounds: FloatArray, reset: Boolean,
     ) {
         if (!listening || manager?.isEnabled != true) return
         val previous = nodes
-        val nextIds = ids.associateWith { this.ids[it] ?: nextId++ }
-        val nextNodes = LinkedHashMap<Int, Node>(ids.size)
+        val nextIds = if (reset) ids.associateWith { this.ids[it] ?: nextId++ } else this.ids
+        val nextNodes = if (reset) LinkedHashMap(ids.size) else LinkedHashMap(previous)
         val nextChildren = LinkedHashMap<Int, MutableList<Int>>()
         for (index in ids.indices) {
-            val id = nextIds.getValue(ids[index])
+            val id = nextIds[ids[index]] ?: continue
             val parent = nextIds[parents[index]] ?: View.NO_ID
             val b = index * 4
             nextNodes[id] = Node(
@@ -75,7 +75,7 @@ internal class AccessibilityBridge(
                 descriptions[index], bounds[b], bounds[b + 1], bounds[b + 2],
                 bounds[b + 3], scroll[b], scroll[b + 1], scroll[b + 2], scroll[b + 3],
             )
-            nextChildren.getOrPut(parent, ::mutableListOf).add(id)
+            if (reset) nextChildren.getOrPut(parent, ::mutableListOf).add(id)
         }
         focus?.takeUnless(nextNodes::containsKey)?.let {
             send(it, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED)
@@ -85,13 +85,15 @@ internal class AccessibilityBridge(
             send(it, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
             hovered = null
         }
-        val structureChanged = children != nextChildren
+        val structureChanged = reset && children != nextChildren
         this.ids = nextIds
         nodes = nextNodes
-        children = nextChildren
+        if (reset) children = nextChildren
         if (structureChanged) contentChanged(View.NO_ID, AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE)
         if (nextNodes.isEmpty()) return
-        for ((id, node) in nextNodes) {
+        val changedIds = if (reset) nextNodes.keys else ids.asSequence().mapNotNull { nextIds[it] }.toList()
+        for (id in changedIds) {
+            val node = nextNodes[id] ?: continue
             val before = previous[id]
             if (node.flags and FOCUSED != 0 && (before?.flags ?: 0) and FOCUSED == 0) {
                 send(id, AccessibilityEvent.TYPE_VIEW_FOCUSED)

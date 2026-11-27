@@ -11,18 +11,23 @@ from pathlib import Path
 from perfetto.trace_processor import TraceProcessor
 
 FRAME_SQL = """
-WITH ui AS (
-  SELECT f.*,
+WITH tracked AS (
+  SELECT tt.id, t.upid, COALESCE(p.name, p.cmdline) AS process_name FROM thread_track tt
+  JOIN thread t USING (utid) LEFT JOIN process p USING (upid)
+), ui AS (
+  SELECT f.*, a.upid, a.process_name,
     (SELECT SUBSTR(m.name, 18, INSTR(SUBSTR(m.name, 18) || ' ', ' ') - 1)
       FROM slice m WHERE m.parent_id = f.id AND m.name GLOB 'Impasto frame id=*' LIMIT 1) AS frame_number
-  FROM slice f WHERE f.name = 'Impasto frame' AND f.dur > 0
+  FROM slice f LEFT JOIN tracked a ON a.id = f.track_id
+  WHERE f.name = 'Impasto frame' AND f.dur > 0
 ), raster AS (
-  SELECT r.*,
+  SELECT r.*, a.upid,
     (SELECT SUBSTR(m.name, 19)
       FROM slice m WHERE m.parent_id = r.id AND m.name GLOB 'Impasto raster id=*' LIMIT 1) AS frame_number
-  FROM slice r WHERE r.name = 'Impasto raster' AND r.dur > 0
+  FROM slice r LEFT JOIN tracked a ON a.id = r.track_id
+  WHERE r.name = 'Impasto raster' AND r.dur > 0
 )
-SELECT f.ts, f.dur, f.track_id, f.id, r.ts AS raster_ts, r.dur AS raster_dur,
+SELECT f.ts, f.dur, f.track_id, f.id, f.upid, f.process_name, r.ts AS raster_ts, r.dur AS raster_dur,
   r.track_id AS raster_track,
   (SELECT MIN(p.ts) FROM slice p WHERE p.parent_id = f.id AND p.name = 'Impasto input') AS input_ts,
   EXISTS(SELECT 1 FROM slice p WHERE p.parent_id = COALESCE(r.id, f.id) AND p.name = 'Impasto submit') AS install,
@@ -31,7 +36,7 @@ SELECT f.ts, f.dur, f.track_id, f.id, r.ts AS raster_ts, r.dur AS raster_dur,
     WHERE q.name = 'queueBuffer' AND k.name IN ('QueuePresentKHR', 'eglSwapBuffers', 'Impasto GLES draw and swap')
       AND q.track_id = COALESCE(r.track_id, f.track_id)
       AND q.ts BETWEEN COALESCE(r.ts, f.ts) AND COALESCE(r.ts + r.dur, f.ts + f.dur)) AS queued
-FROM ui f LEFT JOIN raster r ON f.frame_number = r.frame_number
+FROM ui f LEFT JOIN raster r ON f.frame_number = r.frame_number AND f.upid IS r.upid
 ORDER BY f.ts
 """
 CLOCK_SQL = """
@@ -87,6 +92,7 @@ def distribution(samples, budget_ns=None):
     }
     if budget_ns:
         stats["over_budget_percent"] = round(100 * sum(x > budget_ns for x in ordered) / len(ordered), 2)
+        stats["over_two_periods_percent"] = round(100 * sum(x > 2 * budget_ns for x in ordered) / len(ordered), 2)
     return stats
 
 
@@ -158,18 +164,34 @@ def flutter_report(directory, budget):
     }
 
 
-def load(path):
+def load(path, app_id):
     with TraceProcessor(trace=str(path)) as processor:
         frames = list(processor.query(FRAME_SQL))
         clocks = list(processor.query(CLOCK_SQL))
         markers = list(processor.query("""
-          SELECT ts, dur, name, track_id FROM slice
-          WHERE name GLOB 'Impasto *' OR name GLOB 'deliverInputEvent src=0x1002 eventTimeNano=*'
-            OR name = 'launching: dev.impasto.host.profile'
-          ORDER BY ts
+          SELECT s.ts, s.dur, s.name, s.track_id, t.upid FROM slice s
+          LEFT JOIN thread_track tt ON tt.id = s.track_id LEFT JOIN thread t USING (utid)
+          WHERE s.name GLOB 'Impasto *' OR s.name GLOB 'deliverInputEvent src=0x1002 eventTimeNano=*'
+            OR s.name GLOB 'launching: *'
+          ORDER BY s.ts
         """))
+    if app_id:
+        matching = [f for f in frames if f.process_name == app_id or (f.process_name or "").startswith(app_id + ":")]
+        # A cold-start capture can label the app before its process is named.
+        # Require its package launch event and an unambiguous frame stream.
+        if not matching and len({f.upid for f in frames}) == 1:
+            launched = any(marker.name == f"launching: {app_id}" for marker in markers)
+            if all(
+                not f.process_name
+                or (launched and f.process_name in {"zygote", "zygote64", "<pre-initialized>"})
+                for f in frames
+            ):
+                matching = frames
+        frames = matching
     if not frames:
         raise ValueError(f"{path} has no Impasto frames")
+    processes = {f.upid for f in frames if f.upid is not None}
+    package_names = {app_id} if app_id else {f.process_name for f in frames}
     begin = frames[0].ts
     end = max(
         max(frame.ts + frame.dur, (frame.raster_ts or 0) + (frame.raster_dur or 0))
@@ -185,6 +207,7 @@ def load(path):
     counts = Counter()
     chart = Counter()
     chart_markers = {}
+    fixture_canvas = None
     frame_events = defaultdict(dict)
     starts = [frame.ts for frame in frames]
     raster_frames = sorted(
@@ -208,9 +231,13 @@ def load(path):
 
     launch = None
     for marker in markers:
-        if marker.name == 'launching: dev.impasto.host.profile':
-            launch = marker.ts
-        elif marker.name.startswith("deliverInputEvent src=") and offset is not None:
+        if marker.name.startswith("launching: "):
+            if marker.name.removeprefix("launching: ") in package_names and marker.ts <= begin:
+                launch = marker.ts
+            continue
+        if processes and marker.upid not in processes:
+            continue
+        if marker.name.startswith("deliverInputEvent src=") and offset is not None:
             match = re.search(r"eventTimeNano=(\d+)", marker.name)
             if match:
                 deliveries.append((marker.ts, int(match[1]) + offset))
@@ -222,6 +249,8 @@ def load(path):
                 chart[match[1]] += 1
                 chart_markers.setdefault(match[1], marker.ts)
         elif marker.name in MARKS and marker.dur > 0:
+            if marker.name == "Impasto Canvas draw" and fixture_canvas is None:
+                fixture_canvas = marker.ts
             phases[marker.name].append(marker.dur)
             frame = containing_frame(marker)
             if frame is not None and frame.present:
@@ -265,17 +294,38 @@ def load(path):
     scroll_start_delays = []
     previous_scroll_present = None
     diagnostics = defaultdict(list)
+    case = path.stem.rsplit("-", 1)[0]
+    drag_ranges = []
+    if case == "fixture-list":
+        # adb sends a sequence of motion samples during each scripted swipe.
+        # Keep consecutive samples together and exclude idle fixture updates.
+        motion = []
+        for delivery, _ in deliveries:
+            if motion and delivery - motion[-1] > 80_000_000:
+                if len(motion) >= 8:
+                    drag_ranges.append((motion[0], motion[-1]))
+                motion.clear()
+            motion.append(delivery)
+        if len(motion) >= 8:
+            drag_ranges.append((motion[0], motion[-1]))
+    previous_range = None
     for frame in frames:
         if not frame.present:
             continue
         events = frame_events.get(frame.id, {})
         for category, fields in events.items():
             diagnostics[category].append(fields)
-        if "scroll" not in events:
+        drag = next((i for i, (start, stop) in enumerate(drag_ranges) if start <= frame.ts <= stop), None)
+        if "scroll" not in events and drag is None:
             previous_scroll_present = None
             continue
+        if drag != previous_range:
+            previous_scroll_present = None
+        previous_range = drag
         work = events.get("work", {})
-        if int(work.get("roots", 0)):
+        if "scroll" not in events:
+            group = "during_fixture_swipe"
+        elif int(work.get("roots", 0)):
             group = "root_layout"
         elif int(work.get("draw", 0)):
             group = "canvas_without_root"
@@ -295,14 +345,15 @@ def load(path):
                 scroll_intervals.append(interval)
         previous_scroll_present = actual_ts
 
-    # The first screen milestone is the first stock sparkline on the surface.
-    # Entry is the first chart frame after the replay taps 00700.
     first_content = []
-    case = path.stem.rsplit("-", 1)[0]
+    if case in {"startup", "fixture-startup"} and launch is not None and presented_frames:
+        first_content.append(min(presented_frames.values()) - launch)
     if case == "startup":
         start, marker = launch, chart_markers.get("36")
     elif case == "detail-entry" and deliveries:
         start, marker = deliveries[0][1], chart_markers.get("204")
+    elif case == "fixture-detail" and deliveries:
+        start, marker = deliveries[0][1], fixture_canvas
     else:
         start, marker = None, None
     if start is not None and marker is not None:
@@ -372,6 +423,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--hz", type=int, choices=(60, 90, 120), required=True)
+    parser.add_argument("--app-id", help="application process to read; defaults to the replay metadata")
     parser.add_argument("--reference", choices=("impasto", "flutter"), default="impasto")
     args = parser.parse_args()
     budget = round(1e9 / args.hz)
@@ -382,9 +434,13 @@ def main():
         print(json.dumps(report, indent=2))
         return
     cases = defaultdict(list)
+    metadata = args.directory / "environment.txt"
+    app_id = args.app_id
+    if not app_id and metadata.is_file():
+        app_id = next((line[4:] for line in metadata.read_text().splitlines() if line.startswith("app=")), None)
     for path in sorted(args.directory.glob("*.perfetto-trace")):
         case = path.stem.rsplit("-", 1)[0]
-        cases[case].append(load(path))
+        cases[case].append(load(path, app_id))
     if not cases:
         parser.error("no replay traces found")
     report = {}
@@ -409,7 +465,7 @@ def main():
             "submitted": distribution([x for run in runs for x in run["frames"]], budget),
             "new_layer_trees": sum(run["installs"] for run in runs),
             "skipped": sum(run["skipped"] for run in runs),
-            "actual_presentation_intervals": distribution([x for run in runs for x in run["intervals"]]),
+            "actual_presentation_intervals": distribution([x for run in runs for x in run["intervals"]], budget),
             "input_to_presentation": distribution([x for run in runs for x in run["latency"]]),
             "first_content_visible": distribution([x for run in runs for x in run["first_content"]]),
             "queued_buffers": queued,
@@ -428,7 +484,7 @@ def main():
             report[case]["scrolling"] = {
                 "frames": distribution([ns for group in scroll_frames.values() for ns in group], budget),
                 "by_work": {name: distribution(group, budget) for name, group in sorted(scroll_frames.items())},
-                "present_intervals": distribution(scroll_intervals),
+                "present_intervals": distribution(scroll_intervals, budget),
                 "vsync_to_render_start": distribution([ns for run in runs for ns in run["scroll_start_delays"]]),
             }
             measured = report[case]["refresh_intervals_ns"]

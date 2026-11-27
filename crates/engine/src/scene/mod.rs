@@ -26,7 +26,7 @@ pub use command::{Command, DrawList, RectPaint};
 pub use compositor_track::{
     CompositorBlockReason, CompositorEligibility, CompositorProp, CompositorSample,
     CompositorSnapshot, CompositorTrack, CompositorTrackId, CompositorTransform,
-    apply_compositor_samples,
+    apply_compositor_samples, compositor_layer_samples,
 };
 pub(crate) use compositor_track::{compositor_alpha, list_scroll_prediction};
 pub use corners::CornerShape;

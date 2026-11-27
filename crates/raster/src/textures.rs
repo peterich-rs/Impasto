@@ -30,7 +30,6 @@ pub struct GpuImage {
     pub revision: u64,
     /// Producer pixels are premultiplied in sRGB before upload.
     pub(crate) premultiplied_srgb: bool,
-    pub(crate) opaque: bool,
     pub upload: ImageUploadStats,
 }
 
@@ -63,7 +62,6 @@ impl GpuImage {
             device,
             revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
             premultiplied_srgb: false,
-            opaque: false,
             upload: ImageUploadStats::default(),
         }
     }
@@ -158,7 +156,6 @@ impl GpuImage {
                 device,
                 revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
                 premultiplied_srgb: false,
-                opaque: rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255),
                 upload,
             },
             conversion,
@@ -180,7 +177,6 @@ impl GpuImage {
             device,
             revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
             premultiplied_srgb: true,
-            opaque: false,
             upload: ImageUploadStats::default(),
         }
     }
@@ -238,7 +234,6 @@ impl GpuImage {
         Ok(Self {
             view: Arc::new(view),
             premultiplied_srgb: nv12.is_none() && !texture.format().is_srgb(),
-            opaque: false,
             nv12,
             material: Arc::default(),
             width: size.width,
@@ -311,7 +306,6 @@ struct Cached {
 
 pub(crate) struct EvictedImage {
     pub view: wgpu::TextureView,
-    pub revision: u64,
 }
 
 impl Cached {
@@ -330,7 +324,6 @@ impl Cached {
     fn eviction(&self) -> EvictedImage {
         EvictedImage {
             view: self.image.view().clone(),
-            revision: self.image.revision,
         }
     }
 }
@@ -357,11 +350,7 @@ impl TextureStore {
             staged: HashMap::new(),
             generation: 0,
             attempt: 0,
-            inactive_budget: std::env::var("IMPASTO_IMAGE_CACHE_MB")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(DEFAULT_INACTIVE_MIB)
-                .saturating_mul(MIB),
+            inactive_budget: DEFAULT_INACTIVE_MIB * MIB,
             evicted: Vec::new(),
             device,
             invalidated: false,
@@ -379,12 +368,6 @@ impl TextureStore {
         } else {
             self.active.get(source).map(|cached| &cached.image)
         }
-    }
-
-    pub(crate) fn active_images(&self) -> impl Iterator<Item = (&str, &GpuImage)> {
-        self.active.iter().filter_map(|(source, cached)| {
-            (cached.used == self.generation).then_some((source.as_ref(), &cached.image))
-        })
     }
 
     pub(crate) fn set_gpu_views(&mut self, views: HashMap<Arc<str>, GpuImage>) {

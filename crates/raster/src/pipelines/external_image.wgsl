@@ -7,7 +7,6 @@ struct Nv12Conversion {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    fragment_view(in.state);
     let y = textureSampleLevel(image_tex, image_sampler, in.uv, 0.0).r;
     let uv = textureSampleLevel(chroma_plane, image_sampler, in.uv + conversion.chroma_offset.xy, 0.0).rg;
     let rgb = (conversion.matrix * vec4(y, uv, 1.0)).rgb;

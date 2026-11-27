@@ -4,6 +4,7 @@
 //! resolves each face ID under a short lock and scales the retained blob locally.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use fontique::{Blob, FamilyId, FontInfoOverride, GenericFamily};
@@ -33,19 +34,24 @@ struct Face {
 #[derive(Default)]
 struct Library {
     faces: HashMap<FontFaceId, Face>,
-    /// Fontique blob id and face index to the library face.
-    by_blob: HashMap<(u64, u32), FontFaceId>,
+    /// Borrowed identity; each entry is backed by the corresponding live Face.
+    by_blob: HashMap<(BlobAddress, u32), FontFaceId>,
     /// Registered family names, most recent first.
     families: Vec<(String, Blob<u8>)>,
-    /// Bumped on every accepted registration.
-    revision: u64,
     next_id: u64,
 }
 
 /// Shared, clonable font library.
 #[derive(Clone)]
 pub struct FontLibrary {
-    inner: Arc<Mutex<Library>>,
+    inner: Arc<SharedLibrary>,
+}
+
+#[derive(Default)]
+struct SharedLibrary {
+    data: Mutex<Library>,
+    registration: Mutex<()>,
+    revision: AtomicU64,
 }
 
 impl std::fmt::Debug for FontLibrary {
@@ -53,7 +59,7 @@ impl std::fmt::Debug for FontLibrary {
         let library = self.lock();
         formatter
             .debug_struct("FontLibrary")
-            .field("revision", &library.revision)
+            .field("revision", &self.revision())
             .field("faces", &library.faces.len())
             .finish_non_exhaustive()
     }
@@ -63,12 +69,13 @@ impl FontLibrary {
     /// An empty library. System fallbacks still resolve through Fontique.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Library::default())),
+            inner: Arc::new(SharedLibrary::default()),
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Library> {
         self.inner
+            .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -76,7 +83,7 @@ impl FontLibrary {
     /// Changes whenever a registration altered the family mapping. Shapers
     /// compare this to decide whether cached layouts are still valid.
     pub fn revision(&self) -> u64 {
-        self.lock().revision
+        self.inner.revision.load(Ordering::Acquire)
     }
 
     /// Bytes and collection index of one face, read under the library lock.
@@ -84,12 +91,14 @@ impl FontLibrary {
     /// anymore. The raster copies what it needs and releases the lock before
     /// scaling.
     pub fn with_face<R>(&self, id: &FontFaceId, read: impl FnOnce(&[u8], u32) -> R) -> Option<R> {
-        let (bytes, index) = {
-            let library = self.lock();
-            let face = library.faces.get(id)?;
-            (face.bytes.clone(), face.index)
-        };
+        let (bytes, index) = self.snapshot(id)?;
         Some(read(bytes.data(), index))
+    }
+
+    pub(crate) fn snapshot(&self, id: &FontFaceId) -> Option<(Blob<u8>, u32)> {
+        let library = self.lock();
+        let face = library.faces.get(id)?;
+        Some((face.bytes.clone(), face.index))
     }
 
     /// True while the library still holds bytes for `id`.
@@ -100,7 +109,7 @@ impl FontLibrary {
     /// Identity of a face Fontique selected, adopting it when it is not a
     /// registered face. Returns a strong ID the caller keeps in a shaped run.
     pub fn resolve(&self, data: &parley::FontData) -> Arc<FontFaceId> {
-        let key = (blob_id(data.data.data()), data.index);
+        let key = (BlobAddress::new(&data.data), data.index);
         let mut library = self.lock();
         if let Some(id) = library.by_blob.get(&key).copied()
             && let Some(face) = library.faces.get_mut(&id)
@@ -139,6 +148,11 @@ impl FontLibrary {
         }
         // Fontique merges faces when they share a family. Rebuild the small
         // set of app registrations to replace the entire old family.
+        let _registration = self
+            .inner
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut families = self.lock().families.clone();
         families.retain(|(name, _)| name != family);
         for (name, bytes) in &families {
@@ -160,7 +174,7 @@ impl FontLibrary {
             .map(|info| library.insert(blob.clone(), info.index(), Some(family)))
             .collect();
         library.families = families;
-        library.revision = library.revision.wrapping_add(1);
+        self.inner.revision.fetch_add(1, Ordering::Release);
         Ok(ids)
     }
 
@@ -199,7 +213,7 @@ impl Library {
     fn insert(&mut self, bytes: Blob<u8>, index: u32, family: Option<&str>) -> Arc<FontFaceId> {
         let id = Arc::new(FontFaceId(self.next_id));
         self.next_id = self.next_id.wrapping_add(1);
-        self.by_blob.insert((blob_id(bytes.data()), index), *id);
+        self.by_blob.insert((BlobAddress::new(&bytes), index), *id);
         self.faces.insert(
             *id,
             Face {
@@ -260,12 +274,21 @@ impl AsRef<[u8]> for Bytes {
     }
 }
 
-/// Identity of font bytes: the address of the first byte. Fontique hands out
-/// fresh `Blob` handles for the same mapped file, so its own id is not stable
-/// across a registration and a later `FontInfo::load`. The data address is,
-/// for as long as any blob for that file is alive, and the library keeps one.
-fn blob_id(bytes: &[u8]) -> u64 {
-    bytes.as_ptr() as usize as u64
+// Fontique can issue new handles for the same allocation. The library only
+// compares addresses while holding the map lock and while both blobs are alive.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct BlobAddress {
+    start: usize,
+    len: usize,
+}
+
+impl BlobAddress {
+    fn new(blob: &Blob<u8>) -> Self {
+        Self {
+            start: blob.data().as_ptr() as usize,
+            len: blob.data().len(),
+        }
+    }
 }
 
 /// Cache and counters the UI shaper reports to the host.
@@ -279,6 +302,12 @@ pub struct ShapeStats {
     /// Hit and miss counts of the per-width frozen result.
     pub paint_hit: u32,
     pub paint_miss: u32,
+    /// Individual entries evicted to enforce the cache budgets.
+    pub evicted: u32,
+    /// Entries discarded after changing the font mapping.
+    pub registration_invalidated: u32,
+    /// Shape misses grouped by UTF-8 length: up to 64, 256, 4096, and larger.
+    pub size_buckets: [u32; 4],
 }
 
 impl ShapeStats {

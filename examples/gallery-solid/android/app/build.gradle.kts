@@ -95,7 +95,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = config.getProperty("applicationId", "dev.impasto.host")
+        applicationId = config.getProperty("applicationId", "dev.impasto.gallery")
         versionName = config.getProperty("versionName", "0.1.0")
         versionCode = config.getProperty("versionCode", "1").toInt()
         manifestPlaceholders["impastoAppLabel"] = config.getProperty("appName", "Impasto")
@@ -125,10 +125,7 @@ android {
                 else -> null
             }
             ndk.debugSymbolLevel = "FULL"
-            if (profileGallery) {
-                applicationIdSuffix = ".profile"
-                isProfileable = true
-            }
+            if (profileGallery) isProfileable = true
         }
     }
 
@@ -180,13 +177,12 @@ androidComponents {
             return@onVariants
         }
         val assets = tasks.register<StageApkAssets>("stageApkAssets$capital") {
-            quotes.set(repoRoot.resolve("examples/gallery-solid/dist/quotes.js"))
+            scriptFile.set(rootProject.file("../dist/quotes.js"))
             font.set(repoRoot.resolve("crates/embedder/android/assets/fonts/Sans.ttf"))
             logo.set(repoRoot.resolve("crates/embedder/macos/assets/logo.png"))
             fontNotice.set(repoRoot.resolve("crates/embedder/android/assets/fonts/NOTICE"))
             license.set(repoRoot.resolve("LICENSE"))
             notice.set(repoRoot.resolve("NOTICE"))
-            threadTopology.set(providers.gradleProperty("impastoThreadTopology").orElse(""))
         }
         variant.sources.assets?.addGeneratedSourceDirectory(assets, StageApkAssets::output)
     }
@@ -334,7 +330,7 @@ abstract class CargoImpasto : DefaultTask() {
 abstract class StageApkAssets : DefaultTask() {
     @get:InputFile
     @get:PathSensitive(PathSensitivity.NONE)
-    abstract val quotes: RegularFileProperty
+    abstract val scriptFile: RegularFileProperty
 
     @get:InputFile
     @get:PathSensitive(PathSensitivity.NONE)
@@ -357,16 +353,15 @@ abstract class StageApkAssets : DefaultTask() {
     abstract val notice: RegularFileProperty
 
     @get:Input
-    abstract val threadTopology: Property<String>
 
     @get:OutputDirectory
     abstract val output: DirectoryProperty
 
     @TaskAction
     fun stage() {
-        val script = quotes.get().asFile
+        val script = scriptFile.get().asFile
         if (!script.isFile) {
-            throw GradleException("missing ${script.path}; run just gallery-dist")
+            throw GradleException("missing app script ${script.path}")
         }
         val root = output.get().asFile
         val fonts = root.resolve("fonts")
@@ -378,13 +373,7 @@ abstract class StageApkAssets : DefaultTask() {
         license.get().asFile.copyTo(root.resolve("LICENSE"), overwrite = true)
         notice.get().asFile.copyTo(root.resolve("NOTICE"), overwrite = true)
         logo.get().asFile.copyTo(images.resolve("logo.png"), overwrite = true)
-        script.copyTo(root.resolve("quotes.js"), overwrite = true)
-        val topology = threadTopology.get()
-        val config = root.resolve("app.thread_topology")
-        when (topology) {
-            "" -> config.delete()
-            "shared", "split", "platform-ui" -> config.writeText(topology)
-            else -> throw GradleException("Unknown Impasto thread topology: $topology")
-        }
+        script.copyTo(root.resolve("app.js"), overwrite = true)
+
     }
 }

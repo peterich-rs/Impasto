@@ -1,17 +1,11 @@
 @group(0) @binding(1) var<uniform> stops: array<vec4<f32>, 512>;
-@group(0) @binding(3) var gradient_ramps: texture_2d_array<f32>;
-override use_gradient_ramps: bool = false;
 
 // Stops are stored in pairs: even = premultiplied color, odd = (offset, 0, 0, 0).
-fn sample_gradient(t: f32, first: u32, count: u32, ramp: u32, ramp_sampler: sampler) -> vec4<f32> {
+fn sample_gradient(t: f32, first: u32, count: u32) -> vec4<f32> {
     if (count == 0u) {
         return vec4<f32>(0.0);
     }
     let clamped = clamp(t, 0.0, 1.0);
-    if use_gradient_ramps && ramp > 0u {
-        let uv = vec2((clamped * 255.0 + 0.5) / 256.0, 0.5);
-        return textureSampleLevel(gradient_ramps, ramp_sampler, uv, i32(ramp - 1u), 0.0);
-    }
     let last = count - 1u;
     var i = 0u;
     loop {
@@ -63,7 +57,7 @@ fn inline_gradient(p: vec2<f32>, geometry: vec4<f32>, start: vec4<f32>, end: vec
 }
 
 fn gradient_color(
-    p: vec2<f32>, kind: u32, first: u32, count: u32, geometry: vec4<f32>, radii: vec2<f32>, ramp: u32, ramp_sampler: sampler,
+    p: vec2<f32>, kind: u32, first: u32, count: u32, geometry: vec4<f32>, radii: vec2<f32>,
 ) -> vec4<f32> {
     var t = 0.0;
     if (kind == 1u) {
@@ -72,7 +66,7 @@ fn gradient_color(
         t = length(p - center) / max(radius, 1e-6);
     } else if (kind == 3u) {
         let conical = conical_position(p, geometry, radii);
-        return sample_gradient(conical.x, first, count, ramp, ramp_sampler) * conical.y;
+        return sample_gradient(conical.x, first, count) * conical.y;
     } else if (kind == 2u) {
         let center = geometry.xy;
         let start = geometry.z;
@@ -83,7 +77,7 @@ fn gradient_color(
     } else {
         t = linear_gradient_position(p, geometry);
     }
-    return sample_gradient(t, first, count, ramp, ramp_sampler);
+    return sample_gradient(t, first, count);
 }
 
 
@@ -102,10 +96,10 @@ fn load_paint(index: u32) -> PaintExtra {
     return paint[index];
 }
 
-fn paint_gradient(data: PaintExtra, p: vec2<f32>, color: vec4<f32>, ramp_sampler: sampler) -> vec4<f32> {
+fn paint_gradient(data: PaintExtra, p: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
     let indices = vec3<u32>(data.gradient.xyz);
     if indices.x == 4u {
         return inline_gradient(p, data.geometry, color, data.shadow);
     }
-    return gradient_color(p, indices.x, indices.y, indices.z, data.geometry, data.shadow.xy, u32(data.gradient.w), ramp_sampler);
+    return gradient_color(p, indices.x, indices.y, indices.z, data.geometry, data.shadow.xy);
 }

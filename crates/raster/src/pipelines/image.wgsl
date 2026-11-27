@@ -30,7 +30,6 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: ImageVertex) -> VertexOut {
     let scene = data.rect.xy + unit * data.rect.zw;
     var out: VertexOut;
     let state = data.info.y;
-    vertex_view(state);
     out.position = view.transform * vec4<f32>(scene, 0.0, 1.0);
     out.uv = mix(data.uv.xy, data.uv.zw, unit);
     out.color = data.color;
@@ -41,7 +40,6 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: ImageVertex) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    fragment_view(in.state);
     let data = in;
     let flags = data.info.x & 255u;
     let dx = dpdx(in.uv);

@@ -174,7 +174,7 @@ fn scroll_hit_uses_the_offset_and_stays_inside_the_viewport() -> Result<(), crat
         tree.pointer(event(Phase::Move, label_box.x + 1.0, painted_y + 12.0)),
         vec![
             Gesture::DragBegin(scroll),
-            Gesture::DragBy(scroll, 0.0, 11.0)
+            Gesture::DragBy(scroll, 0.0, 7.0)
         ]
     );
 

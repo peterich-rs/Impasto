@@ -1,6 +1,8 @@
 # 滚动与合成线程
 
-应用可以在同一个滚动容器上组合下表的 API。结构变更、输入事件和 JavaScript 回调由 UI 队列处理。Split 和 PlatformUi 拓扑允许 Raster 在 UI 空闲期间采样已安装的 LayerTree。
+应用可以在同一个滚动容器上组合下表的 API。结构变更、输入事件和 JavaScript 回调由 UI 队列处理。独立的 Raster 队列可以按显示时钟采样已安装的 LayerTree。
+
+指针事件在 UI 队列按顺序处理，按下以最新可用布局命中，抬手和取消沿已建立的手势路线交付。平台合并移动事件时只用最终位置更新滚动，中间采样用于估算速度。抬手时只考虑最近 120 ms 的采样。等待第二次点击或长按时，宿主按最早到期时间安排一次唤醒。
 
 | 选型 | API | 适用场景 |
 | --- | --- | --- |
@@ -39,7 +41,7 @@ const section = useScrollSegment(scroll, () => [180, 420, 860]);
 
 曲线的输入点严格递增，输出与输入一一对应。外推默认钳制到端点，数值曲线可用 `"extend"` 延伸首尾线段。旋转使用弧度，透明度使用 `0..1`，模糊使用逻辑点的标准差。颜色在预乘线性 RGBA 空间求值。规则拥有绑定期间的目标属性，释放规则后恢复普通样式。每个属性同时由一条规则驱动。控制器联动默认映射 Y，可选 `axis: "x"` 或 `"both"`。用函数参数可以表达非线性控制逻辑或多级滚动联动。
 
-`RefreshControl` 内置指示器用 overscroll 规则驱动。自定义指示器可使用 `ready()` 和 `busy()`，需要连续 `progress()` 时 JS 只在手势和回弹活跃期间采样。`NavigationBar` 接受 `scroll` 和 `scrollEffect="fade-backdrop"`。`Tabs` 接受一个水平 `pager` 控制器，以页面偏移驱动指示条。`Sheet` 默认带可下拉关闭的手柄，设置 `dragToDismiss={false}` 可隐藏。Sheet、Dialog 和默认路由转场在满足内容缓存条件时复用 GPU 快照。 [场景滚动契约](../crates/engine/src/scene/scroll.rs)
+`RefreshControl` 内置指示器用 overscroll 规则驱动。自定义指示器可使用 `ready()` 和 `busy()`，需要连续 `progress()` 时 JS 只在手势和回弹活跃期间采样。`NavigationBar` 接受 `scroll` 和 `scrollEffect="fade-backdrop"`。`Tabs` 接受一个水平 `pager` 控制器，以页面偏移驱动指示条。`Sheet` 默认带可下拉关闭的手柄，设置 `dragToDismiss={false}` 可隐藏。转场中需要透明度分组或毛玻璃的内容使用瞬态离屏纹理。 [场景滚动契约](../crates/engine/src/scene/scroll.rs)
 
 ## Gallery 业务页
 
@@ -47,22 +49,14 @@ const section = useScrollSegment(scroll, () => [180, 420, 860]);
 
 模拟行情使用单调时钟每 200 ms 推进并发布一次。唤醒超时会限制模拟时间增量。行情列表仅在分批发布行数据时监听帧，股票详情仅在分批挂载区块时监听帧。Raster 可以在这些 UI 工作之间接管惯性滚动。 [行情时钟](../examples/gallery-solid/src/state/quotes-provider.tsx)
 
+列表记录当前行 key 和行内偏移。空闲时，数据重排与高度校正以该位置为准。原行删除后，沿更新前的次序查找最近的存活行，并按新范围裁剪偏移。活动手势和显式滚动保持优先。
+
+Gallery 的 Tab 分支按最近使用顺序保留。非活动分支退出绘制、命中、语义和页面帧回调。应用可以通过 `usePageActive()` 暂停页面订阅。系统内存压力会释放非活动分支。
+
 ## 诊断与验收
 
-DevTools 性能页选中目标帧后，合成帧显示 Raster 托管和该帧的刷新率，回退帧显示阻断原因与可定位的节点。 `scroll_callback` 指向注册通用回调的滚动节点及其联动目标，`global_frame_hook` 指向活跃的逐帧 JavaScript 监听，`list_window_not_settled` 表示已挂载窗口还在测量或更新。普通输入、到期定时器和外部更新会唤醒 UI。UI 取消 Raster 的下一次回调，并回写最近完成呈现的位置。已经提交的 Raster 帧可以继续上屏。Android 主线程收到触摸时会预先注册 Choreographer 回调，手势期间 UI 到 Raster 的新提交按一帧在途限流。
+DevTools 性能页选中目标帧后，合成帧显示 Raster 托管和该帧的刷新率，回退帧显示阻断原因与可定位的节点。`scroll_callback` 指向注册通用回调的滚动节点及其联动目标，`global_frame_hook` 指向活跃的逐帧 JavaScript 监听，`list_window_not_settled` 表示已挂载窗口还在测量或更新。普通输入、到期定时器和外部更新会唤醒 UI。UI 按 FrameToken 取消 Raster 的下一次回调，并回写最近完成呈现的位置。已经提交的 Raster 帧可以继续上屏。Android 主线程收到触摸时会预先注册 Choreographer 回调。双帧提交队列满时，UI 仍处理本帧输入，并保存最新待提交的场景。
 
 惯性滚动、刷新指示器和吸顶项直接在 Gallery 自选列表上验证：拖动列表后观察 `compositor_frame` 的时间间隔，并区分阈值、预挂载和惯性尾段的主动降频。
 
-macOS 可用 `just host` 打开 Gallery。Android Profile 版用 Gradle 参数 `-PimpastoProfile=true -PimpastoThreadTopology=split` 构建。构建环境变量 `IMPASTO_SURFACE_LATENCY` 可指定交换链延迟提示值。用 `tools/android-frame-trace.sh OUTPUT dev.impasto.host.profile 6` 采样 Perfetto。像素回归测试 `declarative_scroll_bindings_render_identical_pixels_on_ui_and_raster` 在相同轨迹与时间戳上逐像素比较同一设备生成的两帧。
-
-### Pixel 9 Split 采样
-
-在 Pixel 9 的 Vulkan Profile 版上，每个深链冷启动并采集 5 秒。表里的 UI 帧只计首末合成帧之间的 `Impasto frame`。高速段 p95 取惯性降为 60 Hz 之前、同一段中相邻 Raster 帧的起始时间差。
-
-| 场景 | Raster 帧 | 合成区间内 UI 帧 | 高速段帧间隔 p95 |
-| --- | ---: | ---: | ---: |
-| 带下拉刷新的虚拟列表 | 241 | 7 | 8.846 ms |
-| 300 点返顶阈值 | 230 | 1 | 8.717 ms |
-| 视差、颜色和模糊 | 226 | 0 | 8.970 ms |
-
-阈值示例在一次 `compositor_threshold_handoff` 后进入 UI 帧，随后重新交给 Raster。虚拟列表记录到两次提前预唤醒。加入连续滚动回调的对照组有 0 帧 Raster 托管，Perfetto 记录到 `scroll_callback` 和滚动节点。三组高速段 p95 都超过 8.33 ms。macOS Metal 的轨迹逐像素对照通过，iOS 模拟器完成首帧冒烟测试。
+macOS 可用 `just host` 打开 Gallery。Gallery Android 产物的应用 ID 是 `dev.impasto.gallery`。框架独立验证壳使用 `dev.impasto.host` 和本地回放 fixture。Profile 版用 Gradle 参数 `-PimpastoProfile=true` 构建。构建环境变量 `IMPASTO_SURFACE_LATENCY` 可指定交换链延迟提示值。用 `tools/android-frame-trace.sh OUTPUT dev.impasto.gallery 6` 采样 Perfetto。像素回归测试 `declarative_scroll_bindings_render_identical_pixels_on_ui_and_raster` 在相同轨迹与时间戳上逐像素比较同一设备生成的两帧。

@@ -49,7 +49,7 @@ pub(crate) fn prepare(
         }
         let program = load_program(&root)?;
 
-        let launch = Launch::Session(Box::new(move |open, host| {
+        let factory: embedder::SessionFactory = Box::new(move |open, host| {
             let host = host.restrict(&enabled);
             match program {
                 Program::Source(bytes) => {
@@ -73,7 +73,9 @@ pub(crate) fn prepare(
                 engine::js::Error::Runtime => SessionError::Runtime,
                 engine::js::Error::Script(text) => SessionError::Script(text),
             })
-        }));
+        });
+        // SAFETY: The factory keeps the shaper, VM and log callback in the JS session.
+        let launch = unsafe { Launch::migrating(factory) };
 
         Ok(Bundle {
             launch,

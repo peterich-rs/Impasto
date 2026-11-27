@@ -65,8 +65,8 @@ impl Vsync for DisplayLink {
         self.backend().request_frame_with_rate(token, hint);
     }
 
-    fn cancel(&self) {
-        self.backend().cancel();
+    fn cancel_if_token(&self, token: FrameToken) {
+        self.backend().cancel_if_token(token);
     }
 }
 
@@ -189,12 +189,21 @@ impl Vsync for WindowClock {
         self.dispatch_update();
     }
 
-    fn cancel(&self) {
-        *self
-            .0
-            .pending
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+    fn cancel_if_token(&self, token: FrameToken) {
+        {
+            let mut pending = self
+                .0
+                .pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if pending
+                .as_ref()
+                .is_none_or(|(current, _)| *current != token)
+            {
+                return;
+            }
+            *pending = None;
+        }
         self.dispatch_update();
     }
 }
@@ -218,6 +227,7 @@ struct Callback {
 pub struct LegacyLink {
     link: CFRetained<CVDisplayLink>,
     callback: *mut Callback,
+    control: Mutex<()>,
 }
 
 #[allow(
@@ -268,6 +278,7 @@ impl LegacyLink {
             // SAFETY: `raw` is the +1 reference from a successful create and is not aliased.
             link: unsafe { CFRetained::from_raw(raw) },
             callback,
+            control: Mutex::default(),
         })
     }
 }
@@ -283,6 +294,10 @@ impl Vsync for LegacyLink {
     }
 
     fn request_frame(&self, token: FrameToken) {
+        let _control = self
+            .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // SAFETY: `callback` was allocated in `new` and is freed in `Drop` only after `stop`.
         let callback = unsafe { &*self.callback };
         *callback
@@ -295,13 +310,23 @@ impl Vsync for LegacyLink {
         let _ = self.link.start();
     }
 
-    fn cancel(&self) {
-        // SAFETY: `callback` was allocated in `new` and is freed in `Drop` only after `stop`.
-        let callback = unsafe { &*self.callback };
-        *callback
-            .token
+    fn cancel_if_token(&self, token: FrameToken) {
+        let _control = self
+            .control
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+            .unwrap_or_else(|error| error.into_inner());
+        {
+            // SAFETY: the callback box is owned by this link until Drop.
+            let callback = unsafe { &*self.callback };
+            let mut pending = callback
+                .token
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if *pending != Some(token) {
+                return;
+            }
+            *pending = None;
+        }
         if self.link.is_running() {
             let _ = self.link.stop();
         }

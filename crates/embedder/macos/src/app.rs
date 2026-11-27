@@ -340,6 +340,10 @@ impl ContentView {
     }
 
     fn post_outside(&self, event: &NSEvent) {
+        // AppKit keeps sending real window-relative positions during a drag.
+        if NSEvent::pressedMouseButtons() != 0 {
+            return;
+        }
         self.ivars().poster.post(Command::Pointer(PointerEvent {
             pointer: engine::input::PointerId(0),
             kind: engine::input::PointerKind::Mouse,
@@ -968,6 +972,7 @@ pub fn run(
     dump_list: bool,
     initial_url: Option<String>,
     open_url: Option<crate::OpenUrl>,
+    title: &str,
 ) -> Result<(), RunError> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Err(RunError::Window(anyhow::anyhow!(
@@ -995,7 +1000,7 @@ pub fn run(
     let diagnostics = modules
         .as_ref()
         .is_none_or(|enabled| enabled.iter().any(|name| name == "devtools"));
-    let embedder_launch = EmbedderLaunch::Session(Box::new(move |open, host| {
+    let factory: embedder::SessionFactory = Box::new(move |open, host| {
         let host = modules
             .as_ref()
             .map_or_else(|| host.clone(), |modules| host.clone().restrict(modules));
@@ -1017,7 +1022,9 @@ pub fn run(
                 SessionError::Script(text)
             }
         })
-    }));
+    });
+    // SAFETY: The factory keeps the shaper, VM and log callback in the JS session.
+    let embedder_launch = unsafe { EmbedderLaunch::migrating(factory) };
     let dump_for_surface = dump;
     let exit_for_surface = Arc::clone(&exit_code);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
@@ -1030,7 +1037,7 @@ pub fn run(
         std::fs::create_dir_all(&dir).ok()?;
         Some(dir)
     }
-    let link = embedder::start(Boot {
+    let boot = Boot {
         font_family: FONT_FAMILY.to_string(),
         launch: embedder_launch,
         services: Box::new(MacServices {
@@ -1055,8 +1062,6 @@ pub fn run(
             dispatch_main_after,
             || MainThreadMarker::new().is_some(),
         )),
-        thread_topology: embedder::ThreadTopology::configured()
-            .map_err(|error| RunError::Window(error.into()))?,
         launch_url: Arc::clone(&launch_url),
         open_raster: Box::new(|fonts| {
             raster::Rasterizer::create(raster::RasterOptions::default(), fonts)
@@ -1075,6 +1080,21 @@ pub fn run(
         devtools_source_map,
         inspect_dir,
         log_dir: log_directory(),
+    };
+    let startup_error = Arc::new(std::sync::Mutex::new(None));
+    let link = embedder::start_async(move || Ok(boot), {
+        let startup_error = Arc::clone(&startup_error);
+        move |result| {
+            if let Err(error) = result
+                && !matches!(error, BootError::Cancelled)
+            {
+                eprintln!("impasto: {error}");
+                *startup_error
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(error);
+                wake_main();
+            }
+        }
     })
     .map_err(RunError::Boot)?;
 
@@ -1103,7 +1123,7 @@ pub fn run(
         )
     };
     vsync.attach(&window, mtm);
-    window.setTitle(&NSString::from_str("Impasto Gallery"));
+    window.setTitle(&NSString::from_str(title));
     window.setAcceptsMouseMovedEvents(true);
     // SAFETY: `HostState` keeps this window retained until the process leaves `run`.
     unsafe { window.setReleasedWhenClosed(false) };
@@ -1138,6 +1158,13 @@ pub fn run(
     app.setDelegate(Some(ProtocolObject::from_ref(&*host)));
     watch_appearance(&host);
     app.run();
+    if let Some(error) = startup_error
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    {
+        return Err(RunError::Boot(error));
+    }
     if exit_code.load(Ordering::SeqCst) != 0 {
         return Err(RunError::Dump);
     }

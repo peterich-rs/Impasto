@@ -46,6 +46,7 @@ export type ZoomEvent = { onZoom?: (scale: number) => void };
 export type GestureEvent = {
   recognizers?: RecognizerSpec;
   onLongPress?: () => void;
+  onDoubleTap?: () => void;
 };
 export type WheelEvent = { onWheel?: (dx: number, dy: number) => void };
 export type ViewEvents = ClickEvent &

@@ -127,8 +127,7 @@ export function Icon(props: { name: IconName; size?: number; color?: IconColor }
 }
 
 /**
- * Icon-only button. The glyph is `size` tall but the hit area never drops
- * below 44×44, so small controls stay tappable.
+ * Icon-only button. The glyph is `size` tall and defaults to a 44×44 hit area.
  */
 export function Glyph(props: {
   name: IconName; title: string; onClick: () => void;
@@ -136,10 +135,12 @@ export function Glyph(props: {
   /** 32×32 target for inline actions inside dense rows. Default is the 44 accessible minimum. */
   compact?: boolean;
 }): NodeHandle {
-  const target = props.compact ? 32 : 44;
-  return <Pressable role={Role.Button} accessibilityLabel={props.title} onClick={props.onClick}
-    style={{ width: target, height: target, minWidth: target, minHeight: target, padding: 0, flexShrink: 0, alignItems: "center", justifyContent: "center",
-      borderRadius: target / 2, backgroundColor: props.primary ? colors.lime : colors.raised, ...props.style }}>
+  const buttonStyle = (): ViewStyle => {
+    const target = props.compact ? 32 : 44;
+    return { width: target, height: target, minWidth: target, minHeight: target, padding: 0, flexShrink: 0, alignItems: "center", justifyContent: "center",
+      borderRadius: target / 2, backgroundColor: props.primary ? colors.lime : colors.raised, ...props.style };
+  };
+  return <Pressable role={Role.Button} accessibilityLabel={props.title} onClick={props.onClick} style={buttonStyle()}>
     <Icon name={props.name} size={props.size} color={props.color ?? (props.primary ? colors.bg : undefined)} />
   </Pressable>;
 }

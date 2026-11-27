@@ -217,6 +217,10 @@ pub(super) enum Mutation {
         bytes: usize,
     },
     PointerTarget(NodeId),
+    ZoomTarget {
+        id: NodeId,
+        enabled: bool,
+    },
     ClearStyle {
         id: NodeId,
         keys: Option<Vec<crate::style::Key>>,
@@ -318,6 +322,7 @@ pub(super) fn apply(tree: &mut Tree, mutation: Mutation) -> Result<Applied, crat
             tree.set_compiled_class_list(id, classes, bytes)?
         }
         Mutation::PointerTarget(id) => tree.set_pointer_target(id)?,
+        Mutation::ZoomTarget { id, enabled } => tree.set_zoom_target(id, enabled)?,
         Mutation::ClearStyle { id, keys } => tree.clear_style(id, keys.as_deref())?,
         Mutation::SourceClass { source, text } => tree.replace_style_source_class(source, &text)?,
         Mutation::StyleSnapshot {

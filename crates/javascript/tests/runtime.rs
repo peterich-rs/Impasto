@@ -592,3 +592,40 @@ fn quickjs_interrupt_checkpoints_capture_bounded_source_stacks() {
     );
     assert!(runtime.take_stack_samples().is_empty());
 }
+
+#[test]
+fn handoff_preserves_jobs_and_refreshes_quickjs_stack() {
+    use javascript::runtime::{Runtime, RuntimeLimits};
+
+    struct IdleRuntime(Runtime);
+
+    #[expect(
+        unsafe_code,
+        reason = "test exercises the owning host's thread handoff"
+    )]
+    // SAFETY: the test owns the complete idle runtime. It registers no
+    // native extensions or callbacks that share thread-local state.
+    unsafe impl Send for IdleRuntime {}
+
+    impl IdleRuntime {
+        fn resume(mut self) {
+            self.0.finish_migration(&RuntimeLimits::default());
+            self.0.drive(10).unwrap();
+            self.0.eval_script(
+                "if (jobs !== 11) throw Error('handoff lost a timer or promise');\n                 function descend(n) { return n === 0 ? 0 : 1 + descend(n - 1); }\n                 if (descend(96) !== 96) throw Error('invalid native stack limit');",
+                "destination.js",
+            ).unwrap();
+        }
+    }
+
+    let mut runtime = Runtime::builder().build().unwrap();
+    runtime.eval_script(
+        "globalThis.jobs = 0; Promise.resolve().then(() => jobs += 1); setTimeout(() => jobs += 10, 5);",
+        "source.js",
+    ).unwrap();
+    runtime.prepare_migration();
+    let transfer = IdleRuntime(runtime);
+    std::thread::spawn(move || transfer.resume())
+        .join()
+        .unwrap();
+}

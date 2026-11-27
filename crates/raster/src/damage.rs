@@ -34,16 +34,6 @@ impl DamageRect {
         }
     }
 
-    pub(crate) fn pixels(self, size: [u32; 2]) -> Option<[u32; 4]> {
-        let Self::Rect([x0, y0, x1, y1]) = self else {
-            return None;
-        };
-        let coordinate = |value, max| u32::try_from(value).unwrap_or(0).min(max);
-        let [x0, x1] = [coordinate(x0, size[0]), coordinate(x1, size[0])];
-        let [y0, y1] = [coordinate(y0, size[1]), coordinate(y1, size[1])];
-        (x0 < x1 && y0 < y1).then(|| [x0, y0, x1 - x0, y1 - y0])
-    }
-
     #[expect(
         clippy::cast_possible_truncation,
         reason = "damage coordinates are rounded outwards and checked before conversion"
@@ -190,7 +180,10 @@ impl SceneDamage {
         let mut states = vec![PaintState::default(); frame.tree.layers.len()];
         for &id in &frame.order {
             let index = id.0 as usize;
-            let layer = &frame.tree.layers[index];
+            let layer = frame
+                .sampled_layers
+                .get(&id)
+                .unwrap_or(&frame.tree.layers[index]);
             let parent = layer
                 .parent
                 .map_or_else(PaintState::default, |id| states[id.0 as usize]);
@@ -437,6 +430,9 @@ pub(crate) fn between(
         let changed = picture.resident_id != old_picture.resident_id
             || new.shader_uniforms.get(&draw.layer) != old.shader_uniforms.get(&past.layer)
             || draw.readbacks_before != past.readbacks_before
+            || draw.state.transform != past.state.transform
+            || draw.state.clip != past.state.clip
+            || draw.state.blur != past.state.blur
             || !ancestors_match(&old.tree, past.layer, &new.tree, draw.layer)
             || picture.images.iter().any(|(source, _)| {
                 source.starts_with(EXTERNAL_TEXTURE_PREFIX) || !textures.same_revision(source)
@@ -471,10 +467,10 @@ pub(crate) fn sample(
     };
     let before = SceneDamage::collect(frame, tracked);
     let previous = before.affected_bounds(frame);
-    let tree = std::sync::Arc::make_mut(&mut frame.tree);
-    if !engine::scene::apply_compositor_samples(&mut tree.layers, &tree.tracks, samples) {
-        return None;
-    }
+    frame.sampled_layers =
+        engine::scene::compositor_layer_samples(&frame.tree.layers, &tracks, samples)?;
+    tracing::trace!(target: "impasto::compositor", covered_layers = frame.sampled_layers.len(),
+        tracks = tracks.len(), "sampled layer values");
     let after = SceneDamage::collect(frame, tracked);
     let current = after.affected_bounds(frame);
     Some(resolve(

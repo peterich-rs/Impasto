@@ -90,7 +90,7 @@ pub mod app_jni {
     pub use jni;
     pub use jni::{
         EnvUnowned,
-        objects::{JIntArray, JObject, JObjectArray, JString},
+        objects::{JDoubleArray, JIntArray, JObject, JObjectArray, JString},
         sys::{jboolean, jint, jlong},
     };
 }

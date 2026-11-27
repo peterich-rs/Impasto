@@ -12,7 +12,7 @@ export const colors = {
 
 export const filling: ViewStyle = { flex: 1, minHeight: 0, minWidth: 0, gap: 0 };
 
-export function change(quote: Quote): number {
+export function change(quote: Pick<Quote, "last" | "prevClose">): number {
   return (quote.last - quote.prevClose) / quote.prevClose * 100;
 }
 

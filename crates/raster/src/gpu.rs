@@ -6,10 +6,6 @@ use std::time::Instant;
 
 use crate::{RasterBackend, RasterOptions, Status, ValidationMode};
 
-pub(crate) const IMAGE_ARRAY_LEN: u32 = 32;
-const IMAGE_ARRAY_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
-    .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum GpuTier {
     Tier0Baseline,
@@ -33,7 +29,6 @@ pub(crate) struct GpuCaps {
     pub has_compute: bool,
     pub paint_storage: bool,
     pub has_timestamp_query: bool,
-    pub lcd: bool,
 }
 
 impl GpuCaps {
@@ -63,10 +58,8 @@ impl GpuCaps {
             has_compute: downlevel_flags.contains(D::COMPUTE_SHADERS),
             paint_storage: downlevel_flags.contains(D::VERTEX_STORAGE | D::FRAGMENT_STORAGE)
                 && limits.max_storage_buffers_per_shader_stage > 0
-                && limits.max_storage_buffer_binding_size >= crate::pipelines::EXTRA_BYTES as u64
-                && std::env::var_os("IMPASTO_PAINT_UNIFORM").is_none(),
+                && limits.max_storage_buffer_binding_size >= crate::pipelines::EXTRA_BYTES as u64,
             has_timestamp_query: features.contains(F::TIMESTAMP_QUERY),
-            lcd: features.contains(F::DUAL_SOURCE_BLENDING),
         };
         if caps.has_compute
             && caps.has_vertex_storage
@@ -77,7 +70,6 @@ impl GpuCaps {
                 F::IMMEDIATES
                     | F::PIPELINE_CACHE
                     | F::TIMESTAMP_QUERY
-                    | F::DUAL_SOURCE_BLENDING
                     | F::SHADER_F16
                     | F::TEXTURE_BINDING_ARRAY,
             ) {
@@ -98,29 +90,15 @@ pub(crate) struct Gpu {
     pub queue: wgpu::Queue,
     pub backend: RasterBackend,
     pub caps: GpuCaps,
-    pub shadow_2d: bool,
-    pub hollow_shadows: bool,
-    pub text_gamma: bool,
-    pub gradient_lut: bool,
-    pub dither_output: bool,
-    pub dither_gradients: bool,
     lost: Arc<AtomicBool>,
     oom: Arc<AtomicBool>,
     uncaptured_error: Arc<AtomicBool>,
     validate_frames: bool,
     image_upload: Arc<OnceLock<Option<crate::image_upload::ImageUpload>>>,
     pub(crate) inline_image_pipeline: Arc<OnceLock<Option<wgpu::RenderPipeline>>>,
-    image_upload_mode: ImageUploadMode,
     pipeline_cache: Option<crate::pipeline_disk_cache::PipelineDiskCache>,
     #[cfg(target_os = "android")]
     pub external_queue: Option<crate::android_vulkan::ExternalQueue>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ImageUploadMode {
-    Cpu,
-    Render,
-    Compute,
 }
 
 impl Gpu {
@@ -191,12 +169,6 @@ impl Gpu {
             if required_features.contains(wgpu::Features::IMMEDIATES) {
                 limits.max_immediate_size = advertised.max_immediate_size.min(128);
             }
-            if required_features.contains(IMAGE_ARRAY_FEATURES) {
-                limits.max_binding_array_elements_per_shader_stage = IMAGE_ARRAY_LEN;
-                limits.max_sampled_textures_per_shader_stage = limits
-                    .max_sampled_textures_per_shader_stage
-                    .max(IMAGE_ARRAY_LEN + 1);
-            }
             let descriptor = wgpu::DeviceDescriptor {
                 label: Some("impasto device"),
                 required_features,
@@ -217,7 +189,6 @@ impl Gpu {
         } else {
             wgpu::Features::empty()
         };
-        let lcd = wgpu::Features::DUAL_SOURCE_BLENDING;
         let modern = wgpu::Features::IMMEDIATES | wgpu::Features::SHADER_F16;
         let mut requested = timing | (support & modern);
         if cache_dir.is_some() && backend == RasterBackend::Vulkan {
@@ -229,19 +200,6 @@ impl Gpu {
             && support.contains(external_video)
         {
             requested |= external_video;
-        }
-        if support.contains(IMAGE_ARRAY_FEATURES)
-            && advertised.max_binding_array_elements_per_shader_stage >= IMAGE_ARRAY_LEN
-            && advertised.max_sampled_textures_per_shader_stage > IMAGE_ARRAY_LEN
-            && std::env::var("IMPASTO_IMAGE_ARRAY").as_deref() != Ok("0")
-        {
-            requested |= IMAGE_ARRAY_FEATURES;
-        }
-        if !cfg!(any(target_os = "ios", target_os = "android"))
-            && std::env::var("IMPASTO_LCD_RGB").as_deref() == Ok("1")
-            && support.contains(lcd)
-        {
-            requested |= lcd;
         }
         let mut adapter = adapter;
         let device_started = Instant::now();
@@ -257,12 +215,8 @@ impl Gpu {
             tracing::warn!(target: "impasto::gpu", ?backend, ?requested, "retrying with fewer device features");
             if requested.contains(external_video) {
                 requested.remove(external_video);
-            } else if requested.contains(IMAGE_ARRAY_FEATURES) {
-                requested.remove(IMAGE_ARRAY_FEATURES);
             } else if requested.intersects(modern) {
                 requested.remove(modern);
-            } else if requested.contains(lcd) {
-                requested.remove(lcd);
             } else {
                 requested = wgpu::Features::empty();
             }
@@ -315,22 +269,11 @@ impl Gpu {
             queue,
             backend,
             caps,
-            shadow_2d: std::env::var("IMPASTO_SHADOW_2D").as_deref() != Ok("0"),
-            hollow_shadows: std::env::var("IMPASTO_SHADOW_HOLLOW").as_deref() != Ok("0"),
-            text_gamma: std::env::var("IMPASTO_TEXT_GAMMA").as_deref() != Ok("0"),
-            gradient_lut: crate::gradient_lut::enabled(),
-            dither_output: std::env::var("IMPASTO_DITHER").as_deref() == Ok("1"),
-            dither_gradients: std::env::var("IMPASTO_DITHER").as_deref() != Ok("0"),
             lost,
             oom,
             uncaptured_error,
             image_upload: Arc::default(),
             inline_image_pipeline: Arc::default(),
-            image_upload_mode: match std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() {
-                Ok("cpu") => ImageUploadMode::Cpu,
-                Ok("compute") => ImageUploadMode::Compute,
-                _ => ImageUploadMode::Render,
-            },
             validate_frames: match options.validation {
                 ValidationMode::Auto => {
                     cfg!(test) || std::env::var("IMPASTO_GPU_VALIDATE").as_deref() == Ok("1")
@@ -372,50 +315,15 @@ impl Gpu {
         }
     }
 
-    pub fn image_array(&self) -> bool {
-        self.device.features().contains(IMAGE_ARRAY_FEATURES)
-    }
-
-    pub fn analytic_canvas_curves(&self) -> bool {
-        self.adapter.get_info().backend != wgpu::Backend::Gl
-            && self
-                .caps
-                .downlevel_flags
-                .contains(wgpu::DownlevelFlags::MULTISAMPLED_SHADING)
-            && std::env::var("IMPASTO_CANVAS_CURVES").as_deref() != Ok("0")
-    }
-
-    pub fn shadow_vertices(&self) -> u32 {
-        if self.hollow_shadows { 24 } else { 6 }
-    }
-
     pub fn effect_immediates(&self) -> bool {
         self.device.features().contains(wgpu::Features::IMMEDIATES)
             && self.device.limits().max_immediate_size >= crate::pipelines::ParamsUniform::BYTE_LEN
     }
 
     pub fn image_upload(&self) -> Option<&crate::image_upload::ImageUpload> {
-        if self.image_upload_mode == ImageUploadMode::Cpu {
-            return None;
-        }
         self.image_upload
             .get_or_init(|| {
-                use wgpu::{TextureFormatFeatureFlags as F, TextureUsages as U};
-                let format = wgpu::TextureFormat::Rgba16Float
-                    .guaranteed_format_features(self.device.features());
-                let compute = self.image_upload_mode == ImageUploadMode::Compute
-                    && self.caps.has_compute
-                    && format
-                        .allowed_usages
-                        .contains(U::TEXTURE_BINDING | U::STORAGE_BINDING)
-                    && format.flags.contains(F::FILTERABLE | F::STORAGE_WRITE_ONLY);
-                if compute
-                    && let Ok(upload) =
-                        self.validation(|| Ok(crate::image_upload::ImageUpload::new(self, true)))
-                {
-                    return Some(upload);
-                }
-                self.validation(|| Ok(crate::image_upload::ImageUpload::new(self, false)))
+                self.validation(|| Ok(crate::image_upload::ImageUpload::new(self)))
                     .ok()
             })
             .as_ref()

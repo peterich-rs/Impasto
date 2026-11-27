@@ -45,6 +45,11 @@ impl SurfaceTarget {
 
 pub enum Command {
     Pointer(PointerEvent),
+    #[doc(hidden)]
+    PointerMoves {
+        event: PointerEvent,
+        history: Box<engine::input::PointerHistory>,
+    },
     Input(InputEvent),
     BackGesture(engine::session::BackGesture),
     /// The user hid the platform keyboard. The session blurs on the next frame.
@@ -94,6 +99,10 @@ pub enum Command {
     Io(IoEvent),
     /// A timer deadline arrived. The render thread runs one frame.
     Wake,
+    /// Delayed UI wake stamped with its scheduling ticket.
+    Deadline {
+        ticket: u64,
+    },
     /// Raster is approaching a list window edge and still owns vsync.
     PrefetchCompositorWindow {
         generation: u64,
@@ -115,7 +124,7 @@ pub enum Command {
 /// Short name for the watchdog. Every variant is named so a new command fails to compile.
 pub(crate) fn command_tag(command: &Command) -> &'static str {
     match command {
-        Command::Pointer(_) => "pointer",
+        Command::Pointer(_) | Command::PointerMoves { .. } => "pointer",
         Command::Input(_) => "input",
         Command::BackGesture(_) => "back",
         Command::ImeDismissed => "ime",
@@ -142,7 +151,7 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         Command::Io(IoEvent::Plugin { .. }) => "plugin",
         Command::Io(IoEvent::NativeStream { .. }) => "native stream",
         Command::Io(IoEvent::Host(_)) => "host event",
-        Command::Wake => "wake",
+        Command::Wake | Command::Deadline { .. } => "wake",
         Command::CommitCompositorState { .. } => "animation handoff",
         Command::PrefetchCompositorWindow { .. } => "list prefetch",
         Command::Frame { .. } => "frame",

@@ -15,55 +15,6 @@ const LINKING_EVENTS: &[EventType] = &[EventType {
     payload: "{ url: string }",
 }];
 
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tools/toolchain-benchmark.rs"
-));
-
-#[test]
-#[ignore = "run explicitly to collect runtime and frame samples"]
-fn toolchain_baseline_counts() {
-    let started = std::time::Instant::now();
-    let mut runtime = javascript::runtime::RuntimeBuilder::new()
-        .build()
-        .expect("empty runtime");
-    println!(
-        "SAMPLE runtime-start {:.3}",
-        started.elapsed().as_secs_f64() * 1_000_000.0
-    );
-    runtime
-        .eval_script(
-            r#"
-                globalThis.finished = 0;
-                for (let i = 0; i < 16; ++i) {
-                    setTimeout(() => {
-                        Promise.resolve().then(() => { finished += 1; });
-                    }, 0);
-                }
-            "#,
-            "bench-timers.js",
-        )
-        .expect("schedule timer and promise fixtures");
-    let started = std::time::Instant::now();
-    let report = runtime
-        .drive(100)
-        .expect("drive timer and promise fixtures");
-    println!(
-        "SAMPLE timer-jobs {:.3}",
-        started.elapsed().as_secs_f64() * 1_000_000.0
-    );
-    assert_eq!(report.timers_ran, 16);
-    runtime
-        .eval_script(
-            "if (finished !== 16) throw new Error('incomplete job fixture')",
-            "check.js",
-        )
-        .expect("verify promise checkpoint");
-    drop(runtime);
-
-    sample_gallery_frames();
-}
-
 #[test]
 fn native_style_contracts_and_single_view_button() {
     {
@@ -1213,15 +1164,6 @@ fn no_log() -> super::ConsoleLog {
     })
 }
 
-/// The gallery bundle is a build artifact and not committed. Tests that
-/// need it fail with instructions when it has not been built.
-fn gallery_source() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/gallery-solid/dist/quotes.js");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("run `just gallery-dist` to build the gallery bundle"))
-}
-
 type PluginCompletions = std::sync::Arc<std::sync::Mutex<Vec<(u64, PluginResult)>>>;
 
 fn test_host() -> (ModuleConfig, PluginCompletions) {
@@ -1501,71 +1443,6 @@ fn redraws(frame: &session::FrameOutput) -> u32 {
 
 /// Picture generation and canvas body identity for canvases of `height`.
 /// A re-record allocates a new body and advances the picture generation.
-fn chart_pictures(frame: &session::FrameOutput, height: f32) -> Vec<(u64, usize)> {
-    let Some(tree) = frame.layers.as_deref() else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    for picture in &tree.pictures {
-        for command in picture.commands().iter() {
-            if let Command::Canvas {
-                height: canvas_height,
-                list,
-                ..
-            } = command
-                && (canvas_height - height).abs() < 0.5
-            {
-                found.push((
-                    picture.generation,
-                    std::sync::Arc::as_ptr(&list.body) as usize,
-                ));
-            }
-        }
-    }
-    found
-}
-
-fn chart_origin(frame: &session::FrameOutput, height: f32) -> Option<(f32, f32)> {
-    let mut found = None;
-    visit_commands(frame, &mut |command, tx, ty| {
-        if let Command::Canvas {
-            x,
-            y,
-            height: canvas_height,
-            ..
-        } = command
-            && (canvas_height - height).abs() < 0.5
-        {
-            found = Some((tx + *x, ty + *y));
-        }
-    });
-    found
-}
-
-fn volume_readout(frame: &session::FrameOutput) -> bool {
-    texts(frame).iter().any(|text| text.starts_with("成交量 "))
-}
-
-fn chart_recorded_volume(frame: &session::FrameOutput, height: f32) -> bool {
-    let mut found = false;
-    visit_commands(frame, &mut |command, _, _| {
-        if let Command::Canvas {
-            height: canvas_height,
-            list,
-            ..
-        } = command
-            && (canvas_height - height).abs() < 0.5
-        {
-            found |= list.ops().iter().any(
-                |op| matches!(op, crate::scene::CanvasOp::Text(text) if text.utf8.contains("成交量")),
-            );
-        }
-    });
-    found
-}
-
-/// Pumps frames until the first screen lands. The quotes app mounts a
-/// heavier first screen than the old counter.
 fn pump_first(session: &mut dyn Session) -> session::FrameOutput {
     let mut frame = session.frame(session::FrameTime::at(0.0));
     for step in 0..16 {
@@ -1575,11 +1452,6 @@ fn pump_first(session: &mut dyn Session) -> session::FrameOutput {
         frame = session.frame(session::FrameTime::at(f64::from(step) * 16.0));
     }
     frame
-}
-
-fn click(session: &mut dyn Session, x: f32, y: f32) {
-    session.pointer(PointerEvent::new(Phase::Down, x, y, 0.0));
-    session.pointer(PointerEvent::new(Phase::Up, x, y, 0.0));
 }
 
 /// Center of the first button whose accessible label matches exactly.
@@ -1598,869 +1470,9 @@ fn label_spot(session: &mut super::JsSession, label: &str) -> Option<(f32, f32)>
         })
 }
 
-fn wait_for_label(
-    session: &mut super::JsSession,
-    time: &mut f64,
-    expected: &str,
-) -> session::FrameOutput {
-    for _ in 0..48 {
-        *time += 16.0;
-        let frame = session.frame(session::FrameTime::at(*time));
-        let errors = session.take_faults();
-        assert!(errors.is_empty(), "waiting for {expected}: {errors:?}");
-        if frame.layers.is_some() && label_spot(session, expected).is_some() {
-            return frame;
-        }
-    }
-    panic!("missing label {expected}");
-}
-
-fn click_label(session: &mut super::JsSession, label: &str) {
-    let (x, y) = label_spot(session, label).unwrap_or_else(|| panic!("missing label {label}"));
-    click(session, x, y);
-}
-
-fn wait_for_text(
-    session: &mut dyn Session,
-    time: &mut f64,
-    expected: &str,
-) -> session::FrameOutput {
-    let mut seen = Vec::new();
-    for _ in 0..48 {
-        *time += 16.0;
-        let frame = session.frame(session::FrameTime::at(*time));
-        let errors = session.take_faults();
-        assert!(errors.is_empty(), "waiting for {expected}: {errors:?}");
-        if frame.layers.is_some() {
-            let labels = texts(&frame);
-            if labels.iter().any(|text| text == expected) {
-                return frame;
-            }
-            seen = labels;
-        }
-    }
-    panic!("missing {expected} in {seen:?}");
-}
-
-/// Host modules the gallery bundle imports. Devtools stays off so the
-/// panel does not change the page the assertions read.
-fn gallery_host() -> ModuleConfig {
-    ModuleConfig {
-        asset_reader: None,
-        registry: std::sync::Arc::new(ModuleRegistry::new(vec![
-            Module {
-                name: "AsyncStorage",
-                exports: session::ModuleExports {
-                    object: true,
-                    ..Default::default()
-                },
-                specifier: "@impasto/async-storage/native",
-                methods: vec![
-                    Method::sync("multiGet", |_| Ok(PluginValue::List(Vec::new()))),
-                    Method::sync("multiSet", |_| Ok(PluginValue::Null)),
-                ],
-            },
-            Module {
-                name: "Linking",
-                exports: session::ModuleExports {
-                    object: true,
-                    events: LINKING_EVENTS,
-                    ..Default::default()
-                },
-                specifier: "@impasto/linking/native",
-                methods: vec![
-                    Method::sync("getInitialURL", |_| Ok(PluginValue::Null)),
-                    Method::sync("openURL", |_| Ok(PluginValue::Null)),
-                    Method::sync("canOpenURL", |_| Ok(PluginValue::Bool(false))),
-                ],
-            },
-            Module {
-                name: "Clipboard",
-                exports: session::ModuleExports {
-                    object: true,
-                    ..Default::default()
-                },
-                specifier: "@impasto/clipboard/native",
-                methods: vec![
-                    Method::sync("getString", |_| Ok(PluginValue::Str(String::new()))),
-                    Method::sync("setString", |_| Ok(PluginValue::Null)),
-                ],
-            },
-            Module {
-                name: "Devtools",
-                exports: Default::default(),
-                specifier: "@impasto/devtools/native",
-                methods: vec![
-                    Method::sync("enabled", |_| Ok(PluginValue::Bool(false))),
-                    Method::sync("openSource", |_| Ok(PluginValue::Bool(false))),
-                ],
-            },
-        ])),
-        exec: std::sync::Arc::new(ImmediateExec),
-        settle: std::sync::Arc::new(|_token| session::Settle::new(|_result| {})),
-        post_delivery: None,
-        transport_clock: None,
-        script_execution: Default::default(),
-    }
-}
-
-/// The gallery bundle is a build artifact and not committed. Tests that
-/// need it fail with instructions when it has not been built. Returns
-/// `None` when the interpreter is not linked; callers already early-return.
-fn open_gallery() -> Option<Box<super::JsSession>> {
-    open_gallery_source(&gallery_source())
-}
-
-/// The concrete session type keeps `semantics()` reachable for the label-based helpers.
-fn open_gallery_source(source: &str) -> Option<Box<super::JsSession>> {
-    {
-        match super::JsSession::open_with(
-            source,
-            "test.js",
-            crate::text::MonoShaper::default(),
-            Box::new(|level, line| eprintln!("[js {level}] {line}")),
-            gallery_host(),
-        ) {
-            Ok(session) => Some(Box::new(session)),
-            Err(error) => panic!("{error}"),
-        }
-    }
-}
-
-#[test]
-fn watchlist_page_shows_prices() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    // First-screen mount is heavy; pump frames until the page lands.
-    let mut first = session.frame(session::FrameTime::at(0.0));
-    for step in 0..16 {
-        if first.layers.is_some() {
-            break;
-        }
-        first = session.frame(session::FrameTime::at(f64::from(step) * 16.0));
-    }
-    let shown = texts(&first);
-    assert!(
-        shown.iter().any(|text| text == "综合指数"),
-        "{shown:?} error={:?} faults={:?}",
-        session.take_script_error(),
-        session.take_faults()
-    );
-    assert!(shown.iter().any(|text| text == "腾讯控股"), "{shown:?}");
-    let mut sparks = 0;
-    visit_commands(&first, &mut |command, _, _| {
-        if matches!(command, Command::Canvas { list, .. } if !list.ops().is_empty()) {
-            sparks += 1;
-        }
-    });
-    assert!(sparks > 0, "no sparklines: {:?}", session.take_faults());
-    // Binder write-on-bind: price cells carry formatted numbers already.
-    assert!(
-        shown.iter().any(|text| text.ends_with(".00")
-            || text.ends_with(".20")
-            || text.ends_with(".40")
-            || text.ends_with(".60")
-            || text.ends_with(".80")
-            || text.chars().any(|c| c == '.')),
-        "no formatted price in {shown:?}"
-    );
-}
-
-#[test]
-fn account_tab_renders_equity_and_positions() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let first = pump_first(session.as_mut());
-    assert!(
-        texts(&first).iter().any(|text| text == "综合指数"),
-        "{:?}",
-        texts(&first)
-    );
-    assert!(
-        !texts(&first)
-            .iter()
-            .any(|text| text.contains("not a function")),
-        "{:?}",
-        texts(&first)
-    );
-    click_label(session.as_mut(), "账户");
-    let mut shown = session.frame(session::FrameTime::at(16.0));
-    for step in 0..6 {
-        let next = session.frame(session::FrameTime::at(32.0 + f64::from(step) * 16.0));
-        if next.layers.is_some() {
-            shown = next;
-        }
-    }
-    let labels = texts(&shown);
-    for expected in [
-        "总资产",
-        "可用资金",
-        "持仓市值",
-        "累计盈亏",
-        "成本价",
-        "仓位",
-        "今日盈亏",
-    ] {
-        assert!(
-            labels.iter().any(|text| text == expected),
-            "{expected} missing {labels:?}"
-        );
-    }
-    // Seed positions are present with a formatted price badge.
-    assert!(labels.iter().any(|text| text == "00700"), "{labels:?}");
-    assert!(!labels.iter().any(|text| text.contains("not a function")));
-    assert!(
-        !labels.iter().any(|text| text == "综合指数"),
-        "account tab replaced the board {labels:?}"
-    );
-}
-
-fn visible_watch_rows(frame: &session::FrameOutput) -> Vec<(String, f32)> {
-    let mut rows = Vec::new();
-    visit_commands(frame, &mut |command, _, origin_y| {
-        if let Command::Text {
-            shaped: Some(shaped),
-            y,
-            ..
-        } = command
-        {
-            let text = mono_text(shaped);
-            if IN_WATCHLIST_NAMES.contains(&text.as_str()) {
-                rows.push((text, *y + origin_y));
-            }
-        }
-    });
-    rows.sort_by(|left, right| left.1.total_cmp(&right.1));
-    rows
-}
-
-const IN_WATCHLIST_NAMES: &[&str] = &[
-    "腾讯控股",
-    "阿里巴巴",
-    "美团",
-    "中国移动",
-    "小米集团",
-    "中国平安",
-    "友邦保险",
-    "理想汽车",
-    "小鹏汽车",
-    "京东集团",
-    "Apple",
-    "NVIDIA",
-    "贵州茅台",
-    "宁德时代",
-    "Tesla",
-];
-
-#[test]
-fn watchlist_refreshes_quotes_during_drag_and_after_release() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let mut time = 0.0;
-    let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
-    let start = visible_watch_rows(&first);
-    let x = 180.0;
-    let y = start[start.len() / 2].1 + 4.0;
-    session.pointer(PointerEvent::new(Phase::Down, x, y, time));
-    let mut dragged = first;
-    for step in 1u16..=3 {
-        time += 16.0;
-        session.pointer(PointerEvent::new(
-            Phase::Move,
-            x,
-            y - 20.0 * f32::from(step),
-            time,
-        ));
-        let frame = session.frame(session::FrameTime::at(time));
-        if frame.layers.is_some() {
-            dragged = frame;
-        }
-    }
-    let moved = visible_watch_rows(&dragged);
-    assert!(
-        start.iter().any(|(name, y)| moved
-            .iter()
-            .any(|(row, offset)| name == row && y - offset > 8.0)),
-        "the gesture did not scroll the watchlist"
-    );
-    let clock = |frame: &session::FrameOutput| {
-        texts(frame).into_iter().find(|text| {
-            text.len() == 8 && text.as_bytes()[2] == b':' && text.as_bytes()[5] == b':'
-        })
-    };
-    let mut last_clock = clock(&dragged).expect("market clock");
-    let mut clock_advanced = false;
-    let mut charts_redrawn = false;
-    for _ in 0..60 {
-        time += 16.0;
-        let frame = session.frame(session::FrameTime::at(time));
-        assert!(session.take_faults().is_empty(), "watchlist frame failed");
-        if let Some(next) = clock(&frame) {
-            clock_advanced |= next != last_clock;
-            last_clock = next;
-        }
-        charts_redrawn |= redraws(&frame) > 0;
-    }
-    assert!(clock_advanced, "market clock froze during the drag");
-    assert!(charts_redrawn, "sparklines froze during the drag");
-
-    let mut last_rows = moved;
-    for step in 4u16..=8 {
-        time += 16.0;
-        session.pointer(PointerEvent::new(
-            Phase::Move,
-            x,
-            y - 20.0 * f32::from(step),
-            time,
-        ));
-        let frame = session.frame(session::FrameTime::at(time));
-        if frame.layers.is_some() {
-            last_rows = visible_watch_rows(&frame);
-            last_clock = clock(&frame).expect("market clock");
-        }
-    }
-    time += 16.0;
-    session.pointer(PointerEvent::new(Phase::Up, x, y - 160.0, time));
-    let mut coasting = false;
-    let mut refreshed_after_release = false;
-    for _ in 0..40 {
-        let frame = session.frame(session::FrameTime::at(time));
-        assert!(session.take_faults().is_empty(), "watchlist frame failed");
-        if frame.layers.is_some() {
-            let rows = visible_watch_rows(&frame);
-            let moved = !rows.is_empty() && rows != last_rows;
-            coasting |= moved;
-            let next = clock(&frame).expect("market clock");
-            // The overview clock publishes every two market ticks. A short
-            // coast can fit entirely between those publications.
-            refreshed_after_release |= next != last_clock;
-            last_clock = next;
-            last_rows = rows;
-        }
-        time += 16.0;
-    }
-    assert!(coasting, "the gesture did not start inertial scrolling");
-    assert!(
-        refreshed_after_release,
-        "market clock did not continue after the drag"
-    );
-}
-
-#[test]
-fn scrolled_watch_rows_stay_in_order() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let _first = pump_first(session.as_mut());
-    let mut shown = session.frame(session::FrameTime::at(16.0));
-    for step in 0..6 {
-        let next = session.frame(session::FrameTime::at(32.0 + f64::from(step) * 16.0));
-        if next.layers.is_some() {
-            shown = next;
-        }
-    }
-    let start = visible_watch_rows(&shown);
-    assert!(
-        start.len() >= 2,
-        "need visible rows, texts {:?}",
-        texts(&shown)
-    );
-    let x = 180.0;
-    let y = start[start.len() / 2].1 + 4.0;
-    for step in 0..6 {
-        let time = 200.0 + f64::from(step) * 80.0;
-        session.pointer(PointerEvent::new(Phase::Down, x, y, time));
-        session.pointer(PointerEvent::new(Phase::Move, x, y - 120.0, time + 16.0));
-        session.pointer(PointerEvent::new(Phase::Up, x, y - 120.0, time + 32.0));
-        for tick in 0..4 {
-            let frame = session.frame(session::FrameTime::at(time + 48.0 + f64::from(tick) * 16.0));
-            if frame.layers.is_some() {
-                shown = frame;
-            }
-        }
-        let rows = visible_watch_rows(&shown);
-        assert!(
-            rows.len() >= 2,
-            "rows disappeared {:?} after drag {step}",
-            texts(&shown)
-        );
-    }
-}
-
-#[test]
-fn settings_tab_renders_preferences_and_returns_to_the_watchlist() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let _first = pump_first(session.as_mut());
-    click_label(session.as_mut(), "设置");
-    let mut shown = session.frame(session::FrameTime::at(16.0));
-    for step in 0..6 {
-        let next = session.frame(session::FrameTime::at(32.0 + f64::from(step) * 16.0));
-        if next.layers.is_some() {
-            shown = next;
-        }
-    }
-    let labels = texts(&shown);
-    for expected in ["涨跌配色", "语言", "行情速度", "重置模拟账户"] {
-        assert!(
-            labels.iter().any(|text| text == expected),
-            "{expected} missing {labels:?}"
-        );
-    }
-    click_label(session.as_mut(), "自选");
-    let mut back = session.frame(session::FrameTime::at(160.0));
-    for step in 0..6 {
-        let next = session.frame(session::FrameTime::at(176.0 + f64::from(step) * 16.0));
-        if next.layers.is_some() {
-            back = next;
-        }
-    }
-    assert!(
-        texts(&back).iter().any(|text| text == "综合指数"),
-        "{:?}",
-        texts(&back)
-    );
-}
-
-#[test]
-fn stocks_desktop_switches_symbols_and_keeps_chart_and_book_inline() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&Metrics::new(1360.0, 820.0, 1.0));
-    let mut time = 0.0;
-    let first = wait_for_text(session.as_mut(), &mut time, "价格区间");
-    let shown = texts(&first);
-    assert!(
-        shown.iter().any(|text| text == "综合指数") && shown.iter().any(|text| text == "盘口"),
-        "{shown:?}"
-    );
-    let (chart_x, _) = text_spot(&first, "分时");
-    let (book_x, _) = text_spot(&first, "盘口");
-    assert!(
-        chart_x > 300.0 && book_x > chart_x + 400.0,
-        "chart {chart_x}, book {book_x}"
-    );
-
-    // Apple sits near the top of the saved list so it stays mounted at this height.
-    let (x, y) = text_spot(&first, "Apple");
-    click(session.as_mut(), x, y);
-    let changed = wait_for_text(session.as_mut(), &mut time, "Apple");
-    assert_eq!(
-        texts(&changed)
-            .iter()
-            .filter(|text| **text == "AAPL")
-            .count(),
-        2,
-        "selected symbol should appear in both panes"
-    );
-    let (x, y) = text_spot(&changed, "5 → 10");
-    click(session.as_mut(), x, y);
-    let ten = wait_for_text(session.as_mut(), &mut time, "A10");
-    assert!(
-        texts(&ten).iter().any(|text| text == "A10")
-            && texts(&ten).iter().any(|text| text == "B10")
-    );
-    let (x, y) = text_spot(&ten, "1D");
-    click(session.as_mut(), x, y);
-    let candles = wait_for_text(session.as_mut(), &mut time, "MA20");
-    let mut plot = None;
-    visit_commands(&candles, &mut |command, tx, ty| {
-        if let Command::Canvas { x, y, height, .. } = command
-            && *height == 320.0
-        {
-            plot = Some((tx + *x, ty + *y));
-        }
-    });
-    let (x, y) = plot.expect("daily candle plot");
-    session.pointer(PointerEvent::new(Phase::Down, x + 120.0, y + 40.0, time));
-    time += 16.0;
-    session.pointer(PointerEvent::new(Phase::Move, x + 144.0, y + 40.0, time));
-    time += 16.0;
-    let mut focus = session.frame(session::FrameTime::at(time));
-    for _ in 0..3 {
-        if volume_readout(&focus) {
-            break;
-        }
-        time += 16.0;
-        let next = session.frame(session::FrameTime::at(time));
-        if next.layers.is_some() {
-            focus = next;
-        }
-    }
-    assert!(
-        volume_readout(&focus),
-        "crosshair should show a candle readout, got {:?}",
-        texts(&focus)
-    );
-    assert!(
-        !chart_recorded_volume(&focus, 320.0),
-        "main chart should not record the crosshair readout"
-    );
-    let errors = session.take_faults();
-    assert!(errors.is_empty(), "{errors:?}");
-}
-
-#[test]
-fn stocks_phone_crosshair_keeps_the_chart_picture() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let mut time = 0.0;
-    let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
-    let (x, y) = text_spot(&first, "腾讯控股");
-    click(session.as_mut(), x, y);
-    let _opening = wait_for_label(session.as_mut(), &mut time, "返回");
-    let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
-    let (daily_x, daily_y) = text_spot(&detail, "1D");
-    click(session.as_mut(), daily_x, daily_y);
-    wait_for_text(session.as_mut(), &mut time, "MA5");
-    click_label(session.as_mut(), "暂停行情");
-    // A quiet frame did not re-record a canvas. The chart box from the last
-    // submitted tree is still where the pointer hits.
-    let mut baseline = None;
-    let mut point = None;
-    let mut last_spot = None;
-    let mut held_spot = None;
-    let mut held_pictures = None;
-    for _ in 0..8 {
-        time += 16.0;
-        let frame = session.frame(session::FrameTime::at(time));
-        let errors = session.take_faults();
-        assert!(errors.is_empty(), "{errors:?}");
-        if let Some(spot) = chart_origin(&frame, 204.0) {
-            let pictures = chart_pictures(&frame, 204.0);
-            if pictures.len() == 1 {
-                held_spot = Some(spot);
-                held_pictures = Some(pictures);
-            }
-        }
-        let (Some((plot_x, plot_y)), Some(pictures)) = (held_spot, held_pictures.clone()) else {
-            continue;
-        };
-        last_spot = Some((plot_x, plot_y));
-        let x = plot_x + 16.0;
-        let y = plot_y + 30.0;
-        let placed = (8.0..302.0).contains(&x) && (8.0..600.0).contains(&y);
-        if redraws(&frame) == 0 && placed {
-            baseline = Some(pictures);
-            point = Some((x, y));
-            break;
-        }
-    }
-    let baseline = baseline.unwrap_or_else(|| panic!("chart canvas spot={last_spot:?}"));
-    let (x, y) = point.expect("chart point");
-
-    session.pointer(PointerEvent::new(Phase::Down, x, y, time));
-    time += 16.0;
-    session.pointer(PointerEvent::new(Phase::Move, x + 24.0, y, time));
-    time += 16.0;
-    let mut dragged = session.frame(session::FrameTime::at(time));
-    for _ in 0..3 {
-        if volume_readout(&dragged) {
-            break;
-        }
-        time += 16.0;
-        let next = session.frame(session::FrameTime::at(time));
-        if next.layers.is_some() {
-            dragged = next;
-        }
-    }
-    assert!(
-        volume_readout(&dragged),
-        "crosshair tooltip missing {:?}",
-        texts(&dragged)
-    );
-    let same_chart = |frame: &session::FrameOutput, step: &str| {
-        if frame.layers.is_none() {
-            assert_eq!(redraws(frame), 0, "{step}");
-            return;
-        }
-        assert_eq!(
-            chart_pictures(frame, 204.0),
-            baseline,
-            "{step} redraws={}",
-            redraws(frame)
-        );
-        assert!(!chart_recorded_volume(frame, 204.0), "{step}");
-    };
-    same_chart(&dragged, "crosshair opens");
-    assert_eq!(redraws(&dragged), 0, "press and drag must skip Canvas draw");
-    let first_readout = texts(&dragged);
-    session.pointer(PointerEvent::new(Phase::Move, x + 48.0, y, time));
-    time += 16.0;
-    let dragged = session.frame(session::FrameTime::at(time));
-    same_chart(&dragged, "horizontal drag again");
-    assert!(volume_readout(&dragged));
-    assert_ne!(texts(&dragged), first_readout);
-    assert_eq!(
-        dragged
-            .phases
-            .expect("timed gallery frame")
-            .trace
-            .root_layouts,
-        0,
-        "changing the selected daily bar should keep ancestor layout"
-    );
-
-    session.pointer(PointerEvent::new(Phase::Cancel, x + 48.0, y, time));
-    time += 16.0;
-    let mut cancelled = session.frame(session::FrameTime::at(time));
-    for _ in 0..3 {
-        if !volume_readout(&cancelled) && cancelled.layers.is_some() {
-            break;
-        }
-        time += 16.0;
-        let next = session.frame(session::FrameTime::at(time));
-        if next.layers.is_some() {
-            cancelled = next;
-        }
-    }
-    assert!(
-        !volume_readout(&cancelled),
-        "cancel should clear the crosshair {:?}",
-        texts(&cancelled)
-    );
-    same_chart(&cancelled, "crosshair cancels");
-    assert_eq!(redraws(&cancelled), 0, "cancel must skip Canvas draw");
-
-    let (_, before_y) = text_spot(&dragged, "分时");
-    session.pointer(PointerEvent::new(Phase::Down, x, y, time));
-    time += 16.0;
-    session.pointer(PointerEvent::new(Phase::Move, x, y - 80.0, time));
-    time += 16.0;
-    let mut scrolled = None;
-    for _ in 0..4 {
-        let frame = session.frame(session::FrameTime::at(time));
-        time += 16.0;
-        let errors = session.take_faults();
-        assert!(errors.is_empty(), "{errors:?}");
-        if frame.layers.is_some() {
-            assert!(!chart_recorded_volume(&frame, 204.0), "vertical scroll");
-        }
-        if texts(&frame).iter().any(|text| text == "分时") {
-            scrolled = Some(text_spot(&frame, "分时").1);
-            break;
-        }
-    }
-    let after_y = scrolled.expect("分时 stayed visible");
-    assert_ne!(after_y, before_y, "vertical drag should scroll the page");
-    session.pointer(PointerEvent::new(Phase::Cancel, x, y - 80.0, time));
-    time += 16.0;
-    let ended = session.frame(session::FrameTime::at(time));
-    assert!(ended.phases.is_some(), "scroll cancel");
-    assert!(!chart_recorded_volume(&ended, 204.0), "scroll cancel");
-}
-
-#[test]
-fn stock_detail_coasts_between_live_market_updates() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let mut time = 0.0;
-    let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
-    let (x, y) = text_spot(&first, "腾讯控股");
-    click(session.as_mut(), x, y);
-    let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
-    let (x, y) = text_spot(&detail, "分时");
-    let y = y + 80.0;
-    session.pointer(PointerEvent::new(Phase::Down, x, y, time));
-    for distance in [30.0, 70.0] {
-        time += 16.0;
-        session.pointer(PointerEvent::new(Phase::Move, x, y - distance, time));
-        session.frame(session::FrameTime::at(time));
-    }
-    time += 16.0;
-    session.pointer(PointerEvent::new(Phase::Up, x, y - 70.0, time));
-
-    let mut layers = None;
-    let mut eligibility = None;
-    for _ in 0..8 {
-        let frame = session.frame(session::FrameTime::at(time));
-        time += 16.0;
-        let faults = session.take_faults();
-        assert!(faults.is_empty(), "{faults:?}");
-        if let Some(next) = frame.layers {
-            layers = Some(next);
-        }
-        let Some(scene) = &layers else {
-            continue;
-        };
-        if scene.tracks.iter().any(|track| {
-            track.prop == crate::scene::CompositorProp::ScrollY && track.threshold_window.is_some()
-        }) {
-            let result = session.compositor_eligibility(&scene.tracks);
-            if result.is_ok() {
-                return;
-            }
-            eligibility = Some(result);
-        }
-    }
-    panic!(
-        "stock detail should coast with a section threshold window, eligibility: {eligibility:?}"
-    );
-}
-
-#[test]
-fn stocks_phone_opens_detail_and_order_ticket() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let mut time = 0.0;
-    let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
-    let (x, y) = text_spot(&first, "腾讯控股");
-    click(session.as_mut(), x, y);
-    let opening = wait_for_label(session.as_mut(), &mut time, "返回");
-    assert!(texts(&opening).iter().any(|text| text == "买入"));
-    assert!(!texts(&opening).iter().any(|text| text == "盘口"));
-    let mut detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
-    for _ in 0..20 {
-        time += 16.0;
-        let next = session.frame(session::FrameTime::at(time));
-        let faults = session.take_faults();
-        assert!(faults.is_empty(), "{faults:?}");
-        if next.layers.is_some() {
-            detail = next;
-        }
-    }
-    let (x, y) = text_spot(&detail, "买入");
-    click(session.as_mut(), x, y);
-    wait_for_text(session.as_mut(), &mut time, "模拟下单");
-}
-
-#[test]
-fn stocks_phone_reopens_during_exit_without_leaving_a_detail() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let mut time = 0.0;
-    let home = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
-    let (x, y) = text_spot(&home, "腾讯控股");
-    let (other_x, other_y) = text_spot(&home, "Apple");
-    click(session.as_mut(), x, y);
-    wait_for_label(session.as_mut(), &mut time, "返回");
-    click(session.as_mut(), other_x, other_y);
-    let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
-    let (settled_x, _) = text_spot(&detail, "价格区间");
-    click_label(session.as_mut(), "返回");
-    // Let the exit slide run for a few frames before re-tapping the home row.
-    let mut exiting = detail;
-    for _ in 0..9 {
-        time += 16.0;
-        let frame = session.frame(session::FrameTime::at(time));
-        if frame.layers.is_some() {
-            exiting = frame;
-        }
-    }
-    // The leaving page has travelled right of the home row it covers.
-    let (leaving_x, _) = text_spot(&exiting, "价格区间");
-    assert!(
-        leaving_x > settled_x && leaving_x > other_x,
-        "exit slide did not move the detail: {settled_x} -> {leaving_x}, home row at {other_x}"
-    );
-    click(session.as_mut(), other_x, other_y);
-    let mut reopened = wait_for_text(session.as_mut(), &mut time, "价格区间");
-    assert_eq!(
-        texts(&reopened)
-            .iter()
-            .filter(|label| **label == "AAPL")
-            .count(),
-        2
-    );
-    session.input(InputEvent::Back);
-    for _ in 0..48 {
-        time += 16.0;
-        let frame = session.frame(session::FrameTime::at(time));
-        let faults = session.take_faults();
-        assert!(faults.is_empty(), "{faults:?}");
-        if frame.layers.is_some() {
-            reopened = frame;
-        }
-    }
-    let shown = texts(&reopened);
-    assert!(shown.iter().any(|text| text == "综合指数"), "{shown:?}");
-    assert!(label_spot(session.as_mut(), "返回").is_none(), "{shown:?}");
-
-    // Re-measure: the home row sits higher now that the detail has gone.
-    let (x, y) = text_spot(&reopened, "腾讯控股");
-    click(session.as_mut(), x, y);
-    wait_for_text(session.as_mut(), &mut time, "买入");
-    session.input(InputEvent::Back);
-    let mut landed = session.frame(session::FrameTime::at(time));
-    for _ in 0..48 {
-        time += 16.0;
-        let frame = session.frame(session::FrameTime::at(time));
-        assert!(session.take_faults().is_empty());
-        if frame.layers.is_some() {
-            landed = frame;
-            if texts(&landed).iter().any(|text| text == "综合指数")
-                && label_spot(session.as_mut(), "返回").is_none()
-            {
-                break;
-            }
-        }
-    }
-    assert!(
-        texts(&landed).iter().any(|text| text == "综合指数"),
-        "back from the detail should land on the watchlist: {:?}",
-        texts(&landed).iter().take(20).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-// Broken by the gallery rewrite in b48bb8a, which shipped without a
-// compiling quickjs test build. Re-pin these once the watchlist click
-// path is verified against the real tree again.
-#[ignore = "gallery behavior drifted in b48bb8a; re-pin expectations"]
-fn repeated_clicks_leave_no_pending_jobs() {
-    {
-        let source = gallery_source();
-        let mut session = match super::JsSession::open(
-            &source,
-            "test.js",
-            crate::text::MonoShaper::default(),
-            no_log(),
-        ) {
-            Ok(session) => session,
-            Err(error) => panic!("{error}"),
-        };
-        session.metrics(&phone());
-        let mut first = session.frame(session::FrameTime::at(0.0));
-        for step in 0..16 {
-            if first.layers.is_some() {
-                break;
-            }
-            first = session.frame(session::FrameTime::at(f64::from(step) * 16.0));
-        }
-        assert!(!session.jobs_pending());
-        let (x, y) = text_spot(&first, "市场");
-        click(&mut session, x, y);
-        let second = session.frame(session::FrameTime::at(16.0));
-        click(&mut session, x, y);
-        let third = session.frame(session::FrameTime::at(32.0));
-        assert!(texts(&second).iter().any(|text| text == "涨幅榜"));
-        if third.layers.is_some() {
-            assert!(
-                texts(&third).iter().any(|text| text == "涨幅榜"),
-                "{:?}",
-                texts(&third)
-            );
-        }
-        assert!(!session.jobs_pending());
-    }
+fn click(session: &mut dyn Session, x: f32, y: f32) {
+    session.pointer(PointerEvent::new(Phase::Down, x, y, 0.0));
+    session.pointer(PointerEvent::new(Phase::Up, x, y, 0.0));
 }
 
 #[test]
@@ -2582,60 +1594,6 @@ import * as core from "scene";
             Err(error) => panic!("{error}"),
         };
         assert_eq!(session.tap_count(), 0);
-    }
-}
-
-#[test]
-// Broken by the gallery rewrite in b48bb8a, which shipped without a
-// compiling quickjs test build. Re-pin these once the watchlist click
-// path is verified against the real tree again.
-#[ignore = "gallery behavior drifted in b48bb8a; re-pin expectations"]
-fn stock_page_pushes_over_the_watchlist() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let first = pump_first(session.as_mut());
-    let (x, y) = text_spot(&first, "腾讯控股");
-    click(session.as_mut(), x, y);
-    let second = session.frame(session::FrameTime::at(16.0));
-    assert!(
-        texts(&second).iter().any(|text| text == "返回"),
-        "{:?}",
-        texts(&second)
-    );
-    assert!(
-        texts(&second).iter().any(|text| text == "盘口 五档"),
-        "{:?}",
-        texts(&second)
-    );
-    assert!(!texts(&second).iter().any(|text| text == "涨幅榜"));
-}
-
-#[test]
-// Broken by the gallery rewrite in b48bb8a, which shipped without a
-// compiling quickjs test build. Re-pin these once the watchlist click
-// path is verified against the real tree again.
-#[ignore = "gallery behavior drifted in b48bb8a; re-pin expectations"]
-fn press_move_out_up_does_not_fire() {
-    let Some(mut session) = open_gallery() else {
-        return;
-    };
-    session.metrics(&phone());
-    let first = pump_first(session.as_mut());
-    let (x, y) = text_spot(&first, "腾讯控股");
-    session.pointer(PointerEvent::new(Phase::Down, x, y, 0.0));
-    session.pointer(PointerEvent::new(Phase::Move, x, -1.0, 0.0));
-    session.pointer(PointerEvent::new(Phase::Up, x, -1.0, 0.0));
-    let second = session.frame(session::FrameTime::at(16.0));
-    if let Some(layers) = second.layers.as_ref() {
-        let _ = layers;
-        assert!(
-            texts(&second).iter().any(|text| text == "自选"),
-            "{:?}",
-            texts(&second)
-        );
-        assert!(!texts(&second).iter().any(|text| text == "盘口 五档"));
     }
 }
 
@@ -3665,116 +2623,6 @@ import * as core from "scene";
 }
 
 #[test]
-// Broken by the gallery rewrite in b48bb8a, which shipped without a
-// compiling quickjs test build. Re-pin these once the watchlist click
-// path is verified against the real tree again.
-#[ignore = "gallery behavior drifted in b48bb8a; re-pin expectations"]
-fn dragging_the_list_translates_a_visible_row() {
-    {
-        let source = gallery_source();
-        let mut session = match super::JsSession::open(
-            &source,
-            "test.js",
-            crate::text::MonoShaper::default(),
-            no_log(),
-        ) {
-            Ok(session) => session,
-            Err(error) => panic!("{error}"),
-        };
-        let mut window = metrics();
-        window.height = 800.0;
-        session.metrics(&window);
-        let mut first = pump_first(&mut session);
-        for step in 1..8 {
-            let next = session.frame(session::FrameTime::at(8.0 + f64::from(step) * 16.0));
-            if next.layers.is_some() {
-                first = next;
-            }
-        }
-        let Some((clip_y, clip_h)) = first.layers.as_deref().and_then(|tree| {
-            tree.layers.iter().find_map(|layer| match layer.kind {
-                crate::scene::LayerKind::Clip { y, h, .. } if h > 100.0 => Some((y, h)),
-                _ => None,
-            })
-        }) else {
-            panic!("scroll clip");
-        };
-        let mut row = None;
-        visit_commands(&first, &mut |command, origin_x, origin_y| {
-            if let Command::Text {
-                shaped: Some(shaped),
-                x,
-                y,
-                ..
-            } = command
-                && IN_WATCHLIST_NAMES.contains(&mono_text(shaped).as_str())
-            {
-                let scene_y = *y + origin_y;
-                if scene_y >= clip_y && scene_y < clip_y + clip_h {
-                    row = Some((mono_text(shaped), *x + origin_x + 1.0, scene_y));
-                }
-            }
-        });
-        let Some((label, x, before)) = row else {
-            panic!("a row inside the viewport");
-        };
-        let delta = 12.0;
-        session.pointer(PointerEvent::new(Phase::Down, x, before + 1.0, 0.0));
-        session.pointer(PointerEvent::new(
-            Phase::Move,
-            x,
-            before + 1.0 - delta,
-            16.0,
-        ));
-        let scrolled = session.frame(session::FrameTime::at(16.0));
-        let mut after = None;
-        visit_commands(&scrolled, &mut |command, _, origin_y| {
-            if let Command::Text {
-                shaped: Some(shaped),
-                y,
-                ..
-            } = command
-                && mono_text(shaped) == label
-            {
-                after = Some(*y + origin_y);
-            }
-        });
-        let Some(after) = after else {
-            panic!(
-                "scrolled label {} layers={} texts={:?}",
-                label,
-                scrolled.layers.is_some(),
-                texts(&scrolled)
-            );
-        };
-        assert!(
-            (before - after - delta).abs() < 0.5,
-            "{label} moved from {before} to {after}"
-        );
-        assert!(texts(&scrolled).iter().any(|text| text == "自选"));
-    }
-}
-
-fn rewritten_commands(
-    before: &crate::scene::LayerTree,
-    after: &crate::scene::LayerTree,
-) -> (usize, usize) {
-    let mut changed = 0;
-    let mut unchanged = 0;
-    for picture in &after.pictures {
-        let same = before
-            .picture(picture.id)
-            .is_some_and(|old| old.generation == picture.generation);
-        if same {
-            unchanged += 1;
-        } else {
-            changed += picture.commands().len();
-        }
-    }
-    (changed, unchanged)
-}
-
-#[test]
 fn module_loader_accepts_a_sibling_script_and_rejects_escape() {
     {
         let dir = std::env::temp_dir().join(format!("quickjs-mod-{}", std::process::id()));
@@ -3897,126 +2745,6 @@ fn module_loader_accepts_parent_segments_inside_the_app() {
         session.take_script_error().unwrap_or_default()
     );
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-// Broken by the gallery rewrite in b48bb8a, which shipped without a
-// compiling quickjs test build. Re-pin these once the watchlist click
-// path is verified against the real tree again.
-#[ignore = "gallery behavior drifted in b48bb8a; re-pin expectations"]
-fn gallery_pages_scroll_without_picture_writes() {
-    {
-        let source = gallery_source();
-        let mut session = match super::JsSession::open(
-            &source,
-            "test.js",
-            crate::text::MonoShaper::default(),
-            no_log(),
-        ) {
-            Ok(session) => session,
-            Err(error) => panic!("{error}"),
-        };
-        session.metrics(&phone());
-        let mut shown = pump_first(&mut session);
-        let mut quiet = 0;
-        for step in 1..24 {
-            let next = session.frame(session::FrameTime::at(16.0 + f64::from(step) * 16.0));
-            if next.layers.is_some() {
-                shown = next;
-                quiet = 0;
-            } else {
-                quiet += 1;
-                if quiet >= 2 {
-                    break;
-                }
-            }
-        }
-        assert!(
-            texts(&shown).iter().any(|text| text.contains("腾讯控股")),
-            "{:?}",
-            texts(&shown)
-        );
-        let Some((clip_y, clip_h)) = shown.layers.as_deref().and_then(|tree| {
-            tree.layers.iter().find_map(|layer| match layer.kind {
-                crate::scene::LayerKind::Clip { y, h, .. } if h > 100.0 => Some((y, h)),
-                _ => None,
-            })
-        }) else {
-            panic!("scroll clip");
-        };
-        let mut row = None;
-        visit_commands(&shown, &mut |command, origin_x, origin_y| {
-            if let Command::Text {
-                shaped: Some(shaped),
-                x,
-                y,
-                ..
-            } = command
-                && IN_WATCHLIST_NAMES.contains(&mono_text(shaped).as_str())
-            {
-                let scene_y = *y + origin_y;
-                if scene_y >= clip_y && scene_y < clip_y + clip_h {
-                    row = Some((mono_text(shaped), *x + origin_x + 1.0, scene_y));
-                }
-            }
-        });
-        let Some((_label, x, before)) = row else {
-            panic!("a row inside the viewport");
-        };
-        let before_tree = shown.layers.expect("list tree");
-        session.pointer(PointerEvent::wheel(x, before + 1.0, 200.0, 0.0, clip_h));
-        let scrolled = session.frame(session::FrameTime::at(200.0));
-        assert!(
-            scrolled.layers.is_some(),
-            "scroll produced no layer tree {}",
-            session.take_script_error().unwrap_or_default()
-        );
-        let (screen_changed, screen_kept) = rewritten_commands(
-            &before_tree,
-            scrolled.layers.as_deref().expect("screen tree"),
-        );
-        assert_eq!(session.picture_writes(), screen_changed);
-        assert!(
-            screen_kept > 0,
-            "scrolling one screen rewrote every picture ({screen_changed} commands)"
-        );
-        assert!(
-            texts(&scrolled)
-                .iter()
-                .any(|text| IN_WATCHLIST_NAMES.contains(&text.as_str())),
-            "list rows left after scrolling {:?}",
-            texts(&scrolled)
-        );
-        let mut baseline = scrolled.layers.clone().expect("scroll tree");
-        for step in 0..6 {
-            let next = session.frame(session::FrameTime::at(216.0 + f64::from(step) * 16.0));
-            if let Some(layers) = next.layers {
-                baseline = layers;
-            }
-        }
-        // Editing proxy: switch the up/down convention on the profile tab.
-        // It rewrites every mounted price cell without touching structure.
-        let (tab_x, tab_y) = text_spot(&scrolled, "我的");
-        click(&mut session, tab_x, tab_y);
-        let profile = session.frame(session::FrameTime::at(232.0));
-        let (opt_x, opt_y) = text_spot(&profile, "绿涨红跌");
-        click(&mut session, opt_x, opt_y);
-        let edited = session.frame(session::FrameTime::at(248.0));
-        let Some(after_tree) = edited.layers.as_deref() else {
-            panic!(
-                "convention flip produced no layer tree {}",
-                session.take_script_error().unwrap_or_default()
-            );
-        };
-        let (changed, unchanged) = rewritten_commands(&baseline, after_tree);
-        assert_eq!(
-            session.picture_writes(),
-            changed,
-            "picture writes {changed} unchanged pictures {unchanged}"
-        );
-        assert!(changed > 0, "the flip wrote no commands");
-        assert_eq!(unchanged, 0);
-    }
 }
 
 #[test]
@@ -5743,4 +4471,237 @@ fn debug_update_checks_the_candidate_first_frame_before_replacing_the_program() 
             .iter()
             .any(|text| text == "updated")
     );
+}
+
+#[cfg(feature = "gallery-tests")]
+#[path = "../../../../examples/gallery-solid/tools/engine_tests.rs"]
+mod gallery_tests;
+
+const FRAME_REPLAY: &str = include_str!("../../../testing/fixtures/frame-replay.js");
+
+#[test]
+fn script_deadline_distinguishes_an_empty_tick_from_a_layout_change() {
+    use crate::session::ScriptInvalidation;
+
+    let mut session = super::JsSession::open(
+        r#"
+            import * as scene from 'scene';
+            const root = scene.createElement('view');
+            const label = scene.createElement('text', { value: 'before' });
+            scene.append(root, label);
+            let elapsed = false;
+            setTimeout(() => { elapsed = true; }, 50);
+            setTimeout(() => {
+                if (!elapsed) throw new Error('first timer did not advance');
+                scene.setText(label, 'after');
+            }, 100);
+        "#,
+        "deadline.js",
+        crate::text::MonoShaper::default(),
+        no_log(),
+    )
+    .expect("open fixture");
+    session.metrics(&phone());
+    session.frame(session::FrameTime::at(0.0));
+    assert_eq!(
+        session.advance_script_deadline(50),
+        ScriptInvalidation::Unchanged
+    );
+    assert_eq!(session.advance_script_deadline(100), ScriptInvalidation::Ui);
+    let changed = session.frame(session::FrameTime::at(116.0));
+    assert!(texts(&changed).contains(&"after".to_owned()));
+    assert!(session.take_faults().is_empty());
+}
+
+#[test]
+fn gesture_deadlines_use_one_wake_on_the_host_clock() {
+    use crate::session::ScriptInvalidation;
+
+    let mut session = super::JsSession::open(
+        r#"
+            import * as scene from 'scene';
+            const root = scene.createElement('view');
+            const region = scene.createElement('view');
+            const label = scene.createElement('text', { value: 'idle' });
+            scene.append(root, region);
+            scene.append(region, label);
+            scene.setRecognizers(region, { tap: true, doubleTapMs: 300, longPress: true });
+            scene.onClick(region, () => scene.setText(label, 'single'));
+            scene.onDoubleTap(region, () => scene.setText(label, 'double'));
+            scene.onLongPress(region, () => scene.setText(label, 'long'));
+            scene.onZoom(region, (scale) => scene.setText(label, 'zoom ' + scale));
+        "#,
+        "gesture-deadline.js",
+        crate::text::MonoShaper::default(),
+        no_log(),
+    )
+    .expect("open fixture");
+    session.metrics(&phone());
+    let epoch = 80_000.0;
+    let time = |mono_ms| session::FrameTime {
+        mono_ms,
+        ..session::FrameTime::at(epoch + mono_ms)
+    };
+    let initial = session.frame(time(0.0));
+    let (x, y) = text_spot(&initial, "idle");
+    let pointer = |session: &mut super::JsSession, phase, offset| {
+        session.pointer(PointerEvent::new(phase, x, y, epoch + offset));
+    };
+
+    pointer(&mut session, Phase::Down, 10.0);
+    assert!(!session.frame(time(16.0)).again);
+    assert_eq!(session.next_wake_ms(), Some(510.0));
+    pointer(&mut session, Phase::Up, 20.0);
+    assert!(!session.frame(time(32.0)).again);
+    assert_eq!(session.next_wake_ms(), Some(320.0));
+    assert_eq!(
+        session.advance_script_deadline(319),
+        ScriptInvalidation::Unchanged
+    );
+    assert_eq!(session.advance_script_deadline(320), ScriptInvalidation::Ui);
+    assert_eq!(texts(&session.frame(time(320.0))), ["single"]);
+    assert_eq!(session.next_wake_ms(), None);
+
+    pointer(&mut session, Phase::Down, 400.0);
+    pointer(&mut session, Phase::Up, 410.0);
+    pointer(&mut session, Phase::Down, 470.0);
+    assert!(!session.frame(time(474.0)).again);
+    assert_eq!(session.next_wake_ms(), Some(710.0));
+    pointer(&mut session, Phase::Up, 480.0);
+    assert_eq!(texts(&session.frame(time(486.0))), ["double"]);
+    assert_eq!(session.next_wake_ms(), None);
+
+    pointer(&mut session, Phase::Down, 600.0);
+    assert!(!session.frame(time(608.0)).again);
+    assert_eq!(session.next_wake_ms(), Some(1_100.0));
+    assert_eq!(
+        session.advance_script_deadline(1_100),
+        ScriptInvalidation::Ui
+    );
+    assert_eq!(texts(&session.frame(time(1_100.0))), ["long"]);
+    pointer(&mut session, Phase::Up, 1_120.0);
+    session.frame(time(1_128.0));
+    assert_eq!(session.next_wake_ms(), None);
+
+    pointer(&mut session, Phase::Down, 1_200.0);
+    pointer(&mut session, Phase::Up, 1_210.0);
+    pointer(&mut session, Phase::Down, 1_270.0);
+    pointer(&mut session, Phase::Cancel, 1_280.0);
+    assert!(!session.frame(time(1_286.0)).again);
+    assert_eq!(session.next_wake_ms(), Some(1_510.0));
+    assert_eq!(texts(&session.frame(time(1_510.0))), ["single"]);
+    assert_eq!(session.next_wake_ms(), None);
+
+    session.pointer(PointerEvent::zoom(x, y, epoch + 1_520.0, 1.25));
+    assert_eq!(texts(&session.frame(time(1_528.0))), ["zoom 1.25"]);
+    assert!(session.take_faults().is_empty());
+}
+
+#[test]
+fn frame_replay_cancels_taps_and_cleans_jobs_after_navigation() {
+    let mut session = super::JsSession::open(
+        FRAME_REPLAY,
+        "frame-replay.js",
+        crate::text::MonoShaper::default(),
+        no_log(),
+    )
+    .expect("open frame replay");
+    session.metrics(&phone());
+    session.set_semantics_enabled(true);
+    pump_first(&mut session);
+    let (x, y) = label_spot(&mut session, "Open detail").expect("visible launcher");
+    session.pointer(PointerEvent::new(Phase::Down, x, y, 1.0));
+    session.pointer(PointerEvent::new(Phase::Move, x, -20.0, 8.0));
+    session.pointer(PointerEvent::new(Phase::Cancel, x, -20.0, 9.0));
+    session.frame(session::FrameTime::at(16.0));
+    assert!(label_spot(&mut session, "Back").is_none());
+    for index in 0..3 {
+        let time = 32.0 + f64::from(index) * 64.0;
+        click(&mut session, x, y);
+        let detail = session.frame(session::FrameTime::at(time));
+        assert!(texts(&detail).contains(&format!("Detail {}", index + 1)));
+        assert!(!session.jobs_pending());
+        assert!(label_spot(&mut session, "Close dialog").is_none());
+        let (back_x, back_y) = label_spot(&mut session, "Back").expect("visible back");
+        click(&mut session, back_x, back_y);
+        session.frame(session::FrameTime::at(time + 16.0));
+        assert!(label_spot(&mut session, "Open detail").is_some());
+        assert!(session.take_faults().is_empty());
+    }
+}
+
+#[test]
+fn frame_replay_scroll_updates_the_visible_window_and_keeps_recorded_rows() {
+    let mut session = super::JsSession::open(
+        FRAME_REPLAY,
+        "frame-replay.js",
+        crate::text::MonoShaper::default(),
+        no_log(),
+    )
+    .expect("open frame replay");
+    session.metrics(&phone());
+    let initial = pump_first(&mut session);
+    let before = initial.layers.expect("initial list");
+    let mut down = PointerEvent::new(Phase::Down, 120.0, 300.0, 8.0);
+    down.kind = crate::input::PointerKind::Touch;
+    session.pointer(down);
+    let mut drag = PointerEvent::new(Phase::Move, 120.0, 180.0, 16.0);
+    drag.kind = down.kind;
+    session.pointer(drag);
+    let next = session.frame(session::FrameTime::at(32.0));
+    let after = next.layers.expect("scroll layers");
+    assert_ne!(before.epoch, after.epoch);
+    assert_eq!(session.picture_writes(), 0);
+    assert!(before.pictures.iter().any(|old| {
+        after
+            .pictures
+            .iter()
+            .any(|new| old.id == new.id && old.generation == new.generation)
+    }));
+    assert!(session.take_faults().is_empty());
+}
+
+#[test]
+fn frame_replay_reports_composition_and_clears_focus_after_return() {
+    use crate::session::ImeUpdate;
+
+    let mut session = super::JsSession::open(
+        FRAME_REPLAY,
+        "frame-replay.js",
+        crate::text::MonoShaper::default(),
+        no_log(),
+    )
+    .expect("open frame replay");
+    session.metrics(&phone());
+    session.set_semantics_enabled(true);
+    pump_first(&mut session);
+    let (x, y) = label_spot(&mut session, "Open detail").expect("visible launcher");
+    click(&mut session, x, y);
+    session.frame(session::FrameTime::at(16.0));
+    let (x, y) = label_spot(&mut session, "Show dialog").expect("dialog launcher");
+    click(&mut session, x, y);
+    session.frame(session::FrameTime::at(32.0));
+    let (x, y) = label_spot(&mut session, "Close dialog").expect("visible dialog");
+    click(&mut session, x, y);
+    let closed = session.frame(session::FrameTime::at(48.0));
+    let (x, y) = text_spot(&closed, "Edit text");
+    click(&mut session, x, y);
+    let focused = session.frame(session::FrameTime::at(64.0));
+    assert!(matches!(focused.ime, Some(ImeUpdate::Show(_))));
+    session.input(InputEvent::Replace {
+        text: "拼音👩‍🚀".to_owned(),
+        start: 2,
+        end: 2,
+        compose_start: 0,
+        compose_end: 2,
+    });
+    let edited = session.frame(session::FrameTime::at(80.0));
+    assert!(texts(&edited).contains(&"拼音👩‍🚀".to_owned()));
+    assert!(matches!(edited.ime, Some(ImeUpdate::Update(_))));
+    let (x, y) = label_spot(&mut session, "Back").expect("visible back");
+    click(&mut session, x, y);
+    let home = session.frame(session::FrameTime::at(96.0));
+    assert!(matches!(home.ime, Some(ImeUpdate::Hide)));
+    assert!(label_spot(&mut session, "Open detail").is_some());
+    assert!(session.take_faults().is_empty());
 }

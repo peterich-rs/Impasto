@@ -10,7 +10,6 @@ pub struct ImageUploadStats {
     pub temporary_bytes: u64,
     pub resident_bytes: u64,
     pub render_passes: u32,
-    pub compute_passes: u32,
 }
 
 impl ImageUploadStats {
@@ -19,37 +18,21 @@ impl ImageUploadStats {
         self.temporary_bytes = self.temporary_bytes.max(other.temporary_bytes);
         self.resident_bytes += other.resident_bytes;
         self.render_passes += other.render_passes;
-        self.compute_passes += other.compute_passes;
     }
 }
 
-struct UploadPipeline<P> {
-    pipeline: P,
+struct UploadPipeline {
+    pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
 }
 
-type Render = UploadPipeline<wgpu::RenderPipeline>;
-type Compute = UploadPipeline<wgpu::ComputePipeline>;
-
-enum Pipelines {
-    Render {
-        convert: Render,
-        downsample: Render,
-        sampler: wgpu::Sampler,
-    },
-    Compute {
-        convert: Compute,
-        downsample: Compute,
-        tiled: Option<[Compute; 2]>,
-    },
-}
-
 pub(crate) struct ImageUpload {
-    pipelines: Pipelines,
-    format: wgpu::TextureFormat,
-    usage: wgpu::TextureUsages,
-    srgb_storage: bool,
+    convert: UploadPipeline,
+    downsample: UploadPipeline,
+    sampler: wgpu::Sampler,
 }
+
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 fn descriptor(
     label: &'static str,
@@ -84,113 +67,50 @@ pub(crate) fn upload_rgba(gpu: &Gpu, texture: &wgpu::Texture, size: [u32; 2], pi
 }
 
 impl ImageUpload {
-    pub fn new(gpu: &Gpu, compute: bool) -> Self {
-        let srgb_storage = compute
-            && gpu
-                .caps
-                .downlevel_flags
-                .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
-        let source = if compute {
-            let shader = include_str!("pipelines/upload_compute.wgsl");
-            let shader = if srgb_storage {
-                shader.replace("rgba16float", "rgba8unorm")
-            } else {
-                shader.to_owned()
-            };
-            format!("{SOURCE}\n{shader}")
-        } else {
-            format!("{SOURCE}\n{}", include_str!("pipelines/upload_render.wgsl"))
-        };
+    pub fn new(gpu: &Gpu) -> Self {
+        let source = format!("{SOURCE}\n{}", include_str!("pipelines/upload_render.wgsl"));
         let module = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("impasto image upload"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });
-        if compute {
-            let pipeline = |entry| {
-                let pipeline =
-                    gpu.device
-                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                            label: Some(entry),
-                            layout: None,
-                            module: &module,
-                            entry_point: Some(entry),
-                            compilation_options: wgpu::PipelineCompilationOptions {
-                                constants: &[("encoded_srgb", f64::from(srgb_storage))],
-                                ..Default::default()
-                            },
-                            cache: gpu.pipeline_cache(),
-                        });
-                let layout = pipeline.get_bind_group_layout(0);
-                UploadPipeline { pipeline, layout }
-            };
-            let limits = gpu.device.limits();
-            Self {
-                pipelines: Pipelines::Compute {
-                    convert: pipeline("cs_premultiply"),
-                    downsample: pipeline("cs_downsample"),
-                    tiled: (limits.max_storage_textures_per_shader_stage >= 4
-                        && limits.max_compute_workgroup_storage_size >= 1024)
-                        .then(|| {
-                            [
-                                pipeline("cs_premultiply_mips"),
-                                pipeline("cs_downsample_mips"),
-                            ]
-                        }),
-                },
-                format: if srgb_storage {
-                    wgpu::TextureFormat::Rgba8Unorm
-                } else {
-                    wgpu::TextureFormat::Rgba16Float
-                },
-                srgb_storage,
-                usage: wgpu::TextureUsages::STORAGE_BINDING,
-            }
-        } else {
-            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-            let pipeline = |entry| {
-                let pipeline = gpu
-                    .device
-                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some(entry),
-                        layout: None,
-                        vertex: wgpu::VertexState {
-                            module: &module,
-                            entry_point: Some("vs_upload"),
-                            compilation_options: Default::default(),
-                            buffers: &[],
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &module,
-                            entry_point: Some(entry),
-                            compilation_options: Default::default(),
-                            targets: &[Some(format.into())],
-                        }),
-                        primitive: Default::default(),
-                        depth_stencil: None,
-                        multisample: Default::default(),
-                        multiview_mask: None,
-                        cache: gpu.pipeline_cache(),
-                    });
-                let layout = pipeline.get_bind_group_layout(0);
-                UploadPipeline { pipeline, layout }
-            };
-            Self {
-                pipelines: Pipelines::Render {
-                    convert: pipeline("fs_premultiply"),
-                    downsample: pipeline("fs_downsample"),
-                    sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
-                        label: Some("impasto image downsample"),
-                        mag_filter: wgpu::FilterMode::Linear,
-                        min_filter: wgpu::FilterMode::Linear,
-                        ..Default::default()
+        let pipeline = |entry| {
+            let pipeline = gpu
+                .device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(entry),
+                    layout: None,
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_upload"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        targets: &[Some(FORMAT.into())],
                     }),
-                },
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                srgb_storage,
-            }
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: gpu.pipeline_cache(),
+                });
+            let layout = pipeline.get_bind_group_layout(0);
+            UploadPipeline { pipeline, layout }
+        };
+        Self {
+            convert: pipeline("fs_premultiply"),
+            downsample: pipeline("fs_downsample"),
+            sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("impasto image downsample"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
         }
     }
 
@@ -209,41 +129,18 @@ impl ImageUpload {
             U::COPY_DST | U::TEXTURE_BINDING,
             1,
         ));
-        let mut destination = descriptor(
+        let dest = gpu.device.create_texture(&descriptor(
             "premultiplied image mips",
             size,
-            self.format,
-            self.usage
-                | U::TEXTURE_BINDING
-                | if matches!(self.pipelines, Pipelines::Render { .. }) {
-                    U::COPY_SRC
-                } else {
-                    U::empty()
-                },
+            FORMAT,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
             levels,
-        );
-        if self.srgb_storage {
-            destination.view_formats = &[wgpu::TextureFormat::Rgba8UnormSrgb];
-        }
-        let dest = gpu.device.create_texture(&destination);
+        ));
         upload_rgba(gpu, &source, size, pixels);
         let view = |texture: &wgpu::Texture, level| {
             texture.create_view(&wgpu::TextureViewDescriptor {
                 base_mip_level: level,
                 mip_level_count: Some(1),
-                ..Default::default()
-            })
-        };
-        let source = view(&source, 0);
-        let targets: Vec<_> = (0..levels).map(|level| view(&dest, level)).collect();
-        let sampled = |mip: Option<u32>| {
-            dest.create_view(&wgpu::TextureViewDescriptor {
-                format: self
-                    .srgb_storage
-                    .then_some(wgpu::TextureFormat::Rgba8UnormSrgb),
-                usage: Some(U::TEXTURE_BINDING),
-                base_mip_level: mip.unwrap_or(0),
-                mip_level_count: mip.map(|_| 1),
                 ..Default::default()
             })
         };
@@ -257,71 +154,33 @@ impl ImageUpload {
             temporary_bytes: pixels.len() as u64,
             ..Default::default()
         };
-        let bytes_per_pixel = match &self.pipelines {
-            Pipelines::Render {
-                convert,
-                downsample,
-                sampler,
-            } => {
-                let mut source = &source;
-                for (level, target) in targets.iter().enumerate() {
-                    let (pipeline, sampler) = if level == 0 {
-                        (convert, None)
-                    } else {
-                        (downsample, Some(sampler))
-                    };
-                    pipeline.encode(gpu, &mut encoder, source, target, sampler);
-                    source = target;
-                }
-                stats.render_passes = levels;
-                4
-            }
-            Pipelines::Compute {
-                convert,
-                downsample,
-                tiled,
-            } => {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("impasto compute image mips"),
-                    timestamp_writes: None,
-                });
-                let mut input = source;
-                let mut level = 0;
-                while level < levels {
-                    let extent = size.map(|side| (side >> level).max(1));
-                    let remaining = &targets[level as usize..];
-                    let base = level == 0;
-                    let (pipeline, count) = match tiled {
-                        Some([convert, downsample])
-                            if remaining.len() >= 4
-                                && extent.into_iter().all(|side| side.is_multiple_of(8)) =>
-                        {
-                            (if base { convert } else { downsample }, 4)
-                        }
-                        _ => (if base { convert } else { downsample }, 1),
-                    };
-                    let outputs = &remaining[..count];
-                    pipeline.dispatch(gpu, &mut pass, &input, outputs, extent);
-                    level += if count == 4 { 4 } else { 1 };
-                    if level < levels {
-                        input = sampled(Some(level - 1));
-                    }
-                }
-                stats.compute_passes = 1;
-                if self.srgb_storage { 4 } else { 8 }
-            }
-        };
+        let mut source = view(&source, 0);
+        for level in 0..levels {
+            let target = view(&dest, level);
+            let (pipeline, sampler) = if level == 0 {
+                (&self.convert, None)
+            } else {
+                (&self.downsample, Some(&self.sampler))
+            };
+            pipeline.encode(gpu, &mut encoder, &source, &target, sampler);
+            source = target;
+        }
+        stats.render_passes = levels;
         stats.resident_bytes = (0..levels)
             .map(|level| {
                 let [w, h] = size.map(|side| (side >> level).max(1));
-                u64::from(w) * u64::from(h) * bytes_per_pixel
+                u64::from(w) * u64::from(h) * 4
             })
             .sum();
-        (sampled(None), stats, encoder.finish())
+        (
+            dest.create_view(&Default::default()),
+            stats,
+            encoder.finish(),
+        )
     }
 }
 
-impl Render {
+impl UploadPipeline {
     fn encode(
         &self,
         gpu: &Gpu,
@@ -356,26 +215,5 @@ impl Render {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..3, 0..1);
-    }
-}
-
-impl Compute {
-    fn dispatch(
-        &self,
-        gpu: &Gpu,
-        pass: &mut wgpu::ComputePass<'_>,
-        source: &wgpu::TextureView,
-        targets: &[wgpu::TextureView],
-        extent: [u32; 2],
-    ) {
-        use wgpu::BindingResource::TextureView;
-        let mut bindings: [_; 5] = std::array::from_fn(|_| TextureView(source));
-        for (resource, target) in bindings[1..].iter_mut().zip(targets) {
-            *resource = TextureView(target);
-        }
-        let group = crate::pipelines::bind_group(gpu, &self.layout, &bindings[..1 + targets.len()]);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &group, &[]);
-        pass.dispatch_workgroups(extent[0].div_ceil(8), extent[1].div_ceil(8), 1);
     }
 }

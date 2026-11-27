@@ -26,11 +26,15 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+#[cfg(test)]
 const GALLERY_DIR: &str = "examples/gallery-solid";
 
 #[derive(Parser)]
 #[command(name = "impasto", about = "Build and run an Impasto app")]
 struct Cli {
+    /// Project directory containing app.toml.
+    #[arg(long, global = true)]
+    project: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -107,8 +111,9 @@ enum Command {
         output: PathBuf,
         #[arg(long)]
         release: bool,
-        #[arg(long, hide = true, value_parser = ["book", "chart"])]
-        freeze_stock: Option<String>,
+        /// Inline a JavaScript expression for a global identifier.
+        #[arg(long = "define", value_name = "KEY=JS_EXPR")]
+        defines: Vec<String>,
     },
     /// Synchronize platform projects and generated declarations.
     Sync {
@@ -208,7 +213,16 @@ enum PackagesCommand {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    if let Some(project) = cli.project
+        && let Err(error) = std::env::set_current_dir(&project)
+    {
+        return finish(Err(anyhow::anyhow!(
+            "无法进入 {}: {error}",
+            project.display()
+        )));
+    }
+    match cli.command {
         Command::Create {
             name,
             with_rust,
@@ -266,7 +280,7 @@ fn main() -> ExitCode {
             entry,
             output,
             release,
-            freeze_stock,
+            defines,
         } => finish(build::pack(
             &entry,
             &output,
@@ -276,7 +290,7 @@ fn main() -> ExitCode {
                 verbose: false,
                 trace: false,
             },
-            freeze_stock.as_deref(),
+            &defines,
         )),
         Command::Sync { platform } => finish(sync::run(platform.as_deref())),
         Command::Analyze {
@@ -353,12 +367,11 @@ fn finish(result: anyhow::Result<()>) -> ExitCode {
     }
 }
 
-/// Framework checkout when this binary was built from one. Used so `impasto run`
-/// inside the checkout still opens the gallery.
+/// Framework checkout used to build this executable.
 fn framework_root() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = manifest.join("../..");
-    if root.join(GALLERY_DIR).join("app.toml").is_file() {
+    if root.join("Cargo.lock").is_file() && root.join("crates/engine/Cargo.toml").is_file() {
         root.canonicalize().ok()
     } else {
         None

@@ -22,8 +22,12 @@ pub enum Status {
     AcquireMiss,
     #[error("graphics memory exhausted")]
     OutOfMemory,
+    /// Surface is occluded.
     #[error("surface is occluded")]
     Occluded,
+    /// Frame glyph resources exceeded the synchronous budget and are preparing asynchronously.
+    #[error("frame resources are preparing")]
+    ResourcesPending,
     /// No adapter or device could be created for the requested backend.
     #[error("no graphics device: {0:?}")]
     NoDevice(RasterBackend),

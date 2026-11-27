@@ -383,7 +383,7 @@ impl Tree {
         if !self.platform_views.is_empty() {
             return Err(CompositorBlockReason::PlatformViewPresent);
         }
-        if self.needs_layout() || self.needs_paint() || self.pending_long_press() {
+        if self.needs_layout() || self.needs_paint() {
             return Err(CompositorBlockReason::PendingUiWork);
         }
         for motion in &self.motions {

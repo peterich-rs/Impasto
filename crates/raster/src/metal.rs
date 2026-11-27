@@ -50,7 +50,12 @@ impl Rasterizer {
         if self.frame.is_none() {
             return Err(Status::NotReady);
         }
-        device.compositor.begin_frame();
+        device.compositor.begin_frame(
+            self.resources_ready
+                .as_ref()
+                .filter(|_| self.parallel_prepare),
+            self.resource_prepare_deadline,
+        );
         Ok(MetalSliceBatch {
             generation: device.generation,
             frame: self.frame_number,

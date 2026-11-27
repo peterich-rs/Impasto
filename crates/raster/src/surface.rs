@@ -454,18 +454,9 @@ fn configure(
         .unwrap_or(2);
     let present = std::env::var("IMPASTO_PRESENT_MODE").ok();
     config.present_mode = present_mode(present.as_deref(), &caps.present_modes);
-    let alpha = match std::env::var("IMPASTO_SURFACE_ALPHA").as_deref() {
-        Ok("opaque") => Some(wgpu::CompositeAlphaMode::Opaque),
-        Ok("premultiplied") => Some(wgpu::CompositeAlphaMode::PreMultiplied),
-        Ok("postmultiplied") => Some(wgpu::CompositeAlphaMode::PostMultiplied),
-        _ => None,
-    };
-    if let Some(alpha) = alpha.filter(|alpha| caps.alpha_modes.contains(alpha)) {
-        config.alpha_mode = alpha;
-    }
     resize(gpu, &raw, &mut config, pixels)?;
     tracing::info!(
-        target: "impasto::surface", ?present, requested_alpha = ?alpha,
+        target: "impasto::surface", ?present,
         present = ?config.present_mode, alpha = ?config.alpha_mode, format = ?config.format,
         color_space = ?config.color_space, latency = config.desired_maximum_frame_latency,
         "surface configured"

@@ -274,22 +274,44 @@ pub fn apply_compositor_samples(
     tracks: &[CompositorTrack],
     samples: &[CompositorSample],
 ) -> bool {
+    let Some(overrides) = compositor_layer_samples(layers, tracks, samples) else {
+        return false;
+    };
+    for (id, layer) in overrides {
+        layers[id.0 as usize] = layer;
+    }
+    true
+}
+
+/// Copies and samples only layers addressed by the tracks and their scroll bindings.
+pub fn compositor_layer_samples(
+    layers: &[Layer],
+    tracks: &[CompositorTrack],
+    samples: &[CompositorSample],
+) -> Option<HashMap<LayerId, Layer>> {
+    fn touched<'a>(
+        overrides: &'a mut HashMap<LayerId, Layer>,
+        layers: &[Layer],
+        id: LayerId,
+    ) -> Option<&'a mut Layer> {
+        let layer = layers.get(id.0 as usize)?;
+        Some(overrides.entry(id).or_insert_with(|| layer.clone()))
+    }
     if tracks.len() != samples.len()
         || tracks
             .iter()
             .zip(samples)
             .any(|(track, sample)| track.id != sample.id)
     {
-        return false;
+        return None;
     }
+    let mut overrides = HashMap::new();
     let mut start = 0;
     for group in tracks.chunk_by(|left, right| left.layer == right.layer) {
-        let Some(layer) = layers.get_mut(group[0].layer.0 as usize) else {
-            return false;
-        };
+        let layer = touched(&mut overrides, layers, group[0].layer)?;
         let end = start + group.len();
         if !apply_layer(&mut layer.kind, group, &samples[start..end]) {
-            return false;
+            return None;
         }
         start = end;
     }
@@ -297,23 +319,21 @@ pub fn apply_compositor_samples(
     for (track, sample) in tracks.iter().zip(samples) {
         for binding in track.scroll_bindings.iter() {
             let value = binding.prop.evaluate(&binding.curve, sample.value);
-            let Some(layer) = layers.get_mut(binding.layer.0 as usize) else {
-                return false;
-            };
+            let layer = touched(&mut overrides, layers, binding.layer)?;
             if let (Some(base), ScrollValue::Scalar(value)) = (binding.transform, value) {
                 let transform = transforms.entry(binding.layer).or_insert(base);
                 binding.prop.apply_transform(transform, value);
             } else if !binding.apply(&mut layer.kind, value) {
-                return false;
+                return None;
             }
         }
     }
     for (id, transform) in transforms {
-        if !write_transform(&mut layers[id.0 as usize].kind, transform) {
-            return false;
+        if !write_transform(&mut overrides.get_mut(&id)?.kind, transform) {
+            return None;
         }
     }
-    true
+    Some(overrides)
 }
 
 fn write_transform(kind: &mut LayerKind, transform: CompositorTransform) -> bool {

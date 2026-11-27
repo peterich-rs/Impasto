@@ -136,8 +136,8 @@ impl Vsync for DisplayLink {
         self.events.send(Event::FrameRequested, token.0, message);
     }
 
-    fn cancel(&self) {
-        self.events.send(Event::FrameCancelled, 0, None);
+    fn cancel_if_token(&self, token: FrameToken) {
+        self.events.send(Event::FrameCancelled, token.0, None);
     }
 }
 
@@ -314,7 +314,6 @@ impl ImpastoIOSHost {
                         },
                         || MainThreadMarker::new().is_some(),
                     )),
-                    thread_topology: embedder::ThreadTopology::configured()?,
                     launch_url,
                     open_raster: Box::new(|fonts| {
                         Rasterizer::create(raster::RasterOptions::default(), fonts)
@@ -620,10 +619,10 @@ pub unsafe extern "C" fn impasto_ios_frame(
     timestamp_seconds: f64,
     target_seconds: f64,
 ) {
-    with_host(host, |host| {
-        host.clock
-            .frame(FrameToken(token), timestamp_seconds, target_seconds)
-    });
+    let clock = with_host(host, |host| Some(Arc::clone(&host.clock)));
+    if let Some(clock) = clock {
+        clock.frame(FrameToken(token), timestamp_seconds, target_seconds);
+    }
 }
 
 #[unsafe(no_mangle)]

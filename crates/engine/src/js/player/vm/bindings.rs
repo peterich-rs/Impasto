@@ -29,6 +29,7 @@ pub(super) const GESTURES: &[(&str, i32)] = &[
     ("onTextReplaced", 16),
     ("onLink", 17),
     ("onLongPress", 18),
+    ("onDoubleTap", 19),
     ("onZoom", 20),
     ("observeScrollOffset", 22),
 ];
@@ -73,6 +74,7 @@ const CORE_NAMES: &[&str] = &[
     "requestFrame",
     "onFrame",
     "onLayout",
+    "onMemoryPressure",
     "onBack",
     "offBack",
     "onBackGesture",
@@ -356,11 +358,30 @@ fn native<'js>(
         let id = handle(ctx, args, 0)?;
         let value = value(ctx, args, 1);
         if value.is_null() || value.is_undefined() {
+            if name == "onZoom" {
+                apply(
+                    host,
+                    ctx,
+                    Mutation::ZoomTarget {
+                        id: NodeId::from_raw(id),
+                        enabled: false,
+                    },
+                )?;
+            }
             host.refs.borrow_mut().callbacks.remove(&(id, *kind));
             return Ok(undefined());
         }
         let callback = saved_function(ctx, args, 1)?;
-        if name != "observeScrollOffset" {
+        if name == "onZoom" {
+            apply(
+                host,
+                ctx,
+                Mutation::ZoomTarget {
+                    id: NodeId::from_raw(id),
+                    enabled: true,
+                },
+            )?;
+        } else if name != "observeScrollOffset" {
             apply(host, ctx, Mutation::PointerTarget(NodeId::from_raw(id)))?;
         }
         host.refs
@@ -626,7 +647,7 @@ fn native<'js>(
             apply(host, ctx, Mutation::SourceRemove(source))?;
         }
         "onFrame" | "onLayout" | "onScrollState" | "onScrollThreshold" | "onDriver"
-        | "onBackGesture" => {
+        | "onBackGesture" | "onMemoryPressure" => {
             if name == "onFrame" && args.first().is_none_or(|value| value.is_undefined()) {
                 host.refs.borrow_mut().hooks.remove("frame");
                 return Ok(Value::new_undefined(ctx.clone()));
@@ -635,6 +656,7 @@ fn native<'js>(
             let key = match name {
                 "onFrame" => "frame",
                 "onLayout" => "layout",
+                "onMemoryPressure" => "memoryPressure",
                 "onDriver" => "driver",
                 "onScrollThreshold" => "scrollThreshold",
                 "onBackGesture" => "backGesture",

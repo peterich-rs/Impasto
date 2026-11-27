@@ -16,7 +16,7 @@ FIRST = re.compile(r"FIRST (click|scroll) (\d+) (\d+) (\d+) ([\d.]+)")
 STARTUP = re.compile(r"STARTUP (click|scroll) ([\d.]+)")
 IQJS = re.compile(r"IQJS (\d+)")
 TEST = [
-    "cargo", "test", "--locked", "-p", "engine", "--features", "js", "--lib",
+    "cargo", "test", "--locked", "-p", "engine", "--features", "gallery-tests", "--lib",
     "toolchain_baseline_counts", "--", "--ignored", "--nocapture",
 ]
 

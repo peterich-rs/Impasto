@@ -272,6 +272,7 @@ export interface SceneModule {
   unbindScrollProp(id: number): void;
   addScrollThreshold(node: NodeHandle, source: ScrollChannel, value: number, fromEnd: boolean, hysteresis: number): number;
   removeScrollThreshold(id: number): void;
+  onMemoryPressure?(fn: () => void): void;
   onScrollThreshold(fn: (id: number, active: boolean) => void): void;
   /** One callback, installed by `boot`. Phase is `idle` | `dragging` | `coasting` | `settling`. */
   onScrollState(
@@ -286,6 +287,7 @@ export interface SceneModule {
   ): void;
   onSecondaryClick(node: NodeHandle, fn: () => void): void;
   onLongPress(node: NodeHandle, fn: () => void): void;
+  onDoubleTap(node: NodeHandle, fn: () => void): void;
   textEdit(
     node: NodeHandle,
     op: number,

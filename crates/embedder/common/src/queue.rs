@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::BootError;
@@ -6,12 +7,18 @@ use crate::command::Command;
 use crate::host::UiHost;
 use crate::input::push_coalesced;
 
+pub(crate) enum Work {
+    Completions(Vec<Completion>),
+    Command(Command),
+}
+
 pub(crate) type Completion = Box<dyn FnOnce(&mut UiHost) -> Result<bool, BootError> + Send>;
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
 
 pub struct Inbox {
     state: Mutex<State>,
+    retired_surface: Arc<AtomicU64>,
 }
 
 struct State {
@@ -24,6 +31,7 @@ struct State {
 impl Inbox {
     pub fn new() -> Self {
         Self {
+            retired_surface: Arc::new(AtomicU64::new(0)),
             state: Mutex::new(State {
                 commands: VecDeque::new(),
                 completions: VecDeque::new(),
@@ -46,6 +54,15 @@ impl Inbox {
 
     pub fn post(&self, command: Command) {
         self.post_if(command, |_| true);
+    }
+
+    // The platform is already executing the only consumer. It drains the
+    // commands queued before this tick together with the tick itself.
+    pub(crate) fn post_inline_frame(&self, command: Command) {
+        let mut state = lock(&self.state);
+        if !state.closed {
+            push_coalesced(&mut state.commands, command);
+        }
     }
 
     pub(crate) fn post_plugin_event(&self, event: impasto::abi::HostEvent) -> bool {
@@ -103,8 +120,15 @@ impl Inbox {
         }
     }
 
-    pub(crate) fn take_completion(&self) -> Option<Completion> {
-        lock(&self.state).completions.pop_front()
+    pub(crate) fn take_work(&self, limit: usize) -> Option<Work> {
+        let mut state = lock(&self.state);
+        let count = state.completions.len().min(limit).min(8);
+        if count != 0 {
+            return Some(Work::Completions(
+                state.completions.drain(..count).collect(),
+            ));
+        }
+        state.commands.pop_front().map(Work::Command)
     }
 
     pub fn close(&self) {
@@ -120,7 +144,16 @@ impl Inbox {
         drop(commands);
     }
 
+    pub(crate) fn surface_gate(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.retired_surface)
+    }
+
+    pub(crate) fn admits_surface(&self, id: crate::SurfaceId) -> bool {
+        id.0 > self.retired_surface.load(Ordering::Acquire)
+    }
+
     pub fn discard_surface(&self, id: crate::SurfaceId) {
+        self.retired_surface.fetch_max(id.0, Ordering::AcqRel);
         lock(&self.state).commands.retain(|command| match command {
             Command::SurfaceReady(target) => target.id != id,
             Command::SurfaceChanged { id: queued, .. } => *queued != id,
@@ -128,6 +161,7 @@ impl Inbox {
         });
     }
 
+    #[cfg(test)]
     pub fn pop(&self) -> Option<Command> {
         lock(&self.state).commands.pop_front()
     }

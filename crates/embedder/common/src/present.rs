@@ -43,6 +43,7 @@ pub fn after_present(result: Result<Presented, raster::Status>, again: bool) -> 
             | raster::Status::SurfaceLost
             | raster::Status::NotReady
             | raster::Status::AcquireMiss
+            | raster::Status::ResourcesPending
             | raster::Status::OutOfMemory,
         ) => AfterPresent::Retry,
         Err(raster::Status::BadScene | raster::Status::Occluded) => AfterPresent::Rejected,
@@ -63,6 +64,10 @@ mod tests {
         );
         assert_eq!(
             after_present(Err(raster::Status::NotReady), true),
+            AfterPresent::Retry
+        );
+        assert_eq!(
+            after_present(Err(raster::Status::ResourcesPending), false),
             AfterPresent::Retry
         );
         assert_eq!(

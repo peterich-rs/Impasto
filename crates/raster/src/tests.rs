@@ -385,9 +385,6 @@ mod p0;
 
 #[test]
 fn odd_image_mips_average_linear_premultiplied_texels() {
-    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("cpu") {
-        return;
-    }
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };
@@ -422,23 +419,7 @@ fn odd_image_mips_average_linear_premultiplied_texels() {
         })
         .unwrap();
     let stats = raster.submit_stats().image_upload;
-    assert_eq!(
-        stats.render_passes + stats.compute_passes,
-        if stats.compute_passes == 0 { levels } else { 1 },
-        "{stats:?}"
-    );
-    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("compute")
-        && raster.device.as_ref().unwrap().gpu.caps.has_compute
-    {
-        let feature =
-            wgpu::TextureFormat::Rgba16Float.guaranteed_format_features(wgpu::Features::empty());
-        if feature
-            .flags
-            .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
-        {
-            assert_eq!(stats.compute_passes, 1, "{stats:?}");
-        }
-    }
+    assert_eq!(stats.render_passes, levels, "{stats:?}");
     let pixel = raster.render_rgba(PixelSize::new(1, 1)).unwrap();
     assert!(
         pixel[0] >= 250 && pixel[1] == 0 && pixel[2] == 0 && pixel[3].abs_diff(28) <= 1,
@@ -448,9 +429,6 @@ fn odd_image_mips_average_linear_premultiplied_texels() {
 
 #[test]
 fn three_texel_mip_keeps_the_two_edge_texels() {
-    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("cpu") {
-        return;
-    }
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };
@@ -485,9 +463,6 @@ fn three_texel_mip_keeps_the_two_edge_texels() {
 
 #[test]
 fn compute_blur_writes_bounded_output_and_counts_both_axes() {
-    if std::env::var("IMPASTO_COMPUTE_BLUR").as_deref() != Ok("1") {
-        return;
-    }
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };
@@ -523,58 +498,6 @@ fn compute_blur_writes_bounded_output_and_counts_both_axes() {
     let alpha = |x, y| pixel(&image, 112, x, y)[3];
     assert_eq!(alpha(15, 51), alpha(55, 15));
     assert_eq!(alpha(95, 51), alpha(55, 87));
-}
-
-#[test]
-fn compute_upload_fuses_mips_without_losing_the_smallest_image() {
-    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() != Ok("compute") {
-        return;
-    }
-    let Some(mut raster) = headless(FontLibrary::new()) else {
-        return;
-    };
-    let gpu = &raster.device.as_ref().unwrap().gpu;
-    if !gpu.caps.has_compute {
-        return;
-    }
-    let srgb_views = gpu
-        .caps
-        .downlevel_flags
-        .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
-    let side = 1024;
-    let scene = tree(
-        1,
-        [Command::Image {
-            x: 0.0,
-            y: 0.0,
-            w: 1.0,
-            h: 1.0,
-            source: Arc::from("four-quadrants"),
-            mode: ContentMode::Fill,
-            required: true,
-        }],
-    );
-    let mut pixels = vec![[0, 0, 255, 0]; side * side];
-    for row in pixels.chunks_mut(side).take(side / 2) {
-        row[..side / 2].fill([255, 0, 0, 255]);
-    }
-    let stats = raster
-        .submit_layers(&scene, 1.0, |_| {
-            Some(ImagePixels {
-                width: u32::try_from(side).unwrap(),
-                height: u32::try_from(side).unwrap(),
-                rgba: pixels.as_flattened(),
-            })
-        })
-        .unwrap()
-        .stats
-        .image_upload;
-    assert_eq!((stats.compute_passes, stats.render_passes), (1, 0));
-    let bytes_per_texel = if srgb_views { 4 } else { 8 };
-    assert_eq!(stats.resident_bytes, 1_398_101 * bytes_per_texel);
-    let image = raster.render_rgba(PixelSize::new(1, 1)).unwrap();
-    assert!(image[0] >= 254, "{image:?}");
-    assert_eq!(&image[1..], &[0, 0, 64]);
 }
 
 #[test]
@@ -679,13 +602,10 @@ fn retained_paint_slots_change_pixels_without_picture_compilation() {
 }
 
 #[test]
-fn reusable_canvas_path_keeps_even_odd_holes_and_reuses_the_distance_field() {
+fn reusable_canvas_path_keeps_even_odd_holes_through_transforms() {
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };
-    if std::env::var("IMPASTO_TEXT_MSDF").as_deref() == Ok("0") {
-        return;
-    }
     let asset = CanvasPath {
         verbs: Arc::from([
             PathVerb::Move(0.0, 0.0),
@@ -702,7 +622,7 @@ fn reusable_canvas_path_keeps_even_odd_holes_and_reuses_the_distance_field() {
         fill: FillRule::EvenOdd,
     };
     let size = PixelSize::new(64, 64);
-    for (generation, translate, scale) in [(1, 4.0, 1.0), (2, 10.0, 1.5)] {
+    for (generation, translate, scale) in [(1, 4.0, 1.0), (2, 4.0, 1.0), (3, 10.0, 1.5)] {
         let transform = [scale, 0.0, 0.0, scale, translate, translate];
         let mapped = CanvasPath {
             verbs: asset
@@ -746,13 +666,8 @@ fn reusable_canvas_path_keeps_even_odd_holes_and_reuses_the_distance_field() {
             .submit_layers(&tree(generation, [command]), 1.0, |_| None)
             .unwrap();
         let pixels = raster.render_rgba(size).unwrap();
-        let (solid, hole) = if generation == 1 { (7, 14) } else { (14, 25) };
+        let (solid, hole) = if generation < 3 { (7, 14) } else { (14, 25) };
         assert_eq!(pixels[(solid * 64 + solid) * 4 + 3], 255);
         assert_eq!(pixels[(hole * 64 + hole) * 4 + 3], 0);
-        assert_eq!(
-            raster.submit_stats().render.msdf_misses,
-            u32::from(generation == 1)
-        );
-        assert_eq!(raster.submit_stats().render.offscreen_passes, 0);
     }
 }

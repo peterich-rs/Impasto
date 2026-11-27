@@ -457,7 +457,7 @@ fn frame_value(frame: &super::FrameSample, fields: FrameFields) -> Value {
         "id": frame.number, "revision": frame.changed_at, "budget_ms": frame.budget_ms,
         "ui_ms": frame.schedule.ui_ms(), "raster_ms": frame.schedule.raster_ms(),
         "queue_ms": frame.schedule.queue_ms(), "e2e_ms": frame.schedule.e2e_ms(),
-        "topology": frame.schedule.topology.name(),
+        "topology": frame.schedule.topology,
         "compositor_only": frame.schedule.compositor_only,
         "compositor_block": frame.schedule.compositor_block.map(|reason| json!({
             "reason": reason.name(), "node": reason.node().map(|id| id.to_string()),

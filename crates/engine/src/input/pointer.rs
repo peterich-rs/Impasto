@@ -73,6 +73,48 @@ pub struct PointerEvent {
     pub pen: Option<PenSample>,
 }
 
+/// A position and timestamp used to estimate motion independently of dispatch.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PointerSample {
+    pub x: f32,
+    pub y: f32,
+    pub time_ms: f64,
+}
+
+impl From<PointerEvent> for PointerSample {
+    fn from(event: PointerEvent) -> Self {
+        Self {
+            x: event.x,
+            y: event.y,
+            time_ms: event.time_ms,
+        }
+    }
+}
+
+/// Recent positions from a platform move batch, in chronological order.
+#[derive(Debug, Default, PartialEq)]
+pub struct PointerHistory {
+    samples: [PointerSample; Self::CAPACITY],
+    len: usize,
+}
+
+impl PointerHistory {
+    pub const CAPACITY: usize = 12;
+
+    pub fn push(&mut self, sample: PointerSample) {
+        if self.len == Self::CAPACITY {
+            self.samples.copy_within(1.., 0);
+            self.len -= 1;
+        }
+        self.samples[self.len] = sample;
+        self.len += 1;
+    }
+
+    pub fn as_slice(&self) -> &[PointerSample] {
+        &self.samples[..self.len]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PenSample {
     /// Normalized pressure, radius in scene points, angles in radians.

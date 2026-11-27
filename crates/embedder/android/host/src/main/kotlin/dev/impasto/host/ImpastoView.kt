@@ -92,6 +92,7 @@ class ImpastoView internal constructor(
         backFallback = null
         nativeRequests = null
         handle = 0L
+        semanticsRevision = 0L
         sessionReady = false
     }
 
@@ -181,7 +182,6 @@ class ImpastoView internal constructor(
         if (handle == 0L) return false
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             requestFocus()
-            requestUnbufferedDispatch(event)
         }
         if (pointer.touch(event)) {
             frames.primeTouch()
@@ -229,9 +229,10 @@ class ImpastoView internal constructor(
     }
 
     // Called by the native Bridge. View updates are dispatched to the main thread.
-    fun scheduleFrame(token: Long, rate: Int) = onMain {
-        surface.requestFrameRate(rate)
-        frames.schedule(token)
+    fun scheduleFrame(order: Long, token: Long, rate: Int) = onMain {
+        if (handle != 0L && frames.update(order, token) && token != 0L) {
+            surface.requestFrameRate(rate)
+        }
     }
 
     fun onSessionStarted(status: Int) = onMain {
@@ -279,7 +280,11 @@ class ImpastoView internal constructor(
         }
     }
 
+    private var semanticsRevision = 0L
+
     fun publishSemantics(
+        revision: Long,
+        reset: Boolean,
         ids: LongArray,
         roles: IntArray,
         labels: Array<String>,
@@ -294,9 +299,12 @@ class ImpastoView internal constructor(
         autofillHints: Array<String>,
         autofillValues: Array<String>,
     ) = onMain {
-        access.update(ids, roles, labels, values, flags, actions, selection, scroll, descriptions, parents, bounds)
-        if (Build.VERSION.SDK_INT >= 26 && autofillBridge?.enabled == true && isAttachedToWindow) {
-            autofillBridge.update(ids, autofillHints, autofillValues, flags, bounds)
+        if (handle != 0L && revision > semanticsRevision) {
+            semanticsRevision = revision
+            access.update(ids, roles, labels, values, flags, actions, selection, scroll, descriptions, parents, bounds, reset)
+            if (Build.VERSION.SDK_INT >= 26 && autofillBridge?.enabled == true && isAttachedToWindow) {
+                autofillBridge.update(ids, autofillHints, autofillValues, flags, bounds, reset)
+            }
         }
     }
 

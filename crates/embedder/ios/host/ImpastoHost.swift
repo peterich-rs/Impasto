@@ -481,7 +481,7 @@ public final class ImpastoHost {
                 frameClock.request(value, preferredRate: Float(message))
             }
         case IMPASTO_IOS_EVENT_FRAME_CANCELLED:
-            frameClock.cancel()
+            frameClock.cancel(value)
         case IMPASTO_IOS_EVENT_FRAME_SUBMITTED:
             waitForPresentation(surfaceID: value)
         case IMPASTO_IOS_EVENT_FRAME_PRESENTED:
@@ -582,10 +582,25 @@ public final class ImpastoHost {
         }
     }
 
-    func pointer(_ candidate: ImpastoViewController, _ sample: PointerSample) -> Bool {
+    func pointer(
+        _ candidate: ImpastoViewController, _ sample: PointerSample,
+        history: [ImpastoIOSPointerPoint] = []
+    ) -> Bool {
         guard controller === candidate, let handle = connection.handle, let surface else { return false }
         if sample.phase != .cancel && lifecycle != .resumed { return false }
-        if let pencil = sample.pencil {
+        if !history.isEmpty {
+            let point = ImpastoIOSPointerPoint(
+                x: Float(sample.point.x), y: Float(sample.point.y), seconds: sample.time
+            )
+            history.withUnsafeBufferPointer { positions in
+                impasto_ios_pointer_move(
+                    handle, surface.id, sample.id, sample.kind, point, sample.buttons, sample.modifiers,
+                    sample.pencil?.force ?? 0, sample.pencil?.radius ?? 0,
+                    sample.pencil?.altitude ?? 0, sample.pencil?.azimuth ?? 0,
+                    positions.baseAddress, positions.count
+                )
+            }
+        } else if let pencil = sample.pencil {
             impasto_ios_pen(
                 handle, surface.id, sample.id, sample.phase.rawValue,
                 Float(sample.point.x), Float(sample.point.y), sample.time,
@@ -946,7 +961,8 @@ private final class FrameClock: NSObject {
         lifetime?.link?.isPaused = false
     }
 
-    func cancel() {
+    func cancel(_ request: UInt64) {
+        guard token == request else { return }
         token = nil
         lifetime?.link?.isPaused = true
     }

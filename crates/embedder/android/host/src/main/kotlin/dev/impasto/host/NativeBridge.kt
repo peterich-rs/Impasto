@@ -115,6 +115,8 @@ internal object NativeBridge {
         wheelX: Float,
         wheelY: Float,
         density: Float,
+        history: DoubleArray?,
+        historyCount: Int,
     )
 
     external fun nativeZoom(handle: Long, scale: Float, x: Float, y: Float, timeMs: Long, density: Float)

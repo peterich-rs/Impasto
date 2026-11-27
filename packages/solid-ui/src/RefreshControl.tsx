@@ -1,5 +1,5 @@
 import { View as HostView } from "@impasto/solid-renderer/host";
-import { createSignal, onCleanup, type Accessor } from "solid-js";
+import { createSignal, onCleanup, untrack, type Accessor } from "solid-js";
 import {
   animate,
   bindNodeRef,
@@ -43,9 +43,11 @@ export function RefreshControl(props: RefreshControlProps): NodeHandle {
   const edge = () => props.edge ?? "start";
   const threshold = () => Math.max(1, props.threshold ?? 64);
   const theme = useTheme();
+  const controller = untrack(() => props.controller);
+  const gesture = untrack(() => props.gesture);
   const [progress, setProgress] = createSignal(0);
   const [busy, setBusy] = createSignal(false);
-  const ready = useScrollThreshold(props.controller, {
+  const ready = useScrollThreshold(controller, {
     axis: "overscrollY",
     get value() { return edge() === "start" ? -threshold() : threshold(); },
   });
@@ -77,7 +79,7 @@ export function RefreshControl(props: RefreshControlProps): NodeHandle {
     requestFrame();
   }
   function sample(): number {
-    const node = props.controller.node();
+    const node = controller.node();
     if (node === 0) {
       return 0;
     }
@@ -93,12 +95,12 @@ export function RefreshControl(props: RefreshControlProps): NodeHandle {
     );
   }
   function park(overscroll: number): void {
-    const node = props.controller.node();
+    const node = controller.node();
     if (node === 0) {
       return;
     }
     const target = edge() === "start" ? -threshold() : threshold();
-    props.controller.stop();
+    controller.stop();
     if (Math.abs(overscroll - target) < 0.5) {
       return;
     }
@@ -115,7 +117,7 @@ export function RefreshControl(props: RefreshControlProps): NodeHandle {
   function finish(): void {
     if (disposed) return;
     setBusy(false);
-    const node = props.controller.node();
+    const node = controller.node();
     const overscroll = sample();
     if (node !== 0 && gapOpen(edge(), overscroll)) {
       closing = props.children !== undefined;
@@ -157,14 +159,14 @@ export function RefreshControl(props: RefreshControlProps): NodeHandle {
       .then(() => props.onRefresh())
       .then(finish, finish);
   }
-  props.gesture({
+  gesture({
     onDragBy,
     onDragEnd,
   });
   onCleanup(() => {
     disposed = true;
     endSampling();
-    props.gesture({ onDragBy: () => {}, onDragEnd: () => {} });
+    gesture({ onDragBy: () => {}, onDragEnd: () => {} });
   });
   return (
     <HostView

@@ -7,12 +7,14 @@ import {
   createTrackedEffect,
   onCleanup,
   untrack,
+  useContext,
   type Accessor,
 } from "solid-js";
 import { Errored } from "solid-js";
 import {
   Text,
   scene,
+  SubtreeVisibleContext,
   restoreFocus,
   spring,
   type NodeHandle,
@@ -35,7 +37,7 @@ export type TransitionProps = {
 };
 export type RouterViewProps = {
   router: Router;
-  /** Default stack slide, including clip, pointer, and pageDistance. */
+  /** Transition selected when each route mounts. Defaults to the stack slide. */
   transition?: (props: TransitionProps) => NodeHandle;
   /** Page color for the default transition. Omitted leaves the background transparent. */
   background?: string;
@@ -265,6 +267,9 @@ function RouteHost(props: {
 }): NodeHandle {
   let previous = 0;
   let scope: NodeHandle | undefined;
+  let lastFocused = 0;
+  const parentVisible = useContext(SubtreeVisibleContext);
+  const branchVisible = createMemo(() => parentVisible() && props.router.stack().some(entry => entry.key === props.entry().key));
   const showsBackScrim = () => {
     const preview = props.router.backPreview();
     if (!preview || scene.settings?.().reduceMotion) return false;
@@ -285,14 +290,14 @@ function RouteHost(props: {
   onCleanup(() => {
     if (scope !== undefined && scene.popFocusScope?.(scope)) restoreFocus(previous);
   });
-  const { component: Page, lazy, fallback, keepAlive } = untrack(props.entry);
+  const { component: Page, lazy, fallback, keepAlive } = untrack(() => props.entry());
   const params = createMemo(() => props.entry().params);
   const transitionEnd = createMemo((previous?: { entry: RouteEntry; done: () => void }) => {
     const entry = props.entry();
     return previous?.entry === entry ? previous : { entry, done: () => props.router.complete(entry) };
   });
   const transition =
-    props.transition ??
+    untrack(() => props.transition) ??
     ((step: TransitionProps) => (
       <StackTransition
         phase={step.phase}
@@ -304,6 +309,7 @@ function RouteHost(props: {
       </StackTransition>
     ));
   return (
+    <SubtreeVisibleContext value={branchVisible}>
     <PageActiveContext value={active}>
       <PageKeepContext value={() => keepAlive}>
         <HostStack
@@ -313,15 +319,29 @@ function RouteHost(props: {
               gridTemplateColumns: "minmax(0, 1fr)",
               gridTemplateRows: "minmax(0, 1fr)",
             });
-            previous =
-              typeof scene.focused === "function" ? scene.focused() : 0;
-            try {
-              scene.pushFocusScope(node);
-              scope = node;
-            } catch {
-              // Mock hosts without a scope stack still mount the page.
-            }
-            createTrackedEffect(() => scene.setSemanticsHidden?.(node, !active()));
+            createTrackedEffect(() => {
+              if (!branchVisible()) {
+                if (scope !== undefined) {
+                  if (scene.focused?.()) lastFocused = scene.focused();
+                  if (scene.popFocusScope?.(scope)) restoreFocus(previous);
+                  scope = undefined;
+                }
+                scene.patchStyle(node, { display: "none" });
+              } else {
+                scene.clearStyle(node, ["display"]);
+                if (scope === undefined) {
+                  previous = scene.focused?.() ?? 0;
+                  try {
+                    scene.pushFocusScope(node);
+                    scope = node;
+                    if (lastFocused) restoreFocus(lastFocused);
+                  } catch {
+                    // Mock hosts can omit the scope stack.
+                  }
+                }
+              }
+              scene.setSemanticsHidden?.(node, !active());
+            });
             let previewing = false;
             createTrackedEffect(() => {
               const preview = props.router.backPreview();
@@ -391,6 +411,7 @@ function RouteHost(props: {
         </HostStack>
       </PageKeepContext>
     </PageActiveContext>
+    </SubtreeVisibleContext>
   );
 }
 export function RouterView(props: RouterViewProps): NodeHandle {
@@ -413,7 +434,7 @@ export function RouterView(props: RouterViewProps): NodeHandle {
         overflow: "clip",
       }}
     >
-      <For each={props.router.stack()} keyed={(entry) => entry.key}>
+      <For each={props.router.retainedStack?.() ?? props.router.stack()} keyed={(entry) => entry.key}>
         {(entry) => (
           <RouteHost
             router={props.router}

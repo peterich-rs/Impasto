@@ -29,6 +29,10 @@ fn invalidate(runtime: &mut UiHost) {
 }
 
 fn memory_warning(runtime: &mut UiHost) {
+    runtime.shaper.borrow_mut().trim();
+    if let Some(session) = runtime.session.as_mut() {
+        super::session_call(|| session.memory_pressure());
+    }
     flush_gpu(runtime, "memory");
     runtime.graphics.post(|graphics| graphics.images.trim());
     if !runtime.input.is_paused() {

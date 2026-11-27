@@ -1,13 +1,13 @@
 import { For, Show, createMemo, createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
-import { onFrame, onLayout, requestFrame, scene } from "@impasto/solid-renderer";
+import { onLayout, scene } from "@impasto/solid-renderer";
 import { Canvas, Column, Pressable, Role, Row, View, VirtualList, createScrollController } from "@impasto/solid-ui";
-import type { Router } from "@impasto/solid-router";
+import { usePageActive, type Router } from "@impasto/solid-router";
 import { fmtPrice, fmtSigned } from "../format.ts";
 import { loc } from "../copy.ts";
 import { marketOpen, minute, sectorOf, sectors } from "../engine/analytics.ts";
 import { downsampleTicks } from "../engine/universe.ts";
 import type { QuoteEngine } from "../engine/engine.ts";
-import type { Instrument } from "../engine/types.ts";
+import type { Instrument, Quote } from "../engine/types.ts";
 import { useMarketPulse, useQuotes } from "../state/quotes-provider.tsx";
 import { inWatchlist, toggleWatch, watchlistSig } from "../state/watchlist.ts";
 import { dot, stroke } from "../widgets/stocks/chart.tsx";
@@ -36,40 +36,6 @@ function InlineStock(props: Parameters<StockView>[0]) {
 const filters = ["all", "gainers", "losers", "active"] as const;
 type Filter = typeof filters[number];
 const initialIndex = 4120.0;
-const publicationGroups = 8;
-
-/** Distributes the market snapshots across frames while keeping the per-row cadence. */
-function useRowPublications(revision: () => number, active: () => boolean) {
-  let published = untrack(revision);
-  let group = publicationGroups;
-  const groups = Array.from({ length: publicationGroups }, () => createSignal(published));
-  let stop: (() => void) | undefined;
-  function stopPublishing() {
-    stop?.();
-    stop = undefined;
-    group = publicationGroups;
-  }
-  createTrackedEffect(() => {
-    const next = revision();
-    if (!active()) {
-      stopPublishing();
-    } else if (next !== published && stop === undefined) {
-      stop = onFrame(() => {
-        if (group === publicationGroups) {
-          published = revision();
-          group = 0;
-        }
-        groups[group++]![1](published);
-        if (group === publicationGroups && revision() === published) stopPublishing();
-        else requestFrame();
-      });
-      requestFrame();
-    }
-  });
-  onCleanup(stopPublishing);
-  return (index: number) => groups[index % publicationGroups]![0]();
-}
-
 function filterLabel(filter: Filter): string {
   switch (filter) {
     case "all": return loc("全部", "All");
@@ -149,13 +115,11 @@ function BoardHeader(props: { time: number; summary: ReturnType<typeof marketSum
   </Column>;
 }
 
-function Spark(props: { engine: QuoteEngine; symbol: string; revision: number }) {
+function Spark(props: { prices: readonly number[]; change: number }) {
   return <Canvas style={{ width: 96, maxWidth: "26%", minWidth: 0, flexShrink: 4, height: 36 }} draw={(ctx, { width, height }) => {
-    props.revision;
-    const prices = downsampleTicks(props.engine.ring(props.symbol), 24);
-    if (!prices.length || width < 18) return;
-    const quote = props.engine.quote(props.symbol);
-    const color = tone(quote.last - quote.prevClose);
+    const prices = props.prices;
+    if (prices.length < 2 || width < 18) return;
+    const color = tone(props.change);
     const min = Math.min(...prices);
     const max = Math.max(...prices);
     const span = Math.max(0.01, max - min);
@@ -196,8 +160,19 @@ function Spark(props: { engine: QuoteEngine; symbol: string; revision: number })
  * Two-band row shared by the market and watchlist boards. Upper band:
  * identity, spark, price badge. Lower band: change and percent on one line.
  */
-function StockRow(props: { instrument: Instrument; engine: QuoteEngine; revision: number; sparkRevision: number; selected: boolean; onClick: () => void; saved?: boolean; onSave?: () => void }) {
-  const quote = createMemo(() => { props.revision; return { ...props.engine.quote(props.instrument.symbol) }; });
+function StockRow(props: { instrument: Instrument; engine: QuoteEngine; revision: number; selected: boolean; onClick: () => void; saved?: boolean; onSave?: () => void }) {
+  const quote = createMemo<Pick<Quote, "last" | "prevClose">>((previous) => {
+    props.revision;
+    const { last, prevClose } = props.engine.quote(props.instrument.symbol);
+    return previous?.last === last && previous.prevClose === prevClose
+      ? previous : { last, prevClose };
+  });
+  const prices = createMemo((previous?: readonly number[]) => {
+    props.revision;
+    const next = downsampleTicks(props.engine.ring(props.instrument.symbol), 24);
+    return previous?.length === next.length && next.every((price, index) => price === previous[index])
+      ? previous : next;
+  });
   const percent = createMemo(() => change(quote()));
   const color = createMemo(() => tone(percent()));
   return <Column style={{ height: 72, gap: 0 }}>
@@ -218,7 +193,7 @@ function StockRow(props: { instrument: Instrument; engine: QuoteEngine; revision
         </Column>
         <Show when={props.onSave}><Glyph name={props.saved ? "starFilled" : "star"} title={props.saved ? loc("移出自选", "Remove from watchlist") : loc("加入自选", "Add to watchlist")}
           onClick={props.onSave!} size={18} color={props.saved ? colors.amber : colors.faint} compact style={{ backgroundColor: "#00000000" }} /></Show>
-        <Spark engine={props.engine} symbol={props.instrument.symbol} revision={props.sparkRevision} />
+        <Spark prices={prices()} change={percent()} />
         <PriceTag value={fmtPrice(quote().last)} change={percent()} />
       </Row>
     </Pressable>
@@ -257,21 +232,15 @@ function QuoteBoard(props: BoardProps & { engine: QuoteEngine; instruments: () =
   const controller = createScrollController();
   const wide = () => width() >= 800;
   const split = () => width() >= 1240;
-  const canPublish = () => {
-    const top = props.router.stack().at(-1);
-    return top?.path === `/${props.scrollKey === "watchlist" ? "watchlist" : "markets"}` && top.phase === "live";
-  };
-  const revision = useMarketPulse(canPublish);
-  const rowRevision = useRowPublications(revision, canPublish);
-  const overviewRevision = createMemo(() => Math.floor(revision() / 2));
-  const time = createMemo(() => { overviewRevision(); return engineTime(props.engine); });
-  const rankAt = createMemo(() => Math.floor(revision() / 5));
-  const summary = createMemo(() => { overviewRevision(); return marketSummary(props.engine, instruments()); });
+  const active = usePageActive();
+  const revision = useMarketPulse(() => active() && controller.phase() === "idle");
+  const time = createMemo(() => { revision(); return engineTime(props.engine); });
+  const summary = createMemo(() => { revision(); return marketSummary(props.engine, instruments()); });
   const items = createMemo<readonly Instrument[]>((previous) => {
     const source = instruments();
     const choice = filter();
     if (choice === "all") return source;
-    rankAt();
+    revision();
     const percent = (instrument: Instrument) => change(props.engine.quote(instrument.symbol));
     const turnover = (instrument: Instrument) => props.engine.analytics(instrument.symbol).turnover;
     const ranked = choice === "active" ? [...source].sort((a, b) => turnover(b) - turnover(a)).slice(0, 10)
@@ -279,7 +248,6 @@ function QuoteBoard(props: BoardProps & { engine: QuoteEngine; instruments: () =
         .sort((a, b) => choice === "gainers" ? percent(b) - percent(a) : percent(a) - percent(b));
     return previous && previous.length === ranked.length && ranked.every((item, index) => item === previous[index]) ? previous : ranked;
   });
-  const publicationIndex = new Map(instruments().map(({ symbol }, index) => [symbol, index]));
   const current = () => (selected() ?? instruments()[0]?.symbol ?? "") as string;
   return <Row style={[filling, { backgroundColor: colors.bg }]}>
     <Column style={[filling, wide() ? { flex: 0, width: "28%", minWidth: 280, maxWidth: 380 } : { width: "100%" }]}>
@@ -297,10 +265,7 @@ function QuoteBoard(props: BoardProps & { engine: QuoteEngine; instruments: () =
           typeOf: () => "stock",
           poolSize: 16,
           render: (instrument) => {
-            const index = () => publicationIndex.get(instrument().symbol) ?? 0;
-            const row = () => rowRevision(index());
-            const spark = createMemo(() => Math.floor((row() + index() % 3) / 3));
-            return <StockRow instrument={instrument()} engine={props.engine} revision={row()} sparkRevision={spark()}
+            return <StockRow instrument={instrument()} engine={props.engine} revision={revision()}
               selected={wide() && current() === instrument().symbol}
               saved={props.savable && inWatchlist(instrument().symbol)}
               onSave={props.savable ? () => toggleWatch(instrument().symbol) : undefined}

@@ -45,7 +45,7 @@ pub struct RectVertex {
 }
 
 impl RectInstance {
-    pub fn extra(&self, first: f32, ramp: u32) -> Option<PaintExtra> {
+    pub fn extra(&self, first: f32) -> Option<PaintExtra> {
         let has_gradient = self.flags & RECT_GRADIENT != 0;
         (self.corners.is_some()
             || has_gradient
@@ -53,7 +53,6 @@ impl RectInstance {
         .then(|| {
             let mut gradient = self.gradient_b;
             gradient[1] = first;
-            gradient[3] = ramp as f32;
             PaintExtra {
                 geometry: self.gradient_a,
                 gradient,
@@ -135,9 +134,7 @@ pub const GLYPH_COLOR: u32 = 1;
 pub const GLYPH_GRADIENT: u32 = 2;
 pub const GLYPH_DECORATION: u32 = 4;
 pub const GLYPH_GAMMA: u32 = 8;
-pub const GLYPH_LCD: u32 = 16;
 pub const GLYPH_TEMPORARY_PAGE: u32 = 32;
-pub const GLYPH_MSDF: u32 = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageInstance {
@@ -177,16 +174,8 @@ pub const IMAGE_NEAREST: u32 = 1;
 pub const IMAGE_PREMULTIPLIED_SRGB: u32 = 2;
 pub const IMAGE_BASE_LEVEL: u32 = 4;
 // This CPU proof is independent of the mip flags in bits 3 and 4.
-pub(crate) const IMAGE_OPAQUE: u32 = 64;
 
-impl ImageVertex {
-    pub(crate) fn with_opacity_proof(mut self, opaque: bool) -> Self {
-        if opaque {
-            self.meta[0] |= IMAGE_OPAQUE;
-        }
-        self
-    }
-}
+impl ImageVertex {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuMeshBuffer {
@@ -255,19 +244,10 @@ impl MeshBuffer {
 pub struct Mesh {
     pub buffer: std::sync::Arc<std::sync::OnceLock<MeshBuffer>>,
     pub indices: std::ops::Range<u32>,
-    pub stencil_fill: Option<StencilFill>,
     pub fringe: Option<Box<[[f32; 2]]>>,
-    pub(crate) vector: Option<crate::msdf::VectorField>,
     pub bounds: [f32; 4],
     pub brush: Brush,
     pub composite: engine::scene::CanvasComposite,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct StencilFill {
-    pub rule: FillRule,
-    pub analytic: bool,
-    pub cover_indices: std::ops::Range<u32>,
 }
 
 /// Brush of a mesh or decoration.
@@ -297,20 +277,17 @@ pub struct PackedGradient {
     pub radial_radii: [f32; 2],
     /// Stop pairs: premultiplied color, `(offset, 0, 0, 0)`.
     pub stops: Vec<[f32; 4]>,
-    pub ramp: Option<std::sync::Arc<crate::gradient_lut::PreparedRamp>>,
 }
 
 pub const INLINE_LINEAR_GRADIENT: u32 = 4;
 
 impl PackedGradient {
     fn new(kind: u32, a: [f32; 4], radial_radii: [f32; 2], stops: Vec<[f32; 4]>) -> Self {
-        let ramp = crate::gradient_lut::PreparedRamp::new(&stops);
         Self {
             kind,
             a,
             radial_radii,
             stops,
-            ramp,
         }
     }
 

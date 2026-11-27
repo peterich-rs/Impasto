@@ -151,18 +151,10 @@ fn forward(options: &Options) -> Result<(u16, Option<Tunnel>)> {
 }
 
 pub(crate) fn run(options: Options) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let project = options.source_root.clone().unwrap_or_else(|| {
-        if cwd.join("app.toml").is_file() || cwd.join("plugin.toml").is_file() {
-            cwd
-        } else if let Some(framework) =
-            crate::framework_root().filter(|framework| framework == &cwd)
-        {
-            framework.join(crate::GALLERY_DIR)
-        } else {
-            cwd
-        }
-    });
+    let project = options
+        .source_root
+        .clone()
+        .unwrap_or(std::env::current_dir()?);
     let locations = STANDARD.encode(serde_json::to_vec(&serde_json::json!({
         "project": project.canonicalize()?,
         "framework": crate::toolchain::framework()?,

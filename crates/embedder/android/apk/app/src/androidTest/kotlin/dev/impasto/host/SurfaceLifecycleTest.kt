@@ -37,19 +37,19 @@ class SurfaceLifecycleTest(private val renderer: ImpastoHost.Renderer) {
     }
 
     @Test
-    fun galleryStartsWithoutLeavingABufferConversionException() {
-        launchGallery().use { scenario ->
+    fun frameReplayStartsWithoutLeavingABufferConversionException() {
+        launchFixture().use { scenario ->
             awaitPresentedBuffer(scenario)
 
             val fault = shell("logcat -d --pid=${Process.myPid()}").lineSequence()
                 .firstOrNull { it.contains("ArrayBuffer object expected") }
-            assertFalse("Gallery startup: $fault", fault != null)
+            assertFalse("Frame replay startup: $fault", fault != null)
         }
     }
 
     @Test
     fun rotationPresentsBuffersAtTheCurrentViewSize() {
-        launchGallery().use { scenario ->
+        launchFixture().use { scenario ->
             awaitPresentedBuffer(scenario)
             repeat(3) {
                 rotateAndCheckBuffer(scenario, ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
@@ -60,7 +60,7 @@ class SurfaceLifecycleTest(private val renderer: ImpastoHost.Renderer) {
 
     @Test
     fun stoppedActivityRecreatesItsSurfaceAndPresentsAgain() {
-        launchGallery().use { scenario ->
+        launchFixture().use { scenario ->
             lateinit var initialView: ImpastoView
             scenario.onActivity { initialView = hostView(it) }
             awaitPresentedBuffer(scenario)
@@ -77,7 +77,7 @@ class SurfaceLifecycleTest(private val renderer: ImpastoHost.Renderer) {
 
     @Test
     fun aSecondHostCanPresentAndCloseInAnExistingActivity() {
-        launchGallery().use { scenario ->
+        launchFixture().use { scenario ->
             lateinit var embedded: ImpastoHost
             scenario.onActivity { activity ->
                 embedded = requireNotNull(ImpastoHost.attach(
@@ -98,7 +98,7 @@ class SurfaceLifecycleTest(private val renderer: ImpastoHost.Renderer) {
 
     @Test
     fun aLiveSessionCanMoveBetweenWindows() {
-        launchGallery().use { scenario ->
+        launchFixture().use { scenario ->
             lateinit var original: ImpastoHost
             lateinit var moved: ImpastoHost
             lateinit var dialog: Dialog
@@ -135,7 +135,7 @@ class SurfaceLifecycleTest(private val renderer: ImpastoHost.Renderer) {
         }
     }
 
-    private fun launchGallery(): ActivityScenario<ImpastoActivity> {
+    private fun launchFixture(): ActivityScenario<ImpastoActivity> {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val intent = Intent(context, ImpastoActivity::class.java)
             .putExtra("impasto.renderer", renderer.wireName)

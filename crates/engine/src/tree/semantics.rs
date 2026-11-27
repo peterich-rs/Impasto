@@ -8,6 +8,11 @@ use crate::semantics::{
 };
 
 impl Tree {
+    #[cfg(feature = "js")]
+    pub(crate) fn semantics_pending(&self) -> bool {
+        self.semantics_enabled && (self.semantics_full || !self.scroll_semantics.is_empty())
+    }
+
     /// One node per laid-out scene node. `None` before the first successful layout.
     pub fn semantics(&self) -> Option<SemanticsUpdate> {
         let root = self.root?;

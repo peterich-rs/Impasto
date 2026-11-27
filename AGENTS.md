@@ -18,7 +18,7 @@ Impasto 是跨平台 UI 框架。下表按职责与现有目录对应；具体�
 
 - **运行时与宿主分离**：`crates/javascript` 默认提供独立运行时；关闭默认 feature 后仅保留纯 `std` 的 `javascript::host`。运行时仅内置语言与 Web 基础原语（`console`、定时器、`performance`、`events`、`encoding`、`url`、`streams`），不包含网络实现；`engine::js` 通过可选 `js` feature 接入该运行时，提交树变更并将 UI 事件交给脚本。`embedder` 负责窗口、渲染资源与遥测。
 - **原生扩展与宿主原语**：官方包、第三方插件和应用 Rust 通过 `#[impasto::module]` 及导出宏绑定 JavaScript。包使用 `PluginContext` 的调度、目录、窗口事件、平台容器、合成和泛型扩展原语。应用网络、权限、剪贴板等能力由 `packages/*` 中的插件实现。
-- **线程与帧流水线**：平台线程通过队列交付自有数据（输入、生命周期、视口、vsync）。UI 队列通过 `engine::session::Session` 同步推进脚本、响应式图、布局与录制，产出不可变 `engine::scene::LayerTree`。Raster 队列消费层树并实现 `engine::text::Shaper`。公共宿主支持 `shared`、`split`（默认）、`platform-ui` 三种线程拓扑（环境变量 `IMPASTO_THREAD_TOPOLOGY`），跨线程传递一律使用自有数据。
+- **线程与帧流水线**：平台线程通过 `TaskRunner` 队列交付自有数据（输入、生命周期、视口、vsync）。UI 队列通过 `engine::session::Session` 同步推进脚本、响应式图、布局与录制，产出不可变 `engine::scene::LayerTree`。Raster 队列消费层树并实现 `engine::text::Shaper`。线程绑定以可切换的 `TaskRunner` 为抽象边界。Raster 独立运行，UI/JS 在后台冷启动并提交首帧后迁移至平台主线程。跨线程传递一律使用自有数据。
 - **TSX 编译与响应式**：[Bundler](crates/bundler) 通过 Oxc 降级显式导入的 JSX 组件，由 Rolldown 将 `solid-js` 解析到 `@impasto/reactive`，保留 `scene`、`reactive` 与插件原生模块。编译器和测试驱动仅用于开发宿主。
 
 ### 应用与插件
@@ -37,6 +37,19 @@ Impasto 是跨平台 UI 框架。下表按职责与现有目录对应；具体�
 - `engine` 默认构建不得依赖 `rquickjs` / `quickjs-jit`、`raster`、`wgpu` 或任何平台/渲染库。
 - `raster` 不得依赖 `rquickjs` / `quickjs-jit`。
 - `packages/*/rust` 使用 `impasto` SDK、其他插件包及包自身依赖，与 `engine`、`raster`、`embedder*` 和 QuickJS VM 隔离。
+
+### 渲染管线与线程模型铁律
+
+`crates/raster` 与宿主帧调度以 Zed gpui 的极简主干为标杆，仅局部借鉴 Skia Graphite 的紧凑数据索引与按需瞬态纹理思想，严禁叠加重型竞争机制：
+
+- **一类图元只留 1 条主力路径**：宁可放弃微基准里 3% 的理论分数，也不得为同一类图元同时维护多套互斥渲染路径或环境变量开关（组合 bug 不可控）。文字仅保留 Swash 位图字形图集（禁止运行期 CPU MSDF、矢量轮廓回退与 LCD 子像素双源分支）；矩形/阴影/渐变仅保留顺序 Instanced 合批（禁止空间重排器、Early-Z 深度拆批与驻留 RenderBundle）；Canvas 路径收口到单条主力光栅路径；禁止堆叠多套帧间离屏缓存。
+- **以真机端到端帧率与输入延迟为准绳**：在移动端 GPU 渲染耗时远低于单帧预算（如 1.4–1.8 ms vs 120 Hz 8.33 ms）的前提下，禁止为了压缩零点几毫秒 GPU 时间而增加 CPU 侧复杂度、引入新缓存层或抽象包装。优化优先级永远是：宿主调度跟手度 > CPU 编码与分配开销 > GPU 耗时。
+- **保持 4 阶段一眼看懂的渲染链路**：
+  1. **准备（Prepare）**：图片解码上传 + 视口剔除后的并行 Swash 位图字形图集准备；必须设单帧 CPU 时间上限，超限转后台异步完成并保留上一帧画面。
+  2. **收集（Collect）**：单次遍历视口剔除，产出零锁、少分配的紧凑扁平图元/绘制列表（重对象进小表、命令以紧凑整数索引引用，减少堆分配与 `Arc` 克隆）。
+  3. **编码（Encode）**：无离屏效果的普通帧走零包装直通路径，1 个主 `RenderPass` 直接顺序合批上屏；仅当帧内真实存在毛玻璃、模糊、离屏透明度/混合组时，才按需从瞬态纹理池借用并编码离屏 Pass，不让普通帧为重型图调度买单。
+  4. **宿主调度（Host Scheduling）**：稳住 vsync 节奏、输入对齐、帧背压与 Surface 生命周期，禁止跨线程无 token 校验地竞态取消 vsync。
+- **TaskRunner 驱动的动态线程模型**：禁止将线程拓扑写死为静态枚举分支。Raster 固定运行在独立 `TaskRunner` 线程；UI/JS 在冷启动阶段于后台 `TaskRunner` 并行完成框架加载与初始脚本执行，启动完成后通过可切换 `TaskRunner` 合并至平台主线程（与 Flutter UI/Platform 线程合并一致），业务层与会话层通过 `TaskRunner` 抽象屏蔽线程迁移细节。
 
 ### Rust Lint 与安全规则
 

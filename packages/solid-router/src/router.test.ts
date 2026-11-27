@@ -109,3 +109,38 @@ test("route restoration, predictive back and stack races", async () => {
     assert.equal(race.depth(), 1);
   }
 });
+
+test("tab switches restore route identity and evict the least recent inactive branch", async () => {
+  const { router, dispose } = createRoot(dispose => ({
+    router: createRouter(defs, {
+      linking: false,
+      tabs: {
+        initial: "schedule",
+        branches: { schedule: "/schedule", list: "/list", files: "/files/root" },
+        maxRetained: 1,
+      },
+    }),
+    dispose,
+  }));
+  const tabs = router.tabs!;
+  assert.ok(router.push("/nav/2"));
+  await advanceFrames();
+  const detail = router.stack().at(-1)!;
+  assert.ok(tabs.select("list"));
+  await advanceFrames();
+  const list = router.stack()[0]!;
+  assert.ok(router.retainedStack!().some(entry => entry.key === detail.key));
+  assert.ok(tabs.select("schedule"));
+  await advanceFrames();
+  assert.equal(router.stack().at(-1)?.key, detail.key);
+  assert.equal(router.stack().at(-1)?.params.depth, "2");
+  assert.ok(tabs.select("files"));
+  await advanceFrames();
+  assert.equal(router.retainedStack!().some(entry => entry.key === list.key), false);
+  assert.equal(tabs.select("invalid"), false);
+  assert.equal(tabs.active(), "files");
+  assert.ok(tabs.select("list"));
+  await advanceFrames();
+  assert.ok(router.stack()[0]?.key !== list.key);
+  dispose();
+});

@@ -10,6 +10,7 @@ use engine::{
 };
 
 #[test]
+#[ignore = "run through just gallery-tests"]
 fn gallery_patch_preserves_the_tab_scroll_and_focused_field() -> Result<()> {
     let framework = crate::toolchain::framework()?;
     let workspace = tempfile::tempdir()?;

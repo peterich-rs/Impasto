@@ -19,11 +19,10 @@ async function click(label: string) {
 }
 
 /** Buttons whose label carries data (position rows) are found by prefix. */
-async function clickButtonStartingWith(prefix: string) {
+async function buttonStartingWith(prefix: string) {
   const nodes = (await screen.nodes("button")).filter(node => node.label.startsWith(prefix));
   assert.ok(nodes.length, `No button starting with ${prefix}`);
-  await fire.click(nodes[0].id);
-  await screen.advanceFrames(24);
+  return nodes[0].id;
 }
 
 test("watchlist opens details and returns without leaving a detail behind", async () => {
@@ -66,11 +65,15 @@ test("tabs switch the root page and hide the capsule on pushed pages", async () 
   await shown("综合指数", "自选");
 });
 
-test("a position row opens the matching detail", async () => {
+test("a position row survives market updates and opens the matching detail", async () => {
   await screen.viewport(430, 932);
   await screen.advanceFrames(8);
   await click("账户");
-  await clickButtonStartingWith("NVDA");
+  const row = await buttonStartingWith("NVDA");
+  await screen.advanceFrames(60);
+  assert.equal(await buttonStartingWith("NVDA"), row);
+  await fire.click(row);
+  await screen.advanceFrames(24);
   await screen.advanceFrames(60);
   await shown("返回");
   await click("返回");

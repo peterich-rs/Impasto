@@ -143,7 +143,7 @@ fn overscroll_past_the_edge_uses_the_curve_and_does_not_rewrite_pictures()
 }
 
 #[test]
-fn double_tap_waits_then_clicks_or_fires_on_the_second_down() -> Result<(), crate::Error> {
+fn double_tap_waits_then_clicks_or_fires_on_the_second_up() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let region = tree.pointer_region()?;
     let child = tree.sized(40.0, 40.0)?;
@@ -175,11 +175,10 @@ fn double_tap_waits_then_clicks_or_fires_on_the_second_down() -> Result<(), crat
     tree.pointer(PointerEvent::new(Phase::Down, 10.0, 10.0, 1000.0));
     tree.pointer(PointerEvent::new(Phase::Up, 10.0, 10.0, 1020.0));
     let second = tree.pointer(PointerEvent::new(Phase::Down, 12.0, 12.0, 1100.0));
-    assert!(
-        second
-            .iter()
-            .any(|gesture| matches!(gesture, Gesture::DoubleTap(id) if *id == region)),
-        "second down: {second:?}"
+    assert_eq!(second, vec![Gesture::Press(region)]);
+    assert_eq!(
+        tree.pointer(PointerEvent::new(Phase::Up, 12.0, 12.0, 1120.0)),
+        vec![Gesture::Release(region), Gesture::DoubleTap(region)]
     );
     Ok(())
 }

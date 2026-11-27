@@ -369,6 +369,15 @@ impl Tree {
         Ok(())
     }
 
+    pub fn set_zoom_target(&mut self, id: NodeId, enabled: bool) -> Result<(), Error> {
+        if enabled {
+            self.node_mut(id)?.role.insert(Role::POINTER | Role::ZOOM);
+        } else if let Ok(node) = self.node_mut(id) {
+            node.role.remove(Role::ZOOM);
+        }
+        Ok(())
+    }
+
     pub fn pointer_region(&mut self) -> Result<NodeId, Error> {
         self.view_with_role(
             Style {
@@ -1166,6 +1175,7 @@ impl Tree {
         self.note_layout(super::LayoutCause::Structure);
         self.mark_layout();
         if let Some(id) = self.arena.hovered.take() {
+            self.invalidate_style_deps(crate::style::DepMask::HOVER);
             self.arena.pending.push(Gesture::Leave(id));
         }
     }

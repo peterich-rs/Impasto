@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+import CImpastoIOS
+#endif
 import Metal
 import QuartzCore
 import UIKit
@@ -333,8 +336,8 @@ public final class ImpastoViewController: UIViewController {
         }
     }
 
-    func pointer(_ sample: PointerSample) -> Bool {
-        host.pointer(self, sample)
+    func pointer(_ sample: PointerSample, history: [ImpastoIOSPointerPoint] = []) -> Bool {
+        host.pointer(self, sample, history: history)
     }
 
     func cancelPointers() {
@@ -699,13 +702,22 @@ final class MetalView: UIView {
                 }
             case .move:
                 guard let previous = pointers[key] else { continue }
-                let samples = event?.coalescedTouches(for: touch) ?? [touch]
-                var last = previous
-                for touch in samples where touch.timestamp >= last.time {
-                    last = sample(touch, event: event, id: previous.id, phase: phase, previous: last)
-                    _ = owner?.pointer(last)
+                let latest = sample(touch, event: event, id: previous.id, phase: phase, previous: previous)
+                guard latest.time >= previous.time else { continue }
+                var history: [ImpastoIOSPointerPoint] = []
+                // One extra element allows for UIKit including the current touch.
+                for prior in (event?.coalescedTouches(for: touch) ?? []).suffix(13)
+                    where prior.timestamp > previous.time && prior.timestamp < latest.time {
+                    let point = prior.location(in: self)
+                    history.append(ImpastoIOSPointerPoint(
+                        x: Float(point.x), y: Float(point.y), seconds: prior.timestamp
+                    ))
                 }
-                pointers[key] = last
+                if history.count > 12 {
+                    history.removeFirst()
+                }
+                _ = owner?.pointer(latest, history: history)
+                pointers[key] = latest
             case .up, .cancel:
                 guard let previous = pointers.removeValue(forKey: key) else { continue }
                 let sample = sample(touch, event: event, id: previous.id, phase: phase, previous: previous)

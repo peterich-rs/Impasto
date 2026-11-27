@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::{geometry::NodeId, input::PointerId};
+use crate::{
+    geometry::NodeId,
+    input::{PointerId, PointerKind, PointerSample},
+};
 
 /// One node the hit walk entered, root first. `x` and `y` are local to that node.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,7 +74,7 @@ pub struct DoubleTapConfig {
 impl Default for DoubleTapConfig {
     fn default() -> Self {
         Self {
-            slop: DRAG_SLOP,
+            slop: DOUBLE_TAP_SLOP,
             window_ms: 300.0,
         }
     }
@@ -87,13 +90,21 @@ pub struct RecognizerSet {
     pub double_tap: Option<DoubleTapConfig>,
 }
 
-/// Distance a move must exceed before a drag can lock. Not Flutter's current `kTouchSlop`.
-pub const DRAG_SLOP: f32 = 8.0;
+/// Default distance between the taps in a double tap.
+pub const DOUBLE_TAP_SLOP: f32 = 8.0;
+
+pub(crate) fn drag_slop(kind: PointerKind) -> f32 {
+    match kind {
+        PointerKind::Touch => 12.0,
+        PointerKind::Mouse | PointerKind::Trackpad | PointerKind::Pen => 4.0,
+    }
+}
 
 /// How long a still finger must stay inside the slop before a long press wins.
 pub const LONG_PRESS_MS: f64 = 500.0;
 
-const VELOCITY_SAMPLES: usize = 8;
+const VELOCITY_SAMPLES: usize = 16;
+const RELEASE_NOISE_MS: f64 = 2.0;
 /// Samples older than this window do not shape the fling velocity.
 pub const VELOCITY_WINDOW_MS: f64 = 120.0;
 
@@ -108,68 +119,82 @@ pub fn scroll_locked_by_other(
         .is_some_and(|owner| pointer.is_none_or(|pointer| pointer != *owner))
 }
 
-#[derive(Clone, Copy)]
-struct Sample {
-    x: f32,
-    y: f32,
-    time_ms: f64,
-}
-
-/// Time-weighted velocity over at most eight samples, in scene points per millisecond.
+/// Recent positions for a weighted linear fit, in scene points per millisecond.
 #[derive(Clone)]
 pub struct VelocityRing {
-    samples: Vec<Sample>,
+    samples: [PointerSample; VELOCITY_SAMPLES],
+    next: usize,
+    len: usize,
 }
 
 impl VelocityRing {
     pub fn new() -> Self {
         Self {
-            samples: Vec::with_capacity(VELOCITY_SAMPLES),
+            samples: [PointerSample::default(); VELOCITY_SAMPLES],
+            next: 0,
+            len: 0,
         }
     }
 
     pub fn push(&mut self, x: f32, y: f32, time_ms: f64) {
-        if self.samples.len() == VELOCITY_SAMPLES {
-            self.samples.remove(0);
+        if !x.is_finite() || !y.is_finite() || !time_ms.is_finite() {
+            return;
         }
-        self.samples.push(Sample { x, y, time_ms });
-    }
-
-    /// Velocity over the samples inside `WINDOW_MS` of `now_ms`. Samples older
-    /// than the window do not count, so a flick followed by a stall reports
-    /// the stall. This is the weighting iOS gesture recognizers use.
-    pub fn velocity_at(&self, now_ms: f64) -> (f32, f32) {
-        let fresh: Vec<Sample> = self
-            .samples
-            .iter()
-            .copied()
-            .filter(|sample| now_ms - sample.time_ms <= VELOCITY_WINDOW_MS)
-            .collect();
-        let mut dx = 0.0f64;
-        let mut dy = 0.0f64;
-        let mut dt = 0.0f64;
-        for pair in fresh.windows(2) {
-            let step = pair[1].time_ms - pair[0].time_ms;
-            if step.is_finite() && step > 0.0 {
-                dx += f64::from(pair[1].x - pair[0].x);
-                dy += f64::from(pair[1].y - pair[0].y);
-                dt += step;
+        let sample = PointerSample { x, y, time_ms };
+        if self.len > 0 {
+            let last = (self.next + VELOCITY_SAMPLES - 1) % VELOCITY_SAMPLES;
+            if time_ms < self.samples[last].time_ms {
+                return;
+            }
+            if time_ms == self.samples[last].time_ms {
+                self.samples[last] = sample;
+                return;
             }
         }
-        if dt <= 0.0 {
-            return (0.0, 0.0);
-        }
-        (
-            crate::cast::f32_from_f64(dx / dt),
-            crate::cast::f32_from_f64(dy / dt),
-        )
+        self.samples[self.next] = sample;
+        self.next = (self.next + 1) % VELOCITY_SAMPLES;
+        self.len = (self.len + 1).min(VELOCITY_SAMPLES);
     }
 
-    pub fn velocity(&self) -> (f32, f32) {
-        match self.samples.last() {
-            Some(latest) => self.velocity_at(latest.time_ms),
-            None => (0.0, 0.0),
+    /// Estimate speed at release time. Prefer the fit before the final 2 ms
+    /// of contact if that interval already provides enough samples.
+    pub fn velocity_at(&self, now_ms: f64) -> (f32, f32) {
+        self.fit(now_ms, RELEASE_NOISE_MS)
+            .or_else(|| self.fit(now_ms, 0.0))
+            .unwrap_or((0.0, 0.0))
+    }
+
+    fn fit(&self, now_ms: f64, release_noise: f64) -> Option<(f32, f32)> {
+        let first = (self.next + VELOCITY_SAMPLES - self.len) % VELOCITY_SAMPLES;
+        let mut weight = 0.0;
+        let mut mean = [0.0; 3];
+        let mut covariance = [0.0; 3];
+        let mut span = None;
+        for index in 0..self.len {
+            let sample = self.samples[(first + index) % VELOCITY_SAMPLES];
+            let age = now_ms - sample.time_ms;
+            if !(release_noise..=VELOCITY_WINDOW_MS).contains(&age) {
+                continue;
+            }
+            let w = 2.0 - age / VELOCITY_WINDOW_MS;
+            let point = [-age, f64::from(sample.x), f64::from(sample.y)];
+            let delta = std::array::from_fn::<_, 3, _>(|axis| point[axis] - mean[axis]);
+            weight += w;
+            for axis in 0..3 {
+                mean[axis] += w * delta[axis] / weight;
+                covariance[axis] += w * delta[0] * (point[axis] - mean[axis]);
+            }
+            let start = span.get_or_insert((age, age));
+            start.1 = age;
         }
+        let (oldest, newest) = span?;
+        if oldest - newest < RELEASE_NOISE_MS || covariance[0] <= 0.0 {
+            return None;
+        }
+        Some((
+            crate::cast::f32_from_f64(covariance[1] / covariance[0]),
+            crate::cast::f32_from_f64(covariance[2] / covariance[0]),
+        ))
     }
 }
 

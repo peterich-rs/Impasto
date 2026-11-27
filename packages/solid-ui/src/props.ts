@@ -75,6 +75,7 @@ export type ButtonProps = Omit<
 
 export interface IconProps extends ViewProps {
   mirror?: boolean;
+  /** A vector asset provided at mount selects canvas rendering. */
   asset?: VectorAsset;
   size?: number;
   color?: VectorIconDrawOptions["color"];
@@ -110,6 +111,7 @@ export interface FieldProps extends ElementProps {
   rows?: number;
   mask?: InputMask;
   transform?: (value: string) => string;
+  /** Receives the field controller when the field mounts. */
   controller?: (controller: FieldController) => void;
   controlProps?: StyleProps;
   textProps?: StyleProps;
@@ -157,6 +159,7 @@ export interface ScrollAreaProps extends ViewProps {
   onDragBy?: () => void;
   initialOffset?: { x: number; y: number };
   contentMin?: number;
+  /** Controller bound for the lifetime of the mounted scroll area. */
   controller?: ScrollController;
   physics?: ScrollPhysics;
   contentProps?: StyleProps;
@@ -182,6 +185,7 @@ export interface VirtualListProps<T> extends ElementProps {
   endReachedDistance?: number;
   sticky?: (item: T, index: number) => boolean;
   onPin?: (key: string | null) => void;
+  /** Key read at mount for restoring and saving the list's scroll offset. */
   restoreKey?: string;
   onRefresh?: () => void;
   refresh?: {
@@ -189,6 +193,7 @@ export interface VirtualListProps<T> extends ElementProps {
     onRefresh: () => void | Promise<void>;
     indicator?: (state: PullState) => UIChildren;
   };
+  /** Controller bound for the lifetime of the mounted list. */
   controller?: ScrollController;
   physics?: ScrollPhysics;
   viewportProps?: StyleProps;
@@ -206,10 +211,12 @@ export interface RecyclerProps<T> extends ElementProps {
 }
 
 export interface RefreshControlProps extends ElementProps {
+  /** Scroll controller used for the lifetime of the mounted refresh control. */
   controller: ScrollController;
   threshold?: number;
   edge?: "start" | "end";
   onRefresh: () => void | Promise<void>;
+  /** Receives handlers at mount and no-op replacements at cleanup. */
   gesture: (handlers: { onDragBy: () => void; onDragEnd: () => void }) => void;
   children?: (state: PullState) => UIChildren;
 }

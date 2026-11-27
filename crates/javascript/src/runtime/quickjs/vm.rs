@@ -56,8 +56,8 @@ pub struct Vm {
     pub rejection_overflows: Cell<usize>,
     pub promise_peak: Cell<usize>,
     pub rejection_peak: Cell<usize>,
-    eval_budget_ms: i64,
-    callback_budget_ms: i64,
+    eval_budget_ms: Cell<i64>,
+    callback_budget_ms: Cell<i64>,
     armed: Cell<bool>,
     sampler: Option<Sampler>,
     #[cfg(test)]
@@ -104,8 +104,8 @@ impl Vm {
             rejection_overflows: Cell::new(0),
             promise_peak: Cell::new(0),
             rejection_peak: Cell::new(0),
-            eval_budget_ms: limits.eval_budget_ms,
-            callback_budget_ms: limits.callback_budget_ms,
+            eval_budget_ms: Cell::new(limits.eval_budget_ms),
+            callback_budget_ms: Cell::new(limits.callback_budget_ms),
             armed: Cell::new(false),
             sampler,
             #[cfg(test)]
@@ -235,6 +235,36 @@ impl Vm {
         self.armed.set(false);
     }
 
+    pub(crate) fn prepare_migration(&self) {
+        assert!(!self.is_active(), "cannot move a running QuickJS VM");
+        self.disarm();
+        if let Some(sampler) = &self.sampler {
+            sampler.reset_interval();
+        }
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "QuickJS must refresh its native stack limit after a thread handoff"
+    )]
+    pub(crate) fn finish_migration(&self, eval_ms: i64, callback_ms: i64) {
+        assert!(
+            !self.is_active() && !self.armed.get(),
+            "QuickJS must be disarmed before resuming"
+        );
+        if let Some(context) = &self.context {
+            // SAFETY: the owning thread has exclusive access to the idle runtime
+            // and the boxed VM stays at this address until it is disarmed.
+            unsafe {
+                let runtime = rquickjs::qjs::JS_GetRuntime(context.as_raw().as_ptr());
+                rquickjs::qjs::JS_UpdateStackTop(runtime);
+                Self::arm(std::ptr::from_ref(self).cast_mut());
+            }
+        }
+        self.eval_budget_ms.set(eval_ms);
+        self.callback_budget_ms.set(callback_ms);
+    }
+
     pub fn close(&mut self) {
         // Drop promise roots while the QuickJS runtime is still alive.
         self.promises.borrow_mut().clear();
@@ -282,9 +312,9 @@ impl Vm {
     pub fn budget(&self, kind: &'static str) -> Budget<'_> {
         let previous_entry = self.entry.replace((kind, 0));
         let limit = if kind == "eval" {
-            self.eval_budget_ms
+            self.eval_budget_ms.get()
         } else {
-            self.callback_budget_ms
+            self.callback_budget_ms.get()
         };
         let deadline = monotonic_ms()
             .saturating_add(limit)

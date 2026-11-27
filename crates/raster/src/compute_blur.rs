@@ -23,8 +23,7 @@ impl ComputeBlur {
         let features = storage_format.guaranteed_format_features(gpu.device.features());
         let limits = gpu.device.limits();
         let f16_tile = gpu.device.features().contains(wgpu::Features::SHADER_F16);
-        if std::env::var("IMPASTO_COMPUTE_BLUR").as_deref() != Ok("1")
-            || !gpu.caps.has_compute
+        if !gpu.caps.has_compute
             || format.is_srgb()
                 && !gpu
                     .caps

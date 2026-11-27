@@ -13,12 +13,20 @@ internal class FrameScheduler(private val view: ImpastoView) {
     }
     private val timeline = if (Build.VERSION.SDK_INT >= 33) Api33(choreographer) else null
     private var pending: Long? = null
+    private var latestOrder = 0L
     private var posted = false
     private var primedByTouch = false
 
-    fun schedule(token: Long) {
-        pending = token
-        postCallback()
+    fun update(order: Long, token: Long): Boolean {
+        if (java.lang.Long.compareUnsigned(order, latestOrder) <= 0) return false
+        latestOrder = order
+        if (token == 0L) {
+            cancel()
+        } else {
+            pending = token
+            postCallback()
+        }
+        return true
     }
 
     fun primeTouch() {
@@ -37,10 +45,10 @@ internal class FrameScheduler(private val view: ImpastoView) {
     }
 
     fun cancel() {
-        if (!posted) return
-        posted = false
         primedByTouch = false
         pending = null
+        if (!posted) return
+        posted = false
         if (Build.VERSION.SDK_INT >= 33 && timeline != null) {
             timeline.cancel()
         } else {

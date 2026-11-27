@@ -62,7 +62,7 @@ fn sample_gallery_frames() {
         );
     }
     let registry = std::sync::Arc::unwrap_or_clone(gallery_host().registry);
-    let bytecode = super::compile_with_registry(&source, "app.js", true, registry)
+    let bytecode = crate::js::compile_with_registry(&source, "app.js", true, registry)
         .expect("compile Gallery to IQJS");
     println!("IQJS {}", bytecode.as_bytes().len());
 }

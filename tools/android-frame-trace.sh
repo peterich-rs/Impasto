@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-output=${1:?用法 tools/android-frame-trace.sh OUTPUT [APP_ID] [SECONDS]}
-app_id=${2:-dev.impasto.host.profile}
+output=${1:?用法 tools/android-frame-trace.sh OUTPUT APP_ID [SECONDS]}
+app_id=${2:?Specify the Android application ID}
 seconds=${3:-10}
 
 if [[ ! $app_id =~ ^[a-zA-Z0-9_.]+$ || ! $seconds =~ ^[1-9][0-9]{0,2}$ || $seconds -gt 300 ]]; then
@@ -31,6 +31,13 @@ data_sources {
     }
   }
 }
+data_sources {
+  config {
+    name: "linux.process_stats"
+    process_stats_config { scan_all_processes_on_start: true proc_stats_poll_ms: 1000 }
+  }
+}
 data_sources { config { name: "android.surfaceflinger.frametimeline" } }
+data_sources { config { name: "android.gpu.memory" } }
 EOF
 adb pull "$remote" "$output"

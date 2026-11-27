@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use engine::session::FrameTime;
 
 use super::{Acks, UiHost, arm, on_frame};
@@ -7,7 +9,7 @@ use crate::error::BootError;
 pub(super) fn handle(
     runtime: &mut UiHost,
     command: Command,
-    acks: &Acks,
+    acks: &Arc<Acks>,
 ) -> Result<bool, BootError> {
     match command {
         Command::Wake => wake(runtime, acks),
@@ -16,7 +18,7 @@ pub(super) fn handle(
     }
 }
 
-fn wake(runtime: &mut UiHost, acks: &Acks) -> Result<bool, BootError> {
+fn wake(runtime: &mut UiHost, acks: &Arc<Acks>) -> Result<bool, BootError> {
     if runtime.input.is_paused() {
         return Ok(false);
     }
@@ -48,7 +50,7 @@ fn wake(runtime: &mut UiHost, acks: &Acks) -> Result<bool, BootError> {
     )
 }
 
-fn wake_time(now: f64, last_vsync: Option<FrameTime>) -> FrameTime {
+pub(super) fn wake_time(now: f64, last_vsync: Option<FrameTime>) -> FrameTime {
     // JavaScript deadlines use the runner's clock. Motion uses platform vsync
     // timestamps, whose origin can be the device boot rather than this process.
     let Some(last) = last_vsync else {
@@ -70,7 +72,7 @@ fn frame(
     runtime: &mut UiHost,
     token: FrameToken,
     time: FrameTime,
-    acks: &Acks,
+    acks: &Arc<Acks>,
 ) -> Result<bool, BootError> {
     if !runtime.scheduler.accept(token) {
         super::skipped_frame("stale_vsync");

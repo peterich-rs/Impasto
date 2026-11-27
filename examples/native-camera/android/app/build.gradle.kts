@@ -186,7 +186,6 @@ androidComponents {
             fontNotice.set(repoRoot.resolve("crates/embedder/android/assets/fonts/NOTICE"))
             license.set(repoRoot.resolve("LICENSE"))
             notice.set(repoRoot.resolve("NOTICE"))
-            threadTopology.set(providers.gradleProperty("impastoThreadTopology").orElse(""))
         }
         variant.sources.assets?.addGeneratedSourceDirectory(assets, StageApkAssets::output)
     }
@@ -357,7 +356,6 @@ abstract class StageApkAssets : DefaultTask() {
     abstract val notice: RegularFileProperty
 
     @get:Input
-    abstract val threadTopology: Property<String>
 
     @get:OutputDirectory
     abstract val output: DirectoryProperty
@@ -379,12 +377,6 @@ abstract class StageApkAssets : DefaultTask() {
         notice.get().asFile.copyTo(root.resolve("NOTICE"), overwrite = true)
         logo.get().asFile.copyTo(images.resolve("logo.png"), overwrite = true)
         script.copyTo(root.resolve("quotes.js"), overwrite = true)
-        val topology = threadTopology.get()
-        val config = root.resolve("app.thread_topology")
-        when (topology) {
-            "" -> config.delete()
-            "shared", "split", "platform-ui" -> config.writeText(topology)
-            else -> throw GradleException("Unknown Impasto thread topology: $topology")
-        }
+
     }
 }

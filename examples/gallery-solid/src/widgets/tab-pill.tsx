@@ -16,7 +16,7 @@ const TABS: readonly Tab[] = [
 ];
 
 /**
- * Floating route capsule. Tabs switch with `reset` (single entry, no slide).
+ * Floating route capsule. Tab selection restores the branch stack without a slide.
  * Hidden while a page is pushed on top so detail screens own the full height.
  */
 export function TabPill(props: { router: Router }): NodeHandle {
@@ -56,7 +56,7 @@ export function TabPill(props: { router: Router }): NodeHandle {
     const cell = Pressable({
       role: Role.Button,
       accessibilityLabel: tab.label,
-      onClick: () => props.router.reset(`/${tab.key}`),
+      onClick: () => props.router.tabs?.select(tab.key),
       style: {
         flexDirection: "row",
         alignItems: "center",

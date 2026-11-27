@@ -1,7 +1,7 @@
 //! Routes one display-link callback at a time to an idle UI's compositor.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use engine::scene::{CompositorProp, CompositorSnapshot, CompositorTrack};
@@ -13,13 +13,13 @@ use super::{
     raster_host::{images_ready, install_scene},
     refresh_wake,
 };
+use crate::FrameRateHint;
 use crate::command::{Command, FrameToken, SurfaceId};
 use crate::diagnostics::telemetry::{ScheduleTiming, mono_ns_at};
 use crate::error::BootError;
 use crate::queue::Inbox;
 use crate::scheduler::Gpu;
 use crate::task_runner::RunnerSlot;
-use crate::{FrameRateHint, ThreadTopology, Vsync};
 
 // Keep callback tokens positive in platforms that transport them as signed longs.
 const RASTER_TOKEN: u64 = 1 << 62;
@@ -30,6 +30,7 @@ pub(super) struct CompositorMode {
     expected: AtomicU64,
     next: AtomicU64,
     active: Mutex<Option<Active>>,
+    callback_gate: Mutex<()>,
 }
 
 struct Active {
@@ -53,11 +54,11 @@ enum ListWindow {
 
 struct Plan {
     tree: Arc<engine::scene::LayerTree>,
-    deadline_ms: Option<f64>,
     revision: u64,
     requirements: Arc<[(Arc<str>, bool)]>,
     scale: f32,
-    topology: ThreadTopology,
+    topology: &'static str,
+    vsync: Option<Arc<dyn crate::Vsync>>,
     telemetry: Option<Arc<crate::diagnostics::TelemetryHub>>,
     hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
 }
@@ -138,8 +139,12 @@ impl CompositorMode {
         self.expected.load(Ordering::Acquire) == token.0
     }
 
-    pub(super) fn cancel(&self) {
-        self.expected.store(0, Ordering::Release);
+    pub(super) fn cancel(&self, vsync: &dyn crate::Vsync) {
+        let _gate = lock(&self.callback_gate);
+        let token = self.expected.swap(0, Ordering::AcqRel);
+        if token != 0 {
+            vsync.cancel_if_token(FrameToken(token));
+        }
     }
 
     fn cancel_callback(&self, token: FrameToken) -> bool {
@@ -160,7 +165,6 @@ impl CompositorMode {
         self: &Arc<Self>,
         slot: &Arc<RunnerSlot<RasterHost>>,
         inbox: &Arc<Inbox>,
-        vsync: &Weak<dyn Vsync>,
         token: FrameToken,
         time: FrameTime,
     ) {
@@ -170,14 +174,11 @@ impl CompositorMode {
         let posted_at = Instant::now();
         let mode = Arc::clone(self);
         let slot = Arc::clone(slot);
-        let vsync = Weak::clone(vsync);
         let result_inbox = Arc::clone(inbox);
         let posted = Arc::clone(slot.runner()).post(Box::new(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                slot.with(|graphics| {
-                    mode.frame(graphics, &result_inbox, &vsync, token, time, posted_at)
-                })
-                .unwrap_or(Err(BootError::Panicked))
+                slot.with(|graphics| mode.frame(graphics, &result_inbox, token, time, posted_at))
+                    .unwrap_or(Err(BootError::Panicked))
             }))
             .unwrap_or(Err(BootError::Panicked));
             if let Err(error) = result {
@@ -193,7 +194,6 @@ impl CompositorMode {
         &self,
         graphics: &mut RasterHost,
         inbox: &Inbox,
-        vsync: &Weak<dyn Vsync>,
         token: FrameToken,
         time: FrameTime,
         posted_at: Instant,
@@ -207,13 +207,6 @@ impl CompositorMode {
         else {
             return Ok(());
         };
-        if plan
-            .deadline_ms
-            .is_some_and(|deadline| time.mono_ms >= deadline)
-        {
-            self.handoff(inbox, token, generation, Some(time));
-            return Ok(());
-        }
         if graphics.gpu != Gpu::Live || !graphics.surfaces.is_open() || graphics.installed.is_none()
         {
             self.handoff(inbox, token, generation, None);
@@ -287,14 +280,9 @@ impl CompositorMode {
                 Ok(end_frame(runtime, false, true))
             }));
         } else if output.shown {
-            // Serialize the platform request with UI cancellation. The active
-            // lock is never held while Raster prepares, submits, or presents.
-            let active = lock(&self.active);
-            if active
-                .as_ref()
-                .is_some_and(|run| run.generation == generation)
-                && let Some(next) = self.continue_callback(token)
-                && let Some(vsync) = vsync.upgrade()
+            let _gate = lock(&self.callback_gate);
+            if let Some(next) = self.continue_callback(token)
+                && let Some(vsync) = &plan.vsync
             {
                 vsync.request_frame_with_rate(next, rate);
             }
@@ -325,6 +313,18 @@ impl CompositorMode {
 
     pub(super) fn running(&self) -> bool {
         self.expected.load(Ordering::Acquire) != 0
+    }
+
+    pub(super) fn prepare_content(&self, generation: u64) -> bool {
+        let mut active = lock(&self.active);
+        let Some(run) = active.as_mut().filter(|run| run.generation == generation) else {
+            return false;
+        };
+        if !matches!(run.window, ListWindow::Idle) {
+            return false;
+        }
+        run.window = ListWindow::Preparing;
+        true
     }
 
     /// Publish one UI-built window for installation at the next compositor vsync.
@@ -422,9 +422,9 @@ impl CompositorMode {
             scale: submission.scale,
             requirements: submission.requirements,
             topology: old_plan.topology,
+            vsync: old_plan.vsync.clone(),
             telemetry: old_plan.telemetry.clone(),
             hub: old_plan.hub.clone(),
-            deadline_ms: old_plan.deadline_ms,
         });
         if let Some(run) = lock(&self.active).as_mut()
             && run.generation == generation
@@ -479,7 +479,7 @@ impl Plan {
             vsync_ns: Some(posted_ns),
             ui_start_ns: posted_ns,
             ui_done_ns: posted_ns,
-            topology: self.topology,
+            topology: Some(self.topology),
             budget_ns: ms_to_ns(time.interval_ms),
             compositor_only: true,
             ..ScheduleTiming::default()
@@ -490,6 +490,8 @@ impl Plan {
                 .and_then(|hub| hub.track_frame(posted_ns)),
             sample_gpu: telemetry.as_ref().is_some_and(|hub| hub.collects_gpu()),
             revision: self.revision,
+            surface: None,
+            interaction: None,
             number: next_frame_number(),
             time,
             frame_started,
@@ -533,6 +535,7 @@ pub(super) fn activate(runtime: &mut UiHost, completion: &RasterCompletion) -> b
         || submission.revision != runtime.revision
         || runtime.compositor_generation.is_some()
         || runtime.frames.in_flight != 0
+        || runtime.frames.pending.is_some()
         || runtime.input.is_paused()
         || runtime.inbox.has_pending()
     {
@@ -549,24 +552,19 @@ pub(super) fn activate(runtime: &mut UiHost, completion: &RasterCompletion) -> b
     if tree.tracks.is_empty() && !completion.output.renderer_work {
         return false;
     }
-    let deadline_ms = runtime
-        .session
-        .as_mut()
-        .and_then(|session| session.next_wake_ms());
     // A preceding UI frame may have prearmed the next tick while Raster
     // was encoding. Retire that token before transferring vsync ownership.
     if runtime.scheduler.token_armed() {
-        runtime.scheduler.cancel();
-        runtime.vsync.cancel();
+        runtime.cancel_vsync();
     }
     let token = runtime.compositor_mode.begin(
         Plan {
             tree,
-            deadline_ms,
             revision: submission.revision,
             requirements: Arc::clone(&submission.requirements),
             scale: submission.scale,
-            topology: runtime.topology,
+            topology: runtime.queue_placement,
+            vsync: Some(Arc::clone(&runtime.vsync)),
             telemetry: runtime.telemetry.clone(),
             hub: runtime.hub.clone(),
         },
@@ -583,11 +581,10 @@ pub(super) fn stop(runtime: &mut UiHost, announced: Option<Arc<CompositorSnapsho
     let Some(generation) = runtime.compositor_generation.take() else {
         return false;
     };
-    runtime.compositor_mode.cancel();
+    runtime.compositor_mode.cancel(runtime.vsync.as_ref());
     let active = lock(&runtime.compositor_mode.active)
         .take()
         .filter(|active| active.generation == generation);
-    runtime.vsync.cancel();
     let latest = active.and_then(|active| {
         runtime.active_surface = active.surface;
         runtime.present_retry_at = active.retry_at;
@@ -619,16 +616,16 @@ mod tests {
 
     use engine::scene::LayerTree;
 
-    use super::{CompositorMode, ListWindow, Plan, ThreadTopology};
+    use super::{CompositorMode, ListWindow, Plan};
 
     fn plan() -> Plan {
         Plan {
             tree: Arc::new(LayerTree::empty()),
-            deadline_ms: None,
             revision: 0,
             requirements: Arc::default(),
             scale: 1.0,
-            topology: ThreadTopology::Split,
+            topology: "platform-ui",
+            vsync: None,
             telemetry: None,
             hub: None,
         }
@@ -659,8 +656,8 @@ mod tests {
             super::lock(&mode.active).as_ref().unwrap().window,
             ListWindow::Ready(_)
         ));
-        assert!(mode.continue_callback(first).is_some());
-        mode.cancel();
+        let next = mode.continue_callback(first).unwrap();
+        assert!(mode.cancel_callback(next));
         assert!(!mode.publish_window(first.0, 1, make_window()));
     }
 
@@ -673,7 +670,7 @@ mod tests {
         let second = mode.continue_callback(first).expect("next raster callback");
         assert_ne!(first, second);
         assert!(!mode.expects(first));
-        mode.cancel();
+        assert!(mode.cancel_callback(second));
         assert!(!mode.expects(second));
         assert!(mode.continue_callback(second).is_none());
 

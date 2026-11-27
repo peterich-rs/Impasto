@@ -55,8 +55,8 @@ pub use restoration::Restoration;
 pub use semantics::{ProjectedNode, content_extent, project, scroll_step};
 pub use surface::pixel_size;
 pub use task_runner::{
-    MainThreadPoster, ManualTaskRunner, PlatformTaskRunner, Task, TaskHandle, TaskQueueId,
-    TaskRunner, TaskRunners, ThreadTaskRunner,
+    MainThreadPoster, ManualTaskRunner, PlatformTaskRunner, SwitchableTaskRunner, Task, TaskHandle,
+    TaskQueueId, TaskRunner, TaskRunners, ThreadTaskRunner,
 };
 pub use timing::FrameTiming;
 pub use tracing_subscriber::filter::{LevelFilter, Targets};
@@ -88,6 +88,26 @@ pub type OpenSurface = Box<SurfaceOpener>;
 pub enum Launch {
     /// Invoked on the ui thread. The shaper is created on that thread.
     Session(SessionFactory),
+    Migrating(MigratingSessionFactory),
+}
+
+pub struct MigratingSessionFactory(SessionFactory);
+
+impl Launch {
+    /// Opens a session on a boot queue and moves it to the platform queue after its first submission.
+    ///
+    /// # Safety
+    /// The factory must keep all non-Send state that it creates or receives in
+    /// the returned session's ownership graph. The session must quiesce its VM
+    /// before moving and must support subsequent use and destruction on the
+    /// platform thread.
+    #[expect(
+        unsafe_code,
+        reason = "opening an arbitrary session for migration requires its ownership contract"
+    )]
+    pub unsafe fn migrating(factory: SessionFactory) -> Self {
+        Self::Migrating(MigratingSessionFactory(factory))
+    }
 }
 
 pub enum Presented {
@@ -182,53 +202,7 @@ pub trait Vsync: Send + Sync {
         let _ = hint;
         self.request_frame(token);
     }
-    fn cancel(&self);
-}
-
-/// Maps the UI and raster roles to physical queues.
-///
-/// `IMPASTO_THREAD_TOPOLOGY` selects `shared`, `split`, or `platform-ui`.
-/// An unset variable uses [`Self::Split`]: the UI queue and the raster queue
-/// each get their own thread. The platform main thread stays separate.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ThreadTopology {
-    SharedRender,
-    #[default]
-    Split,
-    PlatformUi,
-}
-
-impl ThreadTopology {
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::SharedRender => "shared",
-            Self::Split => "split",
-            Self::PlatformUi => "platform-ui",
-        }
-    }
-
-    pub fn configured() -> Result<Self, BootError> {
-        match std::env::var("IMPASTO_THREAD_TOPOLOGY") {
-            Ok(mode) => mode.parse(),
-            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
-            Err(error) => Err(BootError::Platform(error.to_string())),
-        }
-    }
-}
-
-impl std::str::FromStr for ThreadTopology {
-    type Err = BootError;
-
-    fn from_str(mode: &str) -> Result<Self, Self::Err> {
-        match mode {
-            "shared" => Ok(Self::SharedRender),
-            "split" => Ok(Self::Split),
-            "platform-ui" => Ok(Self::PlatformUi),
-            _ => Err(BootError::Platform(format!(
-                "unknown thread topology: {mode}"
-            ))),
-        }
-    }
+    fn cancel_if_token(&self, token: FrameToken);
 }
 
 pub struct Boot {
@@ -240,7 +214,6 @@ pub struct Boot {
     pub modules: Vec<engine::session::Module>,
     pub plugin_services: PluginServices,
     pub platform_runner: Option<Arc<dyn TaskRunner>>,
-    pub thread_topology: ThreadTopology,
     /// Written before `start` so `Linking.getInitialURL` is visible during eval.
     pub launch_url: engine::session::Shared<Option<String>>,
     /// Creates the graphics context on the render thread.
