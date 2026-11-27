@@ -67,13 +67,15 @@ pub fn analyze(
     } else {
         app.root.join(".impasto/tsconfig.generated.json")
     };
-    let entry = if plugin {
+    let plugin_entry = if plugin {
         let package: serde_json::Value =
             serde_json::from_slice(&fs::read(app.root.join("package.json"))?)?;
-        app.root
-            .join(package["exports"]["."].as_str().context("插件缺少主导出")?)
+        Some(
+            app.root
+                .join(package["exports"]["."].as_str().context("插件缺少主导出")?),
+        )
     } else {
-        app.entry.clone()
+        None
     };
     let mut errors = Vec::new();
     let mut checked_rust = false;
@@ -112,7 +114,9 @@ pub fn analyze(
         match bundler::bundle_with_cache(
             bundler::BundleOptions {
                 root: app.root.clone(),
-                entry: entry.clone(),
+                entry: plugin_entry
+                    .clone()
+                    .unwrap_or_else(|| app.entry_for(Some(target))),
                 framework: framework.clone(),
                 plugins: Some(native.linker_manifest()),
                 ..Default::default()

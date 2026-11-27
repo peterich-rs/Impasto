@@ -42,6 +42,7 @@ internal object NativeBridge {
 
     external fun nativePlatformPending(handle: Long, id: Long): Boolean
     external fun nativePlatformResult(handle: Long, id: Long, payload: String?, error: String?): Boolean
+    external fun nativePlatformEvent(handle: Long, topic: String, payload: String): Boolean
 
     external fun nativeIsCurrentSurface(handle: Long, surface: Long): Boolean
 

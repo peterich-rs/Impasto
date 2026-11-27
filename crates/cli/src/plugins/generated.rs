@@ -362,7 +362,25 @@ fn write_entry(
         "macos" => (
             "lib.rs",
             format!(
-                "#[unsafe(no_mangle)]\npub extern \"C\" fn impasto_macos_run(open_url: Option<host::OpenUrl>) -> u8 {{\n    if let Err(error) = {install} {{\n        eprintln!(\"{{error}}\");\n        return 1;\n    }}\n    host::exit_status_with_url_handler(open_url)\n}}\n"
+                r#"fn run(open_url: Option<host::OpenUrl>, callbacks: Option<host::Callbacks>) -> u8 {{
+    if let Err(error) = {install} {{
+        eprintln!("{{error}}");
+        return 1;
+    }}
+    host::exit_status_with_callbacks(open_url, callbacks)
+}}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn impasto_macos_run(open_url: Option<host::OpenUrl>) -> u8 {{
+    run(open_url, None)
+}}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn impasto_macos_run_host(callbacks: *const host::Callbacks) -> u8 {{
+    // SAFETY: the AppKit host retains the callbacks and their context until run returns.
+    run(None, unsafe {{ callbacks.as_ref() }}.copied())
+}}
+"#
             ),
         ),
         "ios" => (

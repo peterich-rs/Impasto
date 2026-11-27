@@ -6,8 +6,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use futures_channel::oneshot;
 
 type ResultValue = Result<Option<String>, String>;
-type Sender = oneshot::Sender<ResultValue>;
+type Notification = Box<dyn FnOnce(ResultValue) + Send>;
 type Dispatch = dyn Fn(u64, &str, &str) -> bool + Send + Sync;
+
+enum Reply {
+    Request(oneshot::Sender<ResultValue>),
+    Notification(Notification),
+}
 
 /// Routes one-shot calls to window-specific native plugins.
 #[derive(Clone)]
@@ -20,7 +25,7 @@ pub struct NativeChannel {
 struct Pending {
     next: u64,
     closed: bool,
-    requests: HashMap<u64, Sender>,
+    requests: HashMap<u64, Reply>,
 }
 
 struct Request<'a> {
@@ -52,19 +57,7 @@ impl NativeChannel {
     /// Calls a native plugin operation. Dropping the future retires its reply ID.
     pub async fn request(&self, operation: &str, payload: &str) -> ResultValue {
         let (sender, receiver) = oneshot::channel();
-        let id = {
-            let mut state = self.state();
-            if state.closed {
-                return Err("the platform session is closed".into());
-            }
-            let id = state
-                .next
-                .checked_add(1)
-                .ok_or("native request identifiers are exhausted")?;
-            state.next = id;
-            state.requests.insert(id, sender);
-            id
-        };
+        let id = self.reserve(Reply::Request(sender))?;
         let _request = Request { channel: self, id };
         if !(self.dispatch)(id, operation, payload) {
             return Err("the platform window is unavailable".into());
@@ -72,6 +65,34 @@ impl NativeChannel {
         receiver
             .await
             .map_err(|_| "the platform window detached".to_owned())?
+    }
+
+    fn reserve(&self, reply: Reply) -> Result<u64, String> {
+        let mut state = self.state();
+        if state.closed {
+            return Err("the platform session is closed".into());
+        }
+        let id = state
+            .next
+            .checked_add(1)
+            .ok_or("native request identifiers are exhausted")?;
+        state.next = id;
+        state.requests.insert(id, reply);
+        Ok(id)
+    }
+
+    pub(crate) fn notify(
+        &self,
+        operation: &str,
+        payload: &str,
+        reply: Notification,
+    ) -> Result<(), String> {
+        let id = self.reserve(Reply::Notification(reply))?;
+        if !(self.dispatch)(id, operation, payload) {
+            let _guard = Request { channel: self, id };
+            return Err("the platform window is unavailable".into());
+        }
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -82,13 +103,20 @@ impl NativeChannel {
     #[doc(hidden)]
     pub fn complete(&self, id: u64, result: ResultValue) -> bool {
         let pending = self.state().requests.remove(&id);
-        pending.is_some_and(|pending| pending.send(result).is_ok())
+        match pending {
+            Some(Reply::Request(sender)) => sender.send(result).is_ok(),
+            Some(Reply::Notification(notify)) => {
+                notify(result);
+                true
+            }
+            None => false,
+        }
     }
 
     #[doc(hidden)]
     pub fn cancel_pending(&self) {
         let pending = std::mem::take(&mut self.state().requests);
-        drop(pending);
+        Self::detach(pending);
     }
 
     #[doc(hidden)]
@@ -98,6 +126,14 @@ impl NativeChannel {
             state.closed = true;
             std::mem::take(&mut state.requests)
         };
-        drop(pending);
+        Self::detach(pending);
+    }
+
+    fn detach(pending: HashMap<u64, Reply>) {
+        for reply in pending.into_values() {
+            if let Reply::Notification(notify) = reply {
+                notify(Err("the platform window detached".into()));
+            }
+        }
     }
 }

@@ -37,6 +37,8 @@ pub(crate) struct IosConfig {
     #[serde(default)]
     pub(crate) usage_descriptions: BTreeMap<String, String>,
     #[serde(default)]
+    pub(crate) entitlements: BTreeMap<String, bool>,
+    #[serde(default)]
     device_families: Vec<u8>,
     pub(crate) privacy_manifest: Option<PathBuf>,
     pub(crate) launch_storyboard: Option<PathBuf>,
@@ -48,6 +50,7 @@ pub(crate) struct IosConfig {
 
 impl IosConfig {
     pub(crate) fn validate(&self) -> Result<()> {
+        crate::app::validate_entitlements("ios", &self.entitlements)?;
         if let Some(id) = &self.bundle_id
             && (!id.contains('.')
                 || !id.split('.').all(|part| {
@@ -326,7 +329,7 @@ fn prepare_application(
             .collect::<Vec<_>>()
             .join(","),
     };
-    let domains = write_associated_domains(&glue, &app.ios.associated_domains)?;
+    let domains = write_entitlements(&glue, &app.ios)?;
     let team = app.ios.development_team.as_deref().unwrap_or_default();
     let sdk_settings = settings
         .lines()
@@ -583,20 +586,25 @@ pub(crate) fn write_privacy_manifest(
     Ok(())
 }
 
-fn write_associated_domains(project: &Path, domains: &[String]) -> Result<&'static str> {
-    if domains.is_empty() {
+fn write_entitlements(project: &Path, config: &IosConfig) -> Result<&'static str> {
+    if config.associated_domains.is_empty() && config.entitlements.is_empty() {
         return Ok("");
     }
-    let domains = domains
+    let domains = config
+        .associated_domains
         .iter()
         .map(|domain| format!("<string>{}</string>", escape_xml(domain)))
         .collect::<String>();
-    fs::write(
-        project.join("Impasto.entitlements"),
-        plist_xml(&format!(
+    let mut entries = String::new();
+    if !domains.is_empty() {
+        entries.push_str(&format!(
             "<key>com.apple.developer.associated-domains</key><array>{domains}</array>"
-        )),
-    )?;
+        ));
+    }
+    for (key, enabled) in &config.entitlements {
+        entries.push_str(&format!("<key>{key}</key><{enabled}/>"));
+    }
+    fs::write(project.join("Impasto.entitlements"), plist_xml(&entries))?;
     Ok("CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/../.impasto/darwin/ios/Impasto.entitlements\n")
 }
 

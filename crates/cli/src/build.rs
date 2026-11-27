@@ -68,7 +68,12 @@ pub fn build(
                     .join(profile(&options));
             }
             let manifest = native.as_ref().map(NativeBuild::linker_manifest);
-            let linked = link_source(&app.root, &app.entry, &options, manifest.clone())?;
+            let linked = link_source(
+                &app.root,
+                &app.entry_for(descriptor_target),
+                &options,
+                manifest.clone(),
+            )?;
             if let Some(installed) = installed_manifest {
                 native
                     .as_ref()
@@ -150,7 +155,7 @@ pub(crate) fn bundle_update(
     let native = plugins::watch_manifest(app, target, options.verbose)?;
     let linked = link_source(
         &app.root,
-        &app.entry,
+        &app.entry_for(Some(target)),
         options,
         Some(native.linker_manifest()),
     )?;
@@ -183,7 +188,7 @@ pub(crate) fn bundle_for_host(
 ) -> Result<PathBuf> {
     let linked = link_source(
         &app.root,
-        &app.entry,
+        &app.entry_for(Some(target)),
         options,
         Some(native.linker_manifest()),
     )?;

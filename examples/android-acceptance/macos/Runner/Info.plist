@@ -9,4 +9,7 @@
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 <key>NSHighResolutionCapable</key><true/>
+  <key>NSCameraUsageDescription</key><string>用于拍摄并附加本次现场检查的照片。</string>
+  <key>NSPhotoLibraryUsageDescription</key><string>用于选择本次现场检查的照片。</string>
+  <key>NSLocationUsageDescription</key><string>用于记录现场检查的位置。</string>
 </dict></plist>

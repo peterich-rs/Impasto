@@ -240,6 +240,7 @@ pub struct ImpastoIOSHost {
     viewport: RefCell<Option<Metrics>>,
     restoration: Restoration,
     platform: impasto::os::NativeChannel,
+    native_events: impasto::os::NativeEventChannel,
     compositor: Arc<compositor::Compositor>,
 }
 
@@ -283,9 +284,12 @@ impl ImpastoIOSHost {
         });
         let boot_platform = platform.clone();
         let exit_platform = platform.clone();
+        let native_events = impasto::os::NativeEventChannel::new(platform.clone());
+        let boot_native_events = native_events.clone();
+        let exit_native_events = native_events.clone();
         let link = embedder::start_async_with_exit(
             move || {
-                let app = bundle::prepare(root, boot_platform)?;
+                let app = bundle::prepare(root, boot_platform, boot_native_events)?;
                 Ok(Boot {
                     font_family: app.font_family.clone(),
                     launch: app.launch,
@@ -345,6 +349,7 @@ impl ImpastoIOSHost {
                 Err(error) => ready_events.failed(&error),
             },
             move |result| {
+                exit_native_events.close();
                 exit_platform.close();
                 // The common host has stopped using all surface pointers.
                 exit_layers
@@ -367,6 +372,7 @@ impl ImpastoIOSHost {
             viewport: RefCell::new(None),
             restoration,
             platform,
+            native_events,
             compositor,
         })
     }
@@ -486,6 +492,7 @@ pub unsafe extern "C" fn impasto_ios_close(host: *mut ImpastoIOSHost) {
     if MainThreadMarker::new().is_some() && !host.is_null() {
         // SAFETY: close consumes the caller's sole handle on the UIKit thread.
         let host = unsafe { Box::from_raw(host) };
+        host.native_events.close();
         host.platform.close();
         host.compositor.reset(0);
         host.gate.visible.store(false, Ordering::Release);
@@ -839,6 +846,21 @@ pub unsafe extern "C" fn impasto_ios_service_result(
             Err(payload.unwrap_or_else(|| "iOS platform request failed".into()))
         };
         host.platform.complete(request, result)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn impasto_ios_service_event(
+    host: *mut ImpastoIOSHost,
+    topic: *const c_char,
+    payload: *const c_char,
+) -> bool {
+    with_host(host, |host| {
+        // SAFETY: Swift borrows both NUL-terminated strings for the duration of this call.
+        let (Some(topic), Some(payload)) = (unsafe { (string(topic), string(payload)) }) else {
+            return false;
+        };
+        host.native_events.emit(&topic, &payload)
     })
 }
 

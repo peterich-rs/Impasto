@@ -9,6 +9,8 @@ publish.workspace = true
 javascript.workspace = true
 impasto-macros = { path = "../impasto-macros" }
 futures-channel = { version = "0.3", features = ["sink"] }
+futures-core = "0.3"
+serde_json = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "android")'.dependencies]

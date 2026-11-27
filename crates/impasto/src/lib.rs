@@ -4,6 +4,8 @@ mod context;
 mod diagnostics;
 pub mod os;
 mod os_channel;
+mod os_events;
+
 mod runtime;
 mod texture;
 mod value;

@@ -1,6 +1,6 @@
 # Rust 业务与原生插件
 
-Impasto 应用从 `src/main.tsx` 启动。应用可以用 `rust/` 暴露私有的 `@app/…` 模块，并通过 `app.toml` 的 `[dependencies]` 声明可复用插件。TS 包和官方插件都位于 `packages/`。CLI 用包根的 `plugin.toml` 识别原生插件。
+Impasto 应用默认从 `src/main.tsx` 启动。目标平台存在 `src/main.<平台>.tsx` 时，平台构建、分析和热更新使用该入口。应用可以用 `rust/` 暴露私有的 `@app/…` 模块，并通过 `app.toml` 的 `[dependencies]` 声明可复用插件。TS 包和官方插件都位于 `packages/`。CLI 用包根的 `plugin.toml` 识别原生插件。
 
 ## 应用工程
 
@@ -77,7 +77,9 @@ usage_description_keys = ["NSCameraUsageDescription"]
 
 Android 插件用标准 Gradle Library 声明自己的 Manifest、Maven 依赖、资源和 R8 规则。Kotlin 需要宿主类型时，使用 `compileOnly(project(":impasto-host"))`。应用通过 Gradle 的模块依赖和 Manifest Merger 接入插件。嵌入式 Android 宿主用 `impasto build aar` 生成宿主 AAR 和所选插件的伴随 AAR，消费工程将这些库都加入 Gradle 并在对应窗口调用原生插件注册入口。独立打开相机插件时，`local.properties` 的 `impasto.sdk` 或 `IMPASTO_ROOT` 可指定 SDK。
 
-iOS 与 macOS 插件使用 Swift Package，按需依赖对应的 `ImpastoHost`。SwiftPM 管理 Framework 链接、模块命名空间和资源。生成的 `ImpastoGeneratedPlugins` 包引用声明的产品，调用注册类的 `register(with:)`。应用在 `app.toml` 中填写所需的 Apple 隐私说明，并将文案和 entitlement 配置纳入对应 Runner 工程。SwiftPM 是 Apple 插件的构建入口。
+iOS 与 macOS 插件使用 Swift Package，按需依赖对应的 `ImpastoHost`。生成的 `ImpastoGeneratedPlugins` 连接基础产品和已启用特性的产品，由注册类接收这些特性的注册器。应用在 `app.toml` 声明用途说明，并在对应 Runner 的 Info.plist 提供相同的键。macOS entitlement 同时写入 `app.toml` 和 Runner 的签名配置。iOS entitlement 可由 `[ios.entitlements]` 生成，设备发布仍需要匹配的签名能力。
+
+在 `[plugins."@impasto/permissions"]` 设置 `enabled = ["camera", "photos"]` 可以锁定权限能力，Debug 和 Release 使用同一列表。省略 `enabled` 时，CLI 选择插件的默认能力，并从已有隐私说明或 Android 权限声明推导匹配项。Apple 只链接所选能力的 SwiftPM 产品。Android 将所选能力对应的声明写入生成的 Manifest，并保留 `maxSdkVersion` 和显式启用的 `usesPermissionFlags`。使用 `android_bluetooth_never_for_location = true` 可为所选的蓝牙扫描权限生成 `neverForLocation`。
 
 ## Rust 导出和窗口原语
 
@@ -107,10 +109,13 @@ pub fn register(registrar: &mut impasto::PluginRegistrar) {
 | 沙盒目录 | `AppPaths` 提供文档、应用数据、缓存和临时目录。 |
 | 状态和事件 | 读取生命周期、窗口焦点、冷启动 URL、恢复状态及窗口组状态。事件订阅随 `Subscription` 回收。 |
 | 平台窗口 | Android 插件通过 `ImpastoHost` 和 `impasto::os::android` 访问 Activity 和 View。宿主提供 Activity Result、权限结果和 Intent 回调。Apple 插件通过 `ImpastoHost` 取得当前控制器或窗口，并处理 URL。 |
+| 原生通道 | 从 `PluginContext` 获取 `NativeChannel` 发送单次请求，或获取 `NativeEventChannel` 订阅事件。用 `subscribe_latest` 订阅只需保留最近值的状态。 |
 | 原生合成 | 外部纹理注册表承载相机等图像源，Platform View 协议将原生视图放入合成布局。 |
 | 窗口扩展和遥测 | `insert_extension` 和 `extension` 按 Rust 类型共享窗口内服务。插件可将遥测交给 `DiagnosticsSink`。 |
 
 权限、剪贴板、文件选择、存储和应用网络由各能力包实现。Android 权限在 Manifest 中声明，Apple 的用量说明写入目标 Runner 的 Info.plist。平台系统管理用户授权。
+
+持续事件使用以插件包名开头的主题，例如 `@impasto/connectivity/status`。平台处理 `@impasto/events/start`，在监听器就绪后应答，并通过 `emitPluginEvent(topic:payload:)` 发送数据。最后一个订阅退出时，平台收到 `@impasto/events/stop`。宿主关闭时，平台插件的卸载回调负责清理监听器和仍在启动的任务。
 
 ## 跨包依赖
 
@@ -147,7 +152,7 @@ Android 原生消费方可以引用 `project(":impasto_permissions")`。Apple �
 4. Rust entry 会注册所选插件并为目标编译宿主。Gradle 将 JNI 库与资源装进 Android 产物，Xcode 将 SwiftPM 伞包与 Rust 静态库装进 Apple 应用。
 5. 宿主在运行脚本前核对实际登记的模块描述。Android 和 iOS 调试更新继续使用已部署版本的描述。
 
-`examples/native-order` 覆盖应用内 Rust 对 `impasto-http` 的跨包调用、对象与流。`examples/native-camera` 覆盖相机授权、Swift/Kotlin 桥接、扫码、JPEG 与外部纹理。相机的原生采集验收需要支持相机的 iOS 或 Android 设备。
+`examples/native-order` 覆盖应用内 Rust 对 `impasto-http` 的跨包调用、对象与流。`examples/native-camera` 的 macOS 入口用于验证相机授权和系统设置。iOS 与 Android 入口同时验证扫码、JPEG 与外部纹理，原生采集需要支持相机的设备。`impasto test` 中可从 `@impasto/permissions/testing` 安装权限 Mock，验证拒绝、打开设置、临时或部分授权及重试流程。
 
 ```sh
 cargo test -p cli

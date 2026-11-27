@@ -1,7 +1,7 @@
 //! AppKit window. The render thread owns the engine and the session.
 
 use std::cell::{Cell, RefCell};
-use std::ffi::{CString, c_void};
+use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
@@ -511,7 +511,8 @@ struct HostState {
     link: Link,
     /// `--url` at process start. `set_launch_url` does not overwrite this copy.
     initial_url: Option<String>,
-    open_url: Option<crate::OpenUrl>,
+    native: RefCell<Option<crate::native::Host>>,
+    detached: Cell<bool>,
     launched: Cell<bool>,
 }
 
@@ -548,9 +549,8 @@ define_class!(
                 ) {
                     continue;
                 }
-                if self.ivars().open_url.is_some_and(|intercept| {
-                    CString::new(url.as_str()).is_ok_and(|url| intercept(url.as_ptr()))
-                }) {
+                let handler = self.ivars().native.borrow().as_ref().map(crate::native::Host::url_handler);
+                if handler.is_some_and(|open| open(&url)) {
                     continue;
                 }
                 self.ivars().link.post(Command::LaunchUrl(url));
@@ -559,10 +559,7 @@ define_class!(
 
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
-            self.ivars()
-                .link
-                .post(Command::Lifecycle(engine::session::Lifecycle::Detached));
-            let _ = self.ivars().link.shutdown_and_join();
+            self.detach();
         }
 
         #[unsafe(method(applicationDidBecomeActive:))]
@@ -606,7 +603,7 @@ define_class!(
     unsafe impl NSWindowDelegate for Host {
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
-            let _ = self.ivars().link.shutdown_and_join();
+            self.detach();
             NSApplication::sharedApplication(self.mtm()).terminate(None);
         }
 
@@ -659,6 +656,18 @@ define_class!(
 );
 
 impl Host {
+    fn detach(&self) {
+        let state = self.ivars();
+        if !state.detached.replace(true) {
+            let native = state.native.borrow_mut().take();
+            drop(native);
+            state
+                .link
+                .post(Command::Lifecycle(engine::session::Lifecycle::Detached));
+            let _ = state.link.shutdown_and_join();
+        }
+    }
+
     fn new(mtm: MainThreadMarker, state: HostState) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(state);
         // SAFETY: `init` is NSObject's designated initializer, and the ivars are already installed.
@@ -971,7 +980,7 @@ pub fn run(
     font: &[u8],
     dump_list: bool,
     initial_url: Option<String>,
-    open_url: Option<crate::OpenUrl>,
+    native: crate::native::Host,
     title: &str,
 ) -> Result<(), RunError> {
     let Some(mtm) = MainThreadMarker::new() else {
@@ -1050,12 +1059,16 @@ pub fn run(
         modules: Vec::new(),
         plugin_services: embedder::PluginServices {
             initial_lifecycle: Default::default(),
-            native_channel: None,
+            native_channel: native.channel(),
+            native_events: native.events(),
             paths: embedder::AppPaths::new(
                 sandbox_directory(objc2_foundation::NSSearchPathDirectory::DocumentDirectory),
                 sandbox_directory(objc2_foundation::NSSearchPathDirectory::CachesDirectory),
                 Some(std::env::temp_dir()),
-            ),
+            )
+            .with_data_dir(sandbox_directory(
+                objc2_foundation::NSSearchPathDirectory::ApplicationSupportDirectory,
+            )),
         },
         platform_runner: Some(embedder::PlatformTaskRunner::new(
             Arc::new(dispatch_main),
@@ -1148,7 +1161,8 @@ pub fn run(
             layer,
             link,
             initial_url,
-            open_url,
+            native: RefCell::new(Some(native)),
+            detached: Cell::new(false),
             launched: Cell::new(false),
         },
     );
@@ -1158,6 +1172,7 @@ pub fn run(
     app.setDelegate(Some(ProtocolObject::from_ref(&*host)));
     watch_appearance(&host);
     app.run();
+    host.detach();
     if let Some(error) = startup_error
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -1463,7 +1478,7 @@ fn wake_main() {
     }));
 }
 
-fn dispatch_main(work: Box<dyn FnOnce() + Send>) {
+pub(crate) fn dispatch_main(work: Box<dyn FnOnce() + Send>) {
     let context = Box::into_raw(Box::new(work));
     // SAFETY: `_dispatch_main_q` is the main queue, and `context` is the boxed closure the callback frees.
     unsafe {

@@ -44,6 +44,7 @@ pub struct PluginServices {
     pub paths: AppPaths,
     pub initial_lifecycle: impasto::Lifecycle,
     pub native_channel: Option<impasto::os::NativeChannel>,
+    pub native_events: Option<impasto::os::NativeEventChannel>,
 }
 
 pub(crate) struct WindowBindings {
@@ -80,12 +81,18 @@ impl RuntimeBackend for Backend {
 
 pub(crate) struct PluginSession {
     context: PluginContext,
+    native_events: Option<impasto::os::NativeEventChannel>,
 }
 
 impl PluginSession {
     pub(crate) fn lifecycle(&self, state: engine::session::Lifecycle) {
         use engine::session::Lifecycle as Host;
         use impasto::Lifecycle;
+        if state == Host::Detached
+            && let Some(events) = &self.native_events
+        {
+            events.close();
+        }
         self.context.dispatch_lifecycle(match state {
             Host::Resumed => Lifecycle::Resumed,
             Host::Inactive => Lifecycle::Inactive,
@@ -110,8 +117,7 @@ impl PluginSession {
 
 impl Drop for PluginSession {
     fn drop(&mut self) {
-        self.context
-            .dispatch_lifecycle(impasto::Lifecycle::Detached);
+        self.lifecycle(engine::session::Lifecycle::Detached);
     }
 }
 
@@ -181,6 +187,9 @@ pub(crate) fn attach(
     if let Some(channel) = services.native_channel {
         context.insert_extension(channel);
     }
+    if let Some(events) = &services.native_events {
+        context.insert_extension(events.clone());
+    }
     let queue = Arc::downgrade(inbox);
     context = context.with_textures(impasto::ExternalTextureRegistry::new(move |name, frame| {
         let Some(queue) = queue.upgrade() else {
@@ -214,7 +223,10 @@ pub(crate) fn attach(
         context = context.with_android(android);
     }
     context.dispatch_lifecycle(services.initial_lifecycle);
-    let session = PluginSession { context };
+    let session = PluginSession {
+        context,
+        native_events: services.native_events,
+    };
     let extensions = registrar.build(&session.context).map_err(plugin_error)?;
     let registry = if plugins.expected.is_some() {
         impasto::abi::ModuleRegistry::with_extensions(modules, extensions).map_err(plugin_error)?

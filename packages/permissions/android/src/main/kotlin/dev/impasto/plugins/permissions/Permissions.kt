@@ -1,207 +1,168 @@
 package dev.impasto.plugins.permissions
 
-import android.Manifest.permission as AndroidPermission
 import android.app.Activity
-import android.app.NotificationManager
-import android.bluetooth.BluetoothManager
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.location.LocationManager
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.result.ActivityResultRegistry
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.app.ActivityCompat
-import androidx.core.app.NotificationManagerCompat
-import androidx.core.location.LocationManagerCompat
 import java.util.UUID
 
-/** Binds session permission requests to the Activity Result registry for this window. */
-class Permissions(
-    private val activity: Activity,
+/** Owns the FIFO and rebinds its in-flight Activity Result across recreation. */
+internal class Permissions(
+    activity: Activity,
     registry: ActivityResultRegistry?,
     pending: Pending?,
-    private val complete: (Long, Array<String>?, String?) -> Unit,
+    enabled: Set<String>?,
+    private val isPending: (Long) -> Boolean,
+    private val complete: (Long, Array<String>?, PermissionFailure?) -> Unit,
 ) : AutoCloseable {
-    data class Pending(val key: String, val id: Long, val names: Array<String>)
+    data class PendingRequest(val id: Long, val names: List<String>)
 
-    @Suppress("DEPRECATION")
-    private val declared = activity.packageManager
-        .getPackageInfo(activity.packageName, PackageManager.GET_PERMISSIONS)
-        .requestedPermissions.orEmpty().toSet()
-    private val history = activity.getSharedPreferences("dev.impasto.permissions", Activity.MODE_PRIVATE)
+    enum class Pipeline { Runtime, FollowUp, Settings }
+
+    data class Active(val request: PendingRequest, val next: Int = 0, val pipeline: Pipeline? = null)
+
+    sealed interface Reply {
+        data class Runtime(val result: Map<String, Boolean>) : Reply
+        data object Settings : Reply
+    }
+
+    data class Pending(val key: String, val active: Active?, val queue: List<PendingRequest>, val reply: Reply?)
+
+    val capabilities = PermissionCapabilities(activity, enabled)
     private val key = pending?.key ?: "impasto.permissions.${UUID.randomUUID()}"
-    private var active = pending
-    val hasPendingRequest: Boolean get() = active != null
-    private val launcher = registry?.register(
-        key,
-        ActivityResultContracts.RequestMultiplePermissions(),
-        ::receive,
-    )
+    private val queue = ArrayDeque(pending?.queue.orEmpty())
+    private var active = pending?.active
+    private var reply = pending?.reply
+    private var bound = true
+    private val main = Handler(Looper.getMainLooper())
+    val hasPendingRequest: Boolean get() = active != null || queue.isNotEmpty()
+
+    private val runtimeLauncher = registry?.register(key, ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        receive(Reply.Runtime(result))
+    }
+    private val settingsLauncher = registry?.register("$key.settings", ActivityResultContracts.StartActivityForResult()) {
+        receive(Reply.Settings)
+    }
 
     init {
-        if (launcher == null && pending != null) {
-            active = null
-            complete(pending.id, null, "replacement host does not provide Activity Results")
-        }
-    }
-
-    private fun permissions(name: String): List<String> = when (name) {
-        "camera" -> listOf(AndroidPermission.CAMERA)
-        "microphone", "speech" -> listOf(AndroidPermission.RECORD_AUDIO)
-        "location", "locationWhenInUse" -> listOf(
-            AndroidPermission.ACCESS_COARSE_LOCATION, AndroidPermission.ACCESS_FINE_LOCATION,
-        )
-        "locationAlways" -> if (Build.VERSION.SDK_INT >= 29) {
-            listOf(AndroidPermission.ACCESS_BACKGROUND_LOCATION)
-        } else permissions("location")
-        "contacts" -> listOf(AndroidPermission.READ_CONTACTS)
-        "calendar" -> listOf(AndroidPermission.READ_CALENDAR)
-        "storage" -> if (Build.VERSION.SDK_INT < 33) listOf(AndroidPermission.READ_EXTERNAL_STORAGE) else emptyList()
-        "photos" -> when {
-            Build.VERSION.SDK_INT >= 34 -> listOf(
-                AndroidPermission.READ_MEDIA_IMAGES, AndroidPermission.READ_MEDIA_VISUAL_USER_SELECTED,
-            )
-            Build.VERSION.SDK_INT >= 33 -> listOf(AndroidPermission.READ_MEDIA_IMAGES)
-            else -> listOf(AndroidPermission.READ_EXTERNAL_STORAGE)
-        }
-        "notification" -> if (Build.VERSION.SDK_INT >= 33) {
-            listOf(AndroidPermission.POST_NOTIFICATIONS)
-        } else emptyList()
-        "bluetoothConnect" -> if (Build.VERSION.SDK_INT >= 31) {
-            listOf(AndroidPermission.BLUETOOTH_CONNECT)
-        } else listOf(AndroidPermission.BLUETOOTH)
-        "bluetoothScan" -> if (Build.VERSION.SDK_INT >= 31) {
-            listOf(AndroidPermission.BLUETOOTH_SCAN)
-        } else listOf(AndroidPermission.ACCESS_FINE_LOCATION)
-        "bluetooth" -> if (Build.VERSION.SDK_INT >= 31) {
-            listOf(AndroidPermission.BLUETOOTH_CONNECT, AndroidPermission.BLUETOOTH_SCAN)
-        } else listOf(AndroidPermission.BLUETOOTH)
-        else -> emptyList()
-    }
-
-    private fun granted(permission: String) =
-        activity.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
-
-    private fun rationaleFor(permission: String) =
-        ActivityCompat.shouldShowRequestPermissionRationale(activity, permission)
-
-    fun rationale(name: String): Boolean = permissions(name).any(::rationaleFor)
-
-    fun status(name: String): String {
-        if (name == "notification" && Build.VERSION.SDK_INT < 33) {
-            return if (NotificationManagerCompat.from(activity).areNotificationsEnabled()) "granted" else "denied"
-        }
-        val mapped = permissions(name)
-        if (mapped.isEmpty()) return "denied"
-        if (name == "photos" && Build.VERSION.SDK_INT >= 34) {
-            if (granted(AndroidPermission.READ_MEDIA_IMAGES)) return "granted"
-            if (granted(AndroidPermission.READ_MEDIA_VISUAL_USER_SELECTED)) return "limited"
-        } else if (mapped.all(::granted)) {
-            return "granted"
-        }
-        if ((name == "location" || name == "locationWhenInUse") &&
-            granted(AndroidPermission.ACCESS_COARSE_LOCATION)
-        ) return "limited"
-        val missing = mapped.filter { it in declared && !granted(it) }
-        if (missing.isEmpty()) return "denied"
-        return if (missing.all { history.getBoolean(it, false) && !rationaleFor(it) }) {
-            "permanentlyDenied"
-        } else {
-            "denied"
-        }
-    }
-
-    fun service(name: String): String = when (name) {
-        "location", "locationWhenInUse", "locationAlways" -> {
-            val manager = activity.getSystemService(LocationManager::class.java)
-            if (manager != null && LocationManagerCompat.isLocationEnabled(manager)) "enabled" else "disabled"
-        }
-        "notification" -> {
-            val manager = activity.getSystemService(NotificationManager::class.java)
-            if (manager?.areNotificationsEnabled() == true) "enabled" else "disabled"
-        }
-        "bluetooth", "bluetoothConnect", "bluetoothScan" -> {
-            val enabled = try {
-                activity.getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled
-            } catch (_: SecurityException) {
-                null
-            }
-            when (enabled) {
-                true -> "enabled"
-                false -> "disabled"
-                null -> "notApplicable"
+        if (pending != null) {
+            if (registry == null) {
+                failAll(PermissionFailure("host-unavailable", "Replacement host does not provide Activity Results"))
+            } else if (reply != null) {
+                main.post { consumeReply() }
+            } else if (active?.pipeline == null) {
+                main.post { advance() }
             }
         }
-        else -> "notApplicable"
     }
 
-    fun openSettings(): Boolean = try {
-        activity.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null)))
-        true
-    } catch (_: RuntimeException) {
-        false
+    fun request(id: Long, names: List<String>) {
+        queue.addLast(PendingRequest(id, names))
+        if (active == null) advance()
     }
 
-    fun request(id: Long, names: Array<String>) {
-        if (active != null) {
-            complete(id, null, "a permission request is already open")
-            return
-        }
-        val requested = names.flatMap(::permissions).distinct().filter { it in declared }.toSet()
-        // On Android 11+ background location is changed through app settings.
-        // On Android 10 ask for foreground access first in a separate request.
-        val candidates = requested.filter {
-            it != AndroidPermission.ACCESS_BACKGROUND_LOCATION ||
-                (Build.VERSION.SDK_INT == 29 && (
-                    granted(AndroidPermission.ACCESS_COARSE_LOCATION) ||
-                        granted(AndroidPermission.ACCESS_FINE_LOCATION)
-                    ))
-        }
-        // Keep fine and coarse together for approximate location on Android 12+.
-        val missing = candidates.filter { !granted(it) }.toMutableList()
-        if (Build.VERSION.SDK_INT >= 31 && AndroidPermission.ACCESS_FINE_LOCATION in missing &&
-            AndroidPermission.ACCESS_COARSE_LOCATION in declared && AndroidPermission.ACCESS_COARSE_LOCATION !in missing
-        ) missing.add(AndroidPermission.ACCESS_COARSE_LOCATION)
-        if (missing.isEmpty()) {
-            complete(id, names.map(::status).toTypedArray(), null)
-            return
-        }
-        val resultLauncher = launcher
-        if (resultLauncher == null) {
-            complete(id, null, "host does not provide Activity Results")
-            return
-        }
-        active = Pending(key, id, names)
-        try {
-            resultLauncher.launch(missing.toTypedArray())
-        } catch (error: RuntimeException) {
-            active = null
-            complete(id, null, "could not request permissions (${error.javaClass.simpleName})")
+    private fun advance() {
+        while (bound) {
+            val current = active ?: queue.removeFirstOrNull()?.let { Active(it) } ?: return
+            active = current
+            if (current.pipeline != null) return
+            val request = current.request
+            if (!isPending(request.id)) {
+                active = null
+                continue
+            }
+            try {
+                if (current.next == 0) {
+                    request.names.forEach(capabilities::validateRequest)
+                    val candidates = request.names.flatMap { name ->
+                        if (capabilities.requiresFollowUp(name)) {
+                            if (capabilities.hasForeground(name)) emptyList() else capabilities.foreground(name)
+                        } else capabilities.runtime(name)
+                    }
+                    if (launchRuntime(current.copy(next = 1), Pipeline.Runtime, candidates)) return
+                    active = current.copy(next = 1)
+                    continue
+                }
+
+                val name = request.names.distinct().getOrNull(current.next - 1)
+                if (name == null) {
+                    val statuses = request.names.map(capabilities::status).toTypedArray()
+                    active = null
+                    complete(request.id, statuses, null)
+                    continue
+                }
+                val next = current.copy(next = current.next + 1)
+                active = next
+                if (capabilities.status(name) == "granted") continue
+                if (capabilities.requiresFollowUp(name) && !capabilities.hasForeground(name)) continue
+                val settings = capabilities.requestSettings(name)
+                if (settings != null) {
+                    val launcher = settingsLauncher
+                        ?: throw PermissionFailure("host-unavailable", "Host does not provide Activity Results")
+                    active = next.copy(pipeline = Pipeline.Settings)
+                    launcher.launch(settings)
+                    return
+                }
+                if (capabilities.requiresFollowUp(name) &&
+                    launchRuntime(next, Pipeline.FollowUp, capabilities.runtime(name))
+                ) return
+            } catch (failure: RuntimeException) {
+                active = null
+                complete(request.id, null, failure as? PermissionFailure ?: PermissionFailure(
+                    "platform", "Could not request permissions (${failure.javaClass.simpleName})",
+                ))
+            }
         }
     }
 
-    private fun receive(result: Map<String, Boolean>) {
-        val request = active ?: return
-        active = null
-        if (result.isNotEmpty()) {
-            val edit = history.edit()
-            for ((permission, granted) in result) edit.putBoolean(permission, !granted)
-            edit.apply()
+    private fun launchRuntime(current: Active, pipeline: Pipeline, candidates: List<String>): Boolean {
+        val permissions = capabilities.promptPermissions(candidates)
+        if (permissions.isEmpty()) return false
+        val launcher = runtimeLauncher ?: throw PermissionFailure("host-unavailable", "Host does not provide Activity Results")
+        active = current.copy(pipeline = pipeline)
+        launcher.launch(permissions)
+        return true
+    }
+
+    private fun receive(value: Reply) {
+        if (!bound) return
+        reply = value
+        main.post { consumeReply() }
+    }
+
+    private fun consumeReply() {
+        val value = reply ?: return
+        reply = null
+        val current = active ?: return
+        when (value) {
+            is Reply.Runtime -> {
+                if (current.pipeline != Pipeline.Runtime && current.pipeline != Pipeline.FollowUp) return
+                capabilities.recordResult(value.result)
+            }
+            Reply.Settings -> if (current.pipeline != Pipeline.Settings) return
         }
-        complete(request.id, request.names.map(::status).toTypedArray(), null)
+        active = current.copy(pipeline = null)
+        advance()
     }
 
     fun unbind(): Pending? {
-        val request = active
+        if (!bound) return null
+        bound = false
+        val saved = if (hasPendingRequest) Pending(key, active, queue.toList(), reply) else null
         active = null
-        launcher?.unregister()
-        return request
+        reply = null
+        queue.clear()
+        runtimeLauncher?.unregister()
+        settingsLauncher?.unregister()
+        return saved
     }
 
-    override fun close() {
-        val request = unbind()
-        if (request != null) complete(request.id, null, "permission request cancelled with host")
+    private fun failAll(error: PermissionFailure) {
+        val saved = unbind() ?: return
+        saved.active?.let { complete(it.request.id, null, error) }
+        for (request in saved.queue) complete(request.id, null, error)
     }
+
+    override fun close() = failAll(PermissionFailure("cancelled", "Permission request cancelled with host"))
 }

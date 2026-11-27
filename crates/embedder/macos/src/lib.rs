@@ -13,6 +13,7 @@ mod app;
     reason = "image bytes are read when the host resolves an asset"
 )]
 mod assets;
+mod native;
 mod pixels;
 mod pointer;
 mod surface;
@@ -39,7 +40,16 @@ pub type OpenUrl = extern "C" fn(*const c_char) -> bool;
 
 /// Launches with a native URL interceptor invoked on the AppKit main thread.
 pub fn exit_status_with_url_handler(open_url: Option<OpenUrl>) -> u8 {
-    match launch(open_url) {
+    exit_status_with_callbacks(open_url, None)
+}
+
+#[doc(hidden)]
+pub use native::Callbacks;
+
+/// Launches the host with native plugin callbacks on the AppKit main thread.
+#[doc(hidden)]
+pub fn exit_status_with_callbacks(open_url: Option<OpenUrl>, callbacks: Option<Callbacks>) -> u8 {
+    match launch(open_url, callbacks) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("{error}");
@@ -48,7 +58,8 @@ pub fn exit_status_with_url_handler(open_url: Option<OpenUrl>) -> u8 {
     }
 }
 
-fn launch(open_url: Option<OpenUrl>) -> Result<(), app::RunError> {
+fn launch(open_url: Option<OpenUrl>, callbacks: Option<Callbacks>) -> Result<(), app::RunError> {
+    let native = native::Host::new(open_url, callbacks);
     let loaded = load().map_err(app::RunError::Window)?;
     objc2::rc::autoreleasepool(|_| {
         app::run(
@@ -57,7 +68,7 @@ fn launch(open_url: Option<OpenUrl>) -> Result<(), app::RunError> {
             &loaded.font,
             loaded.dump_list,
             loaded.url,
-            open_url,
+            native,
             &loaded.title,
         )
     })

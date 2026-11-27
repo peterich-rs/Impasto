@@ -200,6 +200,7 @@ pub(super) fn resolve(app: &App, target: &str) -> Result<Resolved> {
     for alias in ordered_plugins(&app.plugins)? {
         resolve_plugin(app, target, alias, &mut result)?;
     }
+    result.platform.resolve_permission_attributes()?;
     if let Some(native) = &app.native {
         let (path, name) = cargo_package(&under(&app.root, &native.path)?)?;
         if result.installed.contains_key(&name) || name == "impasto" {
@@ -251,6 +252,17 @@ fn resolve_plugin(app: &App, target: &str, alias: &str, result: &mut Resolved) -
     }
     let plugin: Plugin = toml::from_str(&fs::read_to_string(root.join("plugin.toml"))?)
         .with_context(|| format!("解析插件 {alias} 的 plugin.toml"))?;
+    let options = app.plugin_options.get(alias);
+    if let Some(features) = options.and_then(|options| options.enabled.as_ref()) {
+        for feature in features {
+            if ![&plugin.ios, &plugin.macos, &plugin.android]
+                .iter()
+                .any(|project| project.features.contains_key(feature))
+            {
+                bail!("插件 {alias} 没有特性 {feature}");
+            }
+        }
+    }
     if plugin.plugin.platforms.is_empty()
         || plugin
             .plugin
@@ -274,6 +286,11 @@ fn resolve_plugin(app: &App, target: &str, alias: &str, result: &mut Resolved) -
         bail!("多个 npm 插件映射到 Rust crate {cargo_name}");
     }
     for (key, entry) in package.exports {
+        // Hosts resolve the canonical /native binding through the Rust descriptors.
+        // Package exports may provide a fallback for tooling outside Impasto.
+        if key == "./native" {
+            continue;
+        }
         let name = if key == "." {
             specifier.clone()
         } else if let Some(subpath) = key.strip_prefix("./") {
@@ -307,7 +324,7 @@ fn resolve_plugin(app: &App, target: &str, alias: &str, result: &mut Resolved) -
     };
     result
         .platform
-        .add_project(platform, &root, target, &cargo_name)
+        .add_project(platform, &root, target, &cargo_name, app, options)
         .with_context(|| format!("合并插件 {alias} 的 {target} 设置"))?;
     result.allowed.insert(
         cargo_name.clone(),
@@ -334,10 +351,15 @@ fn validate_platform(app: &App, target: &str, platform: &super::Platform) -> Res
             }
         }
     }
-    if target == "macos" {
+    let entitlements = match target {
+        "ios" => Some(&app.ios.entitlements),
+        "macos" => Some(&app.macos.entitlements),
+        _ => None,
+    };
+    if let Some(entitlements) = entitlements {
         for key in &platform.required_entitlements {
-            if app.macos.entitlements.get(key) != Some(&true) {
-                bail!("插件需要 [macos.entitlements] 中启用 {key}");
+            if entitlements.get(key) != Some(&true) {
+                bail!("插件需要 [{target}.entitlements] 中启用 {key}");
             }
         }
     }

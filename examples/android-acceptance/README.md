@@ -14,6 +14,8 @@ adb push assets/inspection.txt /sdcard/Download/impasto-inspection.txt
 
 输入检查备注，选择 Downloads 中的 `impasto-inspection.txt`。要验证任务快照，可以直接退回系统桌面。要验证持久化，可以先点击保存草稿。等应用进入后台再运行下面的命令。`pidof` 无输出表示旧进程已退出。重新打开同一个任务后应显示记录 42、备注和附件名。
 
+在记录页分别请求相机、相册、定位和精确闹钟权限。Android 14 及以上选择部分照片后应显示 `limited`，定位只选大致位置时也应显示 `limited`。Android 12 及以上允许精确闹钟后从设置返回，结果应自动更新。打开权限弹窗后旋转屏幕，确认 Activity 重建后原请求仍返回结果。
+
 ```sh
 adb shell input keyevent KEYCODE_HOME
 adb shell am kill dev.impasto.fieldnotes

@@ -74,6 +74,44 @@ struct PlatformProject {
     usage_description_keys: BTreeSet<String>,
     required_entitlements: BTreeSet<String>,
     permissions: BTreeMap<String, Vec<String>>,
+    features: BTreeMap<String, PlatformFeature>,
+    permission_rules: BTreeMap<String, AndroidPermissionRule>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct PlatformFeature {
+    product: Option<String>,
+    module: Option<String>,
+    registrar: Option<String>,
+    usage_description_keys: BTreeSet<String>,
+    required_entitlements: BTreeSet<String>,
+    infer_permissions: BTreeSet<String>,
+    default: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AndroidPermissionRule {
+    feature: Option<String>,
+    features: BTreeSet<String>,
+    max_sdk: Option<u32>,
+    max_sdk_by_feature: BTreeMap<String, u32>,
+    uses_permission_flags: BTreeSet<String>,
+}
+
+#[derive(Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AndroidPermissionAttributes {
+    pub max_sdk: Option<u32>,
+    pub uses_permission_flags: BTreeSet<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SwiftFeature {
+    pub product: String,
+    pub module: String,
+    pub registrar: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -83,6 +121,10 @@ pub struct NativeProject {
     pub gradle_module: String,
     pub module: String,
     pub plugin_class: Option<String>,
+    #[serde(default)]
+    pub features: Option<BTreeSet<String>>,
+    #[serde(default)]
+    pub swift_features: Vec<SwiftFeature>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -92,7 +134,9 @@ pub struct Platform {
     pub usage_description_keys: BTreeSet<String>,
     pub required_entitlements: BTreeSet<String>,
     permission_rules: BTreeMap<String, BTreeMap<String, Vec<PermissionMethod>>>,
+    permission_attribute_rules: BTreeMap<String, BTreeMap<String, AndroidPermissionAttributes>>,
     pub android_permissions: BTreeSet<String>,
+    pub android_permission_attributes: BTreeMap<String, AndroidPermissionAttributes>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -388,6 +432,10 @@ impl NativeBuild {
         let permissions = inputs.permissions_for(linked, &dependencies, &retained);
         let permissions_changed = inputs.android_permissions != permissions;
         inputs.android_permissions = permissions;
+        inputs
+            .permission_attribute_rules
+            .retain(|owner, _| retained.contains(owner));
+        inputs.resolve_permission_attributes()?;
         let crates_pruned = self.crates.iter().any(|(_, name)| !retained.contains(name));
         self.data
             .modules
@@ -561,6 +609,133 @@ pub(crate) fn watch_manifest(app: &App, target: &str, verbose: bool) -> Result<M
 #[cfg(test)]
 mod permission_tests {
     use super::*;
+
+    fn permissions_app(config: &str) -> Result<tempfile::TempDir> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir(root.path().join("src"))?;
+        fs::write(root.path().join("src/main.tsx"), "")?;
+        fs::write(
+            root.path().join("app.toml"),
+            format!(
+                r#"
+name = "permission-fixture"
+version = "1.0.0"
+targets = ["ios", "android"]
+
+[dependencies]
+"@impasto/permissions" = "builtin"
+
+{config}
+"#
+            ),
+        )?;
+        Ok(root)
+    }
+
+    #[test]
+    fn swift_registrant_links_only_selected_products_and_requires_their_usage_descriptions()
+    -> Result<()> {
+        let project = permissions_app(
+            r#"
+[plugins."@impasto/permissions"]
+enabled = ["camera"]
+
+[ios.usage_descriptions]
+NSCameraUsageDescription = "Use the camera for scans."
+"#,
+        )?;
+        let app = App::load(project.path())?;
+        let framework = toolchain::framework()?;
+        let inputs = resolution::resolve(&app, "ios")?.platform;
+        crate::sync::platform(&app, "ios", &framework, &inputs)?;
+        let root = project
+            .path()
+            .join(".impasto/darwin/ios/ImpastoGeneratedPlugins");
+        let package = fs::read_to_string(root.join("Package.swift"))?;
+        let registrant = fs::read_to_string(
+            root.join("Sources/ImpastoGeneratedPlugins/GeneratedPluginRegistrant.swift"),
+        )?;
+        assert!(package.contains("name: \"ImpastoPermissions\""));
+        assert!(package.contains("name: \"ImpastoPermissionsCamera\""));
+        assert!(!package.contains("ImpastoPermissionsPhotos"));
+        assert!(registrant.contains("ImpastoPermissionsCamera.CameraPermissionRegistrar.self"));
+        assert!(!registrant.contains("PhotosPermissionRegistrar"));
+
+        let missing = permissions_app(
+            r#"
+[plugins."@impasto/permissions"]
+enabled = ["camera"]
+"#,
+        )?;
+        let error = resolution::resolve(&App::load(missing.path())?, "ios");
+        assert!(error.is_err_and(|error| error.to_string().contains("NSCameraUsageDescription")));
+        Ok(())
+    }
+
+    #[test]
+    fn android_generates_selected_permissions_with_max_sdk_and_optional_flags() -> Result<()> {
+        for bluetooth_flag in [false, true] {
+            let project = permissions_app(&format!(
+                r#"
+[plugins."@impasto/permissions"]
+enabled = ["storage", "bluetoothScan"]
+android_bluetooth_never_for_location = {bluetooth_flag}
+"#
+            ))?;
+            let app = App::load(project.path())?;
+            let framework = toolchain::framework()?;
+            let inputs = resolution::resolve(&app, "android")?.platform;
+            crate::sync::platform(&app, "android", &framework, &inputs)?;
+            let manifest = fs::read_to_string(
+                project
+                    .path()
+                    .join(".impasto/android/permissions/src/main/AndroidManifest.xml"),
+            )?;
+            assert!(manifest.contains(r#"android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32""#));
+            assert!(!manifest.contains("android.permission.CAMERA"));
+            assert_eq!(manifest.contains("xmlns:tools="), bluetooth_flag);
+            assert_eq!(
+                manifest.contains(
+                    r#"android:usesPermissionFlags="neverForLocation" tools:targetApi="s""#
+                ),
+                bluetooth_flag
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn android_legacy_foreground_location_does_not_enable_unrelated_features() -> Result<()> {
+        let project = permissions_app(
+            r#"
+[android]
+permissions = ["android.permission.ACCESS_COARSE_LOCATION"]
+"#,
+        )?;
+        let app = App::load(project.path())?;
+        let inputs = resolution::resolve(&app, "android")?.platform;
+        assert!(
+            inputs
+                .android_permissions
+                .contains("android.permission.ACCESS_FINE_LOCATION")
+        );
+        assert!(
+            !inputs
+                .android_permissions
+                .contains("android.permission.ACCESS_BACKGROUND_LOCATION")
+        );
+        assert!(
+            !inputs
+                .android_permissions
+                .contains("android.permission.BLUETOOTH_SCAN")
+        );
+        assert!(
+            !inputs
+                .android_permissions
+                .contains("android.permission.NEARBY_WIFI_DEVICES")
+        );
+        Ok(())
+    }
 
     #[test]
     fn android_permissions_follow_the_linked_method_or_an_opaque_reference() -> Result<()> {
