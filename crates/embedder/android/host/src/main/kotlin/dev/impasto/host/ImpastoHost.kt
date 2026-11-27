@@ -22,6 +22,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryOwner
 import dev.impasto.host.WindowLifecycle.State
+import org.json.JSONObject
 
 /** Owns the session and its current View until close or an explicit window transfer. */
 class ImpastoHost private constructor(
@@ -103,24 +104,30 @@ class ImpastoHost private constructor(
     /** Consumes state retained by this plugin during recreation of the same Activity. */
     fun takeRetainedPluginState(name: String): Any? = retainedPluginState.remove(name)
 
-    internal fun isNativeRequestPending(id: Long): Boolean =
+    fun isNativeRequestPending(id: Long): Boolean =
         view.handle != 0L && NativeBridge.nativePlatformPending(view.handle, id)
 
     fun completeNativeRequest(id: Long, payload: String? = null, error: String? = null): Boolean =
         view.handle != 0L && NativeBridge.nativePlatformResult(view.handle, id, payload, error)
 
+    fun emitPluginEvent(topic: String, payload: String): Boolean =
+        view.handle != 0L && NativeBridge.nativePlatformEvent(view.handle, topic, payload)
+
     private fun dispatchNativeRequest(id: Long, operation: String, payload: String) {
         if (!isNativeRequestPending(id)) return
         val request = ImpastoNativeRequest(id, operation, payload, this)
-        val plugin = nativePlugins[operation.substringBeforeLast('/')]
-        if (plugin == null) {
-            request.fail("No platform plugin handles $operation")
-        } else {
-            try {
+        try {
+            val namespace = if (operation == "@impasto/events/start" || operation == "@impasto/events/stop") {
+                JSONObject(payload).optString("topic").substringBeforeLast('/')
+            } else operation.substringBeforeLast('/')
+            val plugin = nativePlugins[namespace]
+            if (plugin == null) {
+                request.fail("No platform plugin handles $operation")
+            } else {
                 plugin.handle(request)
-            } catch (error: RuntimeException) {
-                request.fail("Platform request failed (${error.javaClass.simpleName})")
             }
+        } catch (error: Exception) {
+            request.fail("Platform request failed (${error.javaClass.simpleName})")
         }
     }
 

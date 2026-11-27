@@ -556,6 +556,14 @@ public final class ImpastoHost {
         for plugin in installed { plugin.uninstalled() }
     }
 
+    @discardableResult
+    public func emitPluginEvent(topic: String, payload: String) -> Bool {
+        guard let handle = connection.handle else { return false }
+        return topic.withCString { topic in
+            payload.withCString { impasto_ios_service_event(handle, topic, $0) }
+        }
+    }
+
     private func receiveService(_ id: UInt64, message: String) {
         struct Payload: Decodable {
             let operation: String

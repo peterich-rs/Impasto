@@ -43,6 +43,7 @@ struct Bridge {
     semantics: Mutex<Vec<embedder::ProjectedNode>>,
     semantics_revision: AtomicI64,
     native_channel: impasto::os::NativeChannel,
+    native_events: impasto::os::NativeEventChannel,
     restoration: embedder::Restoration,
     window_session: embedder::WindowSession,
     back_enabled: AtomicBool,
@@ -770,16 +771,9 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
         .launch_url
         .filter(|_| !request.replayed_intent || !restoration.has_entries());
     let vm = env.get_java_vm().map_err(|error| error.to_string())?;
-    let bridge = Arc::new_cyclic(|bridge: &std::sync::Weak<Bridge>| Bridge {
-        vm,
-        view: Mutex::new(Some(Arc::new(request.view))),
-        assets: Arc::clone(&request.assets),
-        document_dir: (!document_dir.is_empty()).then_some(document_dir),
-        font: OnceLock::new(),
-        semantics: Mutex::new(Vec::new()),
-        semantics_revision: AtomicI64::new(0),
-        native_channel: impasto::os::NativeChannel::new({
-            let bridge = bridge.clone();
+    let bridge = Arc::new_cyclic(|bridge: &std::sync::Weak<Bridge>| {
+        let native_channel = impasto::os::NativeChannel::new({
+            let bridge = std::sync::Weak::clone(bridge);
             move |id, operation, payload| {
                 let Some(bridge) = bridge.upgrade() else {
                     return false;
@@ -807,10 +801,22 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
                 });
                 accepted
             }
-        }),
-        restoration,
-        window_session: request.window_session,
-        back_enabled: AtomicBool::new(false),
+        });
+        let native_events = impasto::os::NativeEventChannel::new(native_channel.clone());
+        Bridge {
+            vm,
+            view: Mutex::new(Some(Arc::new(request.view))),
+            assets: Arc::clone(&request.assets),
+            document_dir: (!document_dir.is_empty()).then_some(document_dir),
+            font: OnceLock::new(),
+            semantics: Mutex::new(Vec::new()),
+            semantics_revision: AtomicI64::new(0),
+            native_channel,
+            native_events,
+            restoration,
+            window_session: request.window_session,
+            back_enabled: AtomicBool::new(false),
+        }
     });
     let bridge_for_clock = Arc::clone(&bridge);
     let clock = FrameClock::new(Arc::new(move |order, request| {
@@ -932,6 +938,7 @@ fn android_boot(
             })),
             initial_lifecycle: impasto::Lifecycle::Inactive,
             native_channel: Some(bridge.native_channel.clone()),
+            native_events: Some(bridge.native_events.clone()),
             paths: embedder::AppPaths::new(
                 bridge.document_dir.as_ref().map(std::path::PathBuf::from),
                 pipeline_cache.clone(),
@@ -990,6 +997,7 @@ fn detach(handle: jlong) {
     else {
         return;
     };
+    host.bridge.native_events.close();
     host.bridge.native_channel.close();
     host.link
         .post(Command::Lifecycle(embedder::Lifecycle::Detached));
@@ -998,6 +1006,9 @@ fn detach(handle: jlong) {
 }
 
 fn release_window(host: &Host, keep_plugin_state: bool) {
+    if !keep_plugin_state {
+        host.bridge.native_events.detach_window();
+    }
     let prior = host
         .bridge
         .view

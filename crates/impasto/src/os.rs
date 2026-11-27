@@ -1,6 +1,7 @@
 //! Access to window-specific services on their platform queue.
 
 pub use crate::os_channel::NativeChannel;
+pub use crate::os_events::{NativeEventChannel, NativeEventStream};
 
 #[cfg(target_os = "android")]
 pub mod android {

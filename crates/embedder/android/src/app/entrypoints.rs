@@ -442,6 +442,26 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePlatformResult<'
 }
 
 #[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
+pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePlatformEvent<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    handle: jlong,
+    topic: JString<'local>,
+    payload: JString<'local>,
+) -> jboolean {
+    with_env(&mut env, |env| {
+        let Some(host) = host(handle) else {
+            return Ok(false);
+        };
+        let (Some(topic), Some(payload)) = (java_string(env, &topic)?, java_string(env, &payload)?)
+        else {
+            return Ok(false);
+        };
+        Ok(host.bridge.native_events.emit(&topic, &payload))
+    })
+}
+
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeIsCurrentSurface(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,

@@ -32,6 +32,7 @@ pub(crate) struct Bundle {
 pub(crate) fn prepare(
     root: PathBuf,
     native_channel: impasto::os::NativeChannel,
+    native_events: impasto::os::NativeEventChannel,
 ) -> Result<Bundle, BootError> {
     objc2::rc::autoreleasepool(|_| {
         let enabled = enabled_modules(&root)?;
@@ -87,6 +88,7 @@ pub(crate) fn prepare(
             plugin_services: embedder::PluginServices {
                 initial_lifecycle: Default::default(),
                 native_channel: Some(native_channel),
+                native_events: Some(native_events),
                 paths: embedder::AppPaths::new(
                     sandbox_directory(NSSearchPathDirectory::DocumentDirectory)
                         .ok()

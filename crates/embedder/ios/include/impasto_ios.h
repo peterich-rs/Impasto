@@ -58,6 +58,7 @@ size_t impasto_ios_restoration_copy(ImpastoIOSHost *host, uint8_t *buffer, size_
 bool impasto_ios_service_pending(ImpastoIOSHost *host, uint64_t request);
 bool impasto_ios_service_result(ImpastoIOSHost *host, uint64_t request, uint32_t status,
                                 const char *payload);
+bool impasto_ios_service_event(ImpastoIOSHost *host, const char *topic, const char *payload);
 bool impasto_ios_update_source(ImpastoIOSHost *host, uint64_t revision,
                                const uint8_t *bytes, size_t length);
 bool impasto_ios_compositor_layers(ImpastoIOSHost *host, uint64_t surface,
