@@ -207,7 +207,20 @@ fn android(app: &App, framework: &Path, inputs: &Platform) -> Result<()> {
             path.replace('$', "\\$")
         )?;
         if let Some(class) = &plugin.plugin_class {
-            writeln!(calls, "        {}.{class}.register(host)", plugin.package)?;
+            if let Some(features) = &plugin.features {
+                let features = features
+                    .iter()
+                    .map(|name| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(
+                    calls,
+                    "        {}.{class}.register(host, enabled = setOf({features}))",
+                    plugin.package
+                )?;
+            } else {
+                writeln!(calls, "        {}.{class}.register(host)", plugin.package)?;
+            }
         }
         modules.push(name);
     }
@@ -226,13 +239,7 @@ android {
 }
 "#,
         )?;
-        let mut xml = String::from(
-            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n",
-        );
-        for permission in &inputs.android_permissions {
-            writeln!(xml, "    <uses-permission android:name={permission:?} />")?;
-        }
-        xml.push_str("</manifest>\n");
+        let xml = android_permission_manifest(inputs)?;
         write(&manifest.join("AndroidManifest.xml"), &xml)?;
         let path = serde_json::to_string(&project)?;
         writeln!(
@@ -310,6 +317,44 @@ android {
     Ok(())
 }
 
+fn android_permission_manifest(inputs: &Platform) -> Result<String> {
+    let flagged = inputs.android_permissions.iter().any(|name| {
+        inputs
+            .android_permission_attributes
+            .get(name)
+            .is_some_and(|rule| !rule.uses_permission_flags.is_empty())
+    });
+    let mut xml =
+        String::from("<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"");
+    if flagged {
+        xml.push_str(" xmlns:tools=\"http://schemas.android.com/tools\"");
+    }
+    xml.push_str(">\n");
+    for permission in &inputs.android_permissions {
+        write!(xml, "    <uses-permission android:name={permission:?}")?;
+        if let Some(rule) = inputs.android_permission_attributes.get(permission) {
+            if let Some(max_sdk) = rule.max_sdk {
+                write!(xml, " android:maxSdkVersion=\"{max_sdk}\"")?;
+            }
+            if !rule.uses_permission_flags.is_empty() {
+                let flags = rule
+                    .uses_permission_flags
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("|");
+                write!(
+                    xml,
+                    " android:usesPermissionFlags={flags:?} tools:targetApi=\"s\""
+                )?;
+            }
+        }
+        xml.push_str(" />\n");
+    }
+    xml.push_str("</manifest>\n");
+    Ok(xml)
+}
+
 fn darwin(app: &App, target: &str, framework: &Path, inputs: &Platform) -> Result<()> {
     let dir = app.root.join(".impasto/darwin").join(target);
     let package = dir.join("ImpastoGeneratedPlugins");
@@ -344,11 +389,41 @@ fn darwin(app: &App, target: &str, framework: &Path, inputs: &Platform) -> Resul
             .plugin_class
             .as_deref()
             .context("缺少 Swift 插件注册类")?;
-        writeln!(
-            calls,
-            "        {}.{class}.register(with: host)",
-            plugin.module
-        )?;
+        if let Some(features) = &plugin.features {
+            let mut feature_products = std::collections::BTreeSet::new();
+            let mut feature_modules = std::collections::BTreeSet::new();
+            let mut registrars = Vec::new();
+            for feature in &plugin.swift_features {
+                if feature_products.insert(&feature.product) {
+                    let product = swift_string(&feature.product);
+                    writeln!(
+                        products,
+                        "                .product(name: {product}, package: {identity}),"
+                    )?;
+                }
+                if feature_modules.insert(&feature.module) {
+                    writeln!(imports, "import {}", feature.module)?;
+                }
+                registrars.push(format!("{}.{}.self", feature.module, feature.registrar));
+            }
+            let names = features
+                .iter()
+                .map(|name| swift_string(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let registrars = registrars.join(", ");
+            writeln!(
+                calls,
+                "        {}.{class}.register(with: host, enabled: [{names}], registrars: [{registrars}])",
+                plugin.module
+            )?;
+        } else {
+            writeln!(
+                calls,
+                "        {}.{class}.register(with: host)",
+                plugin.module
+            )?;
+        }
     }
     for entry in fs::read_dir(&aliases)? {
         let entry = entry?;

@@ -19,6 +19,21 @@ share_window_state = true
 [ios.usage_descriptions]
 NSCameraUsageDescription = "用于拍摄并附加本次现场检查的照片。"
 
+NSPhotoLibraryUsageDescription = "用于选择本次现场检查的照片。"
+NSLocationWhenInUseUsageDescription = "用于记录现场检查的位置。"
+
+[macos.usage_descriptions]
+NSCameraUsageDescription = "用于拍摄并附加本次现场检查的照片。"
+NSPhotoLibraryUsageDescription = "用于选择本次现场检查的照片。"
+NSLocationUsageDescription = "用于记录现场检查的位置。"
+
+[macos.entitlements]
+"com.apple.security.device.camera" = true
+"com.apple.security.personal-information.location" = true
+
+[plugins."@impasto/permissions"]
+enabled = ["camera", "photos", "locationWhenInUse", "scheduleExactAlarm"]
+
 [dependencies]
 "@impasto/app-state" = "builtin"
 "@impasto/async-storage" = "builtin"

@@ -3,7 +3,7 @@ import { AsyncStorage } from "@impasto/async-storage";
 import { Restoration } from "@impasto/app-state";
 import { FileSystem } from "@impasto/file-system";
 import { Linking } from "@impasto/linking";
-import { Permission } from "@impasto/permissions";
+import { Permission, type PermissionHandle } from "@impasto/permissions";
 import { boot } from "@impasto/solid-renderer";
 import { createRouter, RouterView, type RouteParams } from "@impasto/solid-router";
 import { Button, Column, ExternalTexture, Field, KeyboardAvoidingView, PlatformView, ScrollArea, Text } from "@impasto/solid-ui";
@@ -120,12 +120,12 @@ export default function Main() {
       }
     }
 
-    async function requestCamera() {
+    async function requestPermission(label: string, permission: PermissionHandle) {
       try {
-        const access = await Permission.camera?.request();
-        setStatus(access === "granted" ? "已授权相机" : "相机权限未授予");
-      } catch {
-        setStatus("未能请求相机权限");
+        const access = await permission.request();
+        setStatus(`${label}权限 · ${access}`);
+      } catch (error) {
+        setStatus(`${label}权限 · ${String(error)}`);
       }
     }
 
@@ -168,7 +168,10 @@ export default function Main() {
             </Show>
             <Button label="选择文件" style={button} disabled={picking()} onClick={() => void pick()} />
             <Button label="保存草稿" style={primary} labelProps={primaryLabel} disabled={saving()} onClick={() => void save()} />
-            <Button label="请求相机权限" style={button} onClick={() => void requestCamera()} />
+            <Button label="请求相机权限" style={button} onClick={() => void requestPermission("相机", Permission.camera)} />
+            <Button label="请求相册权限" style={button} onClick={() => void requestPermission("相册", Permission.photos)} />
+            <Button label="请求定位权限" style={button} onClick={() => void requestPermission("定位", Permission.locationWhenInUse)} />
+            <Button label="请求精确闹钟权限" style={button} onClick={() => void requestPermission("精确闹钟", Permission.scheduleExactAlarm)} />
             <Button label="分享记录" style={button} onClick={() => void share()} />
             <Show when={status()}>
               <Text style={{ fontSize: 15, color: muted }}>{status()}</Text>

@@ -6,11 +6,411 @@ min_impasto_version = "0.1.0"
 path = "rust"
 
 [ios]
-path = "ios"
+path = "apple/ios"
 package = "ImpastoPermissions"
+module = "ImpastoPermissionsCore"
 plugin_class = "ImpastoPermissionsPlugin"
+
+[ios.features.activityRecognition]
+product = "ImpastoPermissionsMotion"
+registrar = "MotionPermissionRegistrar"
+usage_description_keys = ["NSMotionUsageDescription"]
+
+[ios.features.appTrackingTransparency]
+product = "ImpastoPermissionsTracking"
+registrar = "TrackingPermissionRegistrar"
+usage_description_keys = ["NSUserTrackingUsageDescription"]
+
+[ios.features.assistant]
+product = "ImpastoPermissionsAssistant"
+registrar = "AssistantPermissionRegistrar"
+usage_description_keys = ["NSSiriUsageDescription"]
+required_entitlements = ["com.apple.developer.siri"]
+
+[ios.features.audio]
+product = "ImpastoPermissionsMediaLibrary"
+registrar = "MediaLibraryPermissionRegistrar"
+usage_description_keys = ["NSAppleMusicUsageDescription"]
+
+[ios.features.bluetooth]
+product = "ImpastoPermissionsBluetooth"
+registrar = "BluetoothPermissionRegistrar"
+usage_description_keys = ["NSBluetoothAlwaysUsageDescription"]
+
+[ios.features.bluetoothAdvertise]
+product = "ImpastoPermissionsBluetooth"
+registrar = "BluetoothPermissionRegistrar"
+usage_description_keys = ["NSBluetoothAlwaysUsageDescription"]
+
+[ios.features.bluetoothConnect]
+product = "ImpastoPermissionsBluetooth"
+registrar = "BluetoothPermissionRegistrar"
+usage_description_keys = ["NSBluetoothAlwaysUsageDescription"]
+
+[ios.features.bluetoothScan]
+product = "ImpastoPermissionsBluetooth"
+registrar = "BluetoothPermissionRegistrar"
+usage_description_keys = ["NSBluetoothAlwaysUsageDescription"]
+
+[ios.features.calendarFullAccess]
+product = "ImpastoPermissionsCalendar"
+registrar = "CalendarPermissionRegistrar"
+usage_description_keys = ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription"]
+
+[ios.features.calendarWriteOnly]
+product = "ImpastoPermissionsCalendar"
+registrar = "CalendarPermissionRegistrar"
+usage_description_keys = ["NSCalendarsUsageDescription", "NSCalendarsWriteOnlyAccessUsageDescription"]
+
+[ios.features.camera]
+product = "ImpastoPermissionsCamera"
+registrar = "CameraPermissionRegistrar"
+usage_description_keys = ["NSCameraUsageDescription"]
+
+[ios.features.contacts]
+product = "ImpastoPermissionsContacts"
+registrar = "ContactsPermissionRegistrar"
+usage_description_keys = ["NSContactsUsageDescription"]
+
+[ios.features.criticalAlerts]
+product = "ImpastoPermissionsNotification"
+registrar = "NotificationPermissionRegistrar"
+required_entitlements = ["com.apple.developer.usernotifications.critical-alerts"]
+
+[ios.features.location]
+product = "ImpastoPermissionsLocation"
+registrar = "LocationPermissionRegistrar"
+usage_description_keys = ["NSLocationWhenInUseUsageDescription"]
+
+[ios.features.locationAlways]
+product = "ImpastoPermissionsLocation"
+registrar = "LocationPermissionRegistrar"
+usage_description_keys = ["NSLocationWhenInUseUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription"]
+
+[ios.features.locationWhenInUse]
+product = "ImpastoPermissionsLocation"
+registrar = "LocationPermissionRegistrar"
+usage_description_keys = ["NSLocationWhenInUseUsageDescription"]
+
+[ios.features.mediaLibrary]
+product = "ImpastoPermissionsMediaLibrary"
+registrar = "MediaLibraryPermissionRegistrar"
+usage_description_keys = ["NSAppleMusicUsageDescription"]
+
+[ios.features.microphone]
+product = "ImpastoPermissionsMicrophone"
+registrar = "MicrophonePermissionRegistrar"
+usage_description_keys = ["NSMicrophoneUsageDescription"]
+
+[ios.features.notification]
+product = "ImpastoPermissionsNotification"
+registrar = "NotificationPermissionRegistrar"
+default = true
+
+[ios.features.photos]
+product = "ImpastoPermissionsPhotos"
+registrar = "PhotosPermissionRegistrar"
+usage_description_keys = ["NSPhotoLibraryUsageDescription"]
+
+[ios.features.photosAddOnly]
+product = "ImpastoPermissionsPhotos"
+registrar = "PhotosPermissionRegistrar"
+usage_description_keys = ["NSPhotoLibraryAddUsageDescription"]
+
+[ios.features.reminders]
+product = "ImpastoPermissionsReminders"
+registrar = "RemindersPermissionRegistrar"
+usage_description_keys = ["NSRemindersUsageDescription", "NSRemindersFullAccessUsageDescription"]
+
+[ios.features.sensors]
+product = "ImpastoPermissionsMotion"
+registrar = "MotionPermissionRegistrar"
+usage_description_keys = ["NSMotionUsageDescription"]
+
+[ios.features.speech]
+product = "ImpastoPermissionsSpeech"
+registrar = "SpeechPermissionRegistrar"
+usage_description_keys = ["NSSpeechRecognitionUsageDescription"]
+
+[ios.features.videos]
+product = "ImpastoPermissionsPhotos"
+registrar = "PhotosPermissionRegistrar"
+usage_description_keys = ["NSPhotoLibraryUsageDescription"]
+
+[macos]
+path = "apple/macos"
+package = "ImpastoPermissions"
+module = "ImpastoPermissionsCore"
+plugin_class = "ImpastoPermissionsPlugin"
+
+[macos.features.accessibility]
+product = "ImpastoPermissionsDesktop"
+registrar = "DesktopPermissionRegistrar"
+
+[macos.features.bluetooth]
+product = "ImpastoPermissionsBluetooth"
+registrar = "BluetoothPermissionRegistrar"
+usage_description_keys = ["NSBluetoothAlwaysUsageDescription"]
+required_entitlements = ["com.apple.security.device.bluetooth"]
+
+[macos.features.bluetoothAdvertise]
+product = "ImpastoPermissionsBluetooth"
+registrar = "BluetoothPermissionRegistrar"
+usage_description_keys = ["NSBluetoothAlwaysUsageDescription"]
+required_entitlements = ["com.apple.security.device.bluetooth"]
+
+[macos.features.bluetoothConnect]
+product = "ImpastoPermissionsBluetooth"
+registrar = "BluetoothPermissionRegistrar"
+usage_description_keys = ["NSBluetoothAlwaysUsageDescription"]
+required_entitlements = ["com.apple.security.device.bluetooth"]
+
+[macos.features.bluetoothScan]
+product = "ImpastoPermissionsBluetooth"
+registrar = "BluetoothPermissionRegistrar"
+usage_description_keys = ["NSBluetoothAlwaysUsageDescription"]
+required_entitlements = ["com.apple.security.device.bluetooth"]
+
+[macos.features.calendarFullAccess]
+product = "ImpastoPermissionsCalendar"
+registrar = "CalendarPermissionRegistrar"
+usage_description_keys = ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription"]
+required_entitlements = ["com.apple.security.personal-information.calendars"]
+
+[macos.features.calendarWriteOnly]
+product = "ImpastoPermissionsCalendar"
+registrar = "CalendarPermissionRegistrar"
+usage_description_keys = ["NSCalendarsUsageDescription", "NSCalendarsWriteOnlyAccessUsageDescription"]
+required_entitlements = ["com.apple.security.personal-information.calendars"]
+
+[macos.features.camera]
+product = "ImpastoPermissionsCamera"
+registrar = "CameraPermissionRegistrar"
+usage_description_keys = ["NSCameraUsageDescription"]
+required_entitlements = ["com.apple.security.device.camera"]
+
+[macos.features.contacts]
+product = "ImpastoPermissionsContacts"
+registrar = "ContactsPermissionRegistrar"
+usage_description_keys = ["NSContactsUsageDescription"]
+required_entitlements = ["com.apple.security.personal-information.addressbook"]
+
+[macos.features.criticalAlerts]
+product = "ImpastoPermissionsNotification"
+registrar = "NotificationPermissionRegistrar"
+required_entitlements = ["com.apple.developer.usernotifications.critical-alerts"]
+
+[macos.features.fullDiskAccess]
+product = "ImpastoPermissionsDesktop"
+registrar = "DesktopPermissionRegistrar"
+
+[macos.features.location]
+product = "ImpastoPermissionsLocation"
+registrar = "LocationPermissionRegistrar"
+usage_description_keys = ["NSLocationUsageDescription"]
+required_entitlements = ["com.apple.security.personal-information.location"]
+
+[macos.features.locationAlways]
+product = "ImpastoPermissionsLocation"
+registrar = "LocationPermissionRegistrar"
+usage_description_keys = ["NSLocationUsageDescription"]
+required_entitlements = ["com.apple.security.personal-information.location"]
+
+[macos.features.locationWhenInUse]
+product = "ImpastoPermissionsLocation"
+registrar = "LocationPermissionRegistrar"
+usage_description_keys = ["NSLocationUsageDescription"]
+required_entitlements = ["com.apple.security.personal-information.location"]
+
+[macos.features.microphone]
+product = "ImpastoPermissionsMicrophone"
+registrar = "MicrophonePermissionRegistrar"
+usage_description_keys = ["NSMicrophoneUsageDescription"]
+required_entitlements = ["com.apple.security.device.audio-input"]
+
+[macos.features.notification]
+product = "ImpastoPermissionsNotification"
+registrar = "NotificationPermissionRegistrar"
+default = true
+
+[macos.features.photos]
+product = "ImpastoPermissionsPhotos"
+registrar = "PhotosPermissionRegistrar"
+usage_description_keys = ["NSPhotoLibraryUsageDescription"]
+
+[macos.features.photosAddOnly]
+product = "ImpastoPermissionsPhotos"
+registrar = "PhotosPermissionRegistrar"
+usage_description_keys = ["NSPhotoLibraryAddUsageDescription"]
+
+[macos.features.reminders]
+product = "ImpastoPermissionsReminders"
+registrar = "RemindersPermissionRegistrar"
+usage_description_keys = ["NSRemindersUsageDescription", "NSRemindersFullAccessUsageDescription"]
+required_entitlements = ["com.apple.security.personal-information.calendars"]
+
+[macos.features.screenCapture]
+product = "ImpastoPermissionsDesktop"
+registrar = "DesktopPermissionRegistrar"
+
+[macos.features.speech]
+product = "ImpastoPermissionsSpeech"
+registrar = "SpeechPermissionRegistrar"
+usage_description_keys = ["NSSpeechRecognitionUsageDescription"]
+
+[macos.features.videos]
+product = "ImpastoPermissionsPhotos"
+registrar = "PhotosPermissionRegistrar"
+usage_description_keys = ["NSPhotoLibraryUsageDescription"]
 
 [android]
 path = "android"
 package = "dev.impasto.plugins.permissions"
 plugin_class = "PermissionsPlugin"
+
+[android.features]
+accessMediaLocation = { infer_permissions = ["android.permission.ACCESS_MEDIA_LOCATION"] }
+accessNotificationPolicy = { infer_permissions = ["android.permission.ACCESS_NOTIFICATION_POLICY"] }
+activityRecognition = { infer_permissions = ["android.permission.ACTIVITY_RECOGNITION"] }
+appTrackingTransparency = { default = true }
+audio = { infer_permissions = ["android.permission.READ_MEDIA_AUDIO"] }
+backgroundRefresh = { default = true }
+bluetooth = { infer_permissions = ["android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_CONNECT"] }
+bluetoothAdvertise = { infer_permissions = ["android.permission.BLUETOOTH_ADVERTISE"] }
+bluetoothConnect = { infer_permissions = ["android.permission.BLUETOOTH_CONNECT"] }
+bluetoothScan = { infer_permissions = ["android.permission.BLUETOOTH_SCAN"] }
+calendarFullAccess = { infer_permissions = ["android.permission.READ_CALENDAR", "android.permission.WRITE_CALENDAR"] }
+calendarWriteOnly = { infer_permissions = ["android.permission.WRITE_CALENDAR"] }
+camera = { infer_permissions = ["android.permission.CAMERA"] }
+contacts = { infer_permissions = ["android.permission.READ_CONTACTS"] }
+criticalAlerts = {}
+ignoreBatteryOptimizations = { infer_permissions = ["android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"] }
+location = { infer_permissions = ["android.permission.ACCESS_COARSE_LOCATION"] }
+locationAlways = { infer_permissions = ["android.permission.ACCESS_BACKGROUND_LOCATION"] }
+locationWhenInUse = { infer_permissions = ["android.permission.ACCESS_COARSE_LOCATION"] }
+manageExternalStorage = { infer_permissions = ["android.permission.MANAGE_EXTERNAL_STORAGE"] }
+mediaLibrary = {}
+microphone = { infer_permissions = ["android.permission.RECORD_AUDIO"] }
+nearbyWifiDevices = { infer_permissions = ["android.permission.NEARBY_WIFI_DEVICES"] }
+notification = { infer_permissions = ["android.permission.POST_NOTIFICATIONS"] }
+phone = { infer_permissions = ["android.permission.READ_PHONE_STATE"] }
+photos = { infer_permissions = ["android.permission.READ_MEDIA_IMAGES"] }
+photosAddOnly = { infer_permissions = ["android.permission.WRITE_EXTERNAL_STORAGE"] }
+requestInstallPackages = { infer_permissions = ["android.permission.REQUEST_INSTALL_PACKAGES"] }
+scheduleExactAlarm = { infer_permissions = ["android.permission.SCHEDULE_EXACT_ALARM"] }
+sensors = { infer_permissions = ["android.permission.BODY_SENSORS"] }
+sensorsAlways = { infer_permissions = ["android.permission.BODY_SENSORS_BACKGROUND"] }
+sms = { infer_permissions = ["android.permission.SEND_SMS", "android.permission.READ_SMS"] }
+speech = {}
+storage = { infer_permissions = ["android.permission.READ_EXTERNAL_STORAGE"] }
+systemAlertWindow = { infer_permissions = ["android.permission.SYSTEM_ALERT_WINDOW"] }
+videos = { infer_permissions = ["android.permission.READ_MEDIA_VIDEO"] }
+
+[android.permission_rules."android.permission.ACCESS_BACKGROUND_LOCATION"]
+feature = "locationAlways"
+
+[android.permission_rules."android.permission.ACCESS_COARSE_LOCATION"]
+features = ["location", "locationWhenInUse", "locationAlways", "bluetooth", "bluetoothScan", "nearbyWifiDevices"]
+max_sdk_by_feature = { bluetooth = 30, bluetoothScan = 30, nearbyWifiDevices = 32 }
+
+[android.permission_rules."android.permission.ACCESS_FINE_LOCATION"]
+features = ["location", "locationWhenInUse", "locationAlways", "bluetooth", "bluetoothScan", "nearbyWifiDevices"]
+max_sdk_by_feature = { bluetooth = 30, bluetoothScan = 30, nearbyWifiDevices = 32 }
+
+[android.permission_rules."android.permission.ACCESS_MEDIA_LOCATION"]
+feature = "accessMediaLocation"
+
+[android.permission_rules."android.permission.ACCESS_NOTIFICATION_POLICY"]
+features = ["accessNotificationPolicy", "criticalAlerts"]
+
+[android.permission_rules."android.permission.ACTIVITY_RECOGNITION"]
+feature = "activityRecognition"
+
+[android.permission_rules."android.permission.BLUETOOTH"]
+features = ["bluetooth", "bluetoothScan", "bluetoothConnect", "bluetoothAdvertise"]
+max_sdk = 30
+
+[android.permission_rules."android.permission.BLUETOOTH_ADMIN"]
+features = ["bluetooth", "bluetoothScan", "bluetoothAdvertise"]
+max_sdk = 30
+
+[android.permission_rules."android.permission.BLUETOOTH_ADVERTISE"]
+feature = "bluetoothAdvertise"
+
+[android.permission_rules."android.permission.BLUETOOTH_CONNECT"]
+features = ["bluetooth", "bluetoothConnect"]
+
+[android.permission_rules."android.permission.BLUETOOTH_SCAN"]
+features = ["bluetooth", "bluetoothScan"]
+uses_permission_flags = ["neverForLocation"]
+
+[android.permission_rules."android.permission.BODY_SENSORS"]
+features = ["sensors", "sensorsAlways"]
+
+[android.permission_rules."android.permission.BODY_SENSORS_BACKGROUND"]
+feature = "sensorsAlways"
+
+[android.permission_rules."android.permission.CAMERA"]
+feature = "camera"
+
+[android.permission_rules."android.permission.MANAGE_EXTERNAL_STORAGE"]
+feature = "manageExternalStorage"
+
+[android.permission_rules."android.permission.NEARBY_WIFI_DEVICES"]
+feature = "nearbyWifiDevices"
+
+[android.permission_rules."android.permission.POST_NOTIFICATIONS"]
+feature = "notification"
+
+[android.permission_rules."android.permission.READ_CALENDAR"]
+feature = "calendarFullAccess"
+
+[android.permission_rules."android.permission.READ_CONTACTS"]
+feature = "contacts"
+
+[android.permission_rules."android.permission.READ_EXTERNAL_STORAGE"]
+features = ["storage", "manageExternalStorage", "photos", "videos", "audio", "mediaLibrary"]
+max_sdk = 32
+
+[android.permission_rules."android.permission.READ_MEDIA_AUDIO"]
+features = ["audio", "mediaLibrary"]
+
+[android.permission_rules."android.permission.READ_MEDIA_IMAGES"]
+feature = "photos"
+
+[android.permission_rules."android.permission.READ_MEDIA_VIDEO"]
+feature = "videos"
+
+[android.permission_rules."android.permission.READ_MEDIA_VISUAL_USER_SELECTED"]
+features = ["photos", "videos"]
+
+[android.permission_rules."android.permission.READ_PHONE_STATE"]
+feature = "phone"
+
+[android.permission_rules."android.permission.READ_SMS"]
+feature = "sms"
+
+[android.permission_rules."android.permission.RECORD_AUDIO"]
+features = ["microphone", "speech"]
+
+[android.permission_rules."android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"]
+feature = "ignoreBatteryOptimizations"
+
+[android.permission_rules."android.permission.REQUEST_INSTALL_PACKAGES"]
+feature = "requestInstallPackages"
+
+[android.permission_rules."android.permission.SCHEDULE_EXACT_ALARM"]
+feature = "scheduleExactAlarm"
+
+[android.permission_rules."android.permission.SEND_SMS"]
+feature = "sms"
+
+[android.permission_rules."android.permission.SYSTEM_ALERT_WINDOW"]
+feature = "systemAlertWindow"
+
+[android.permission_rules."android.permission.WRITE_CALENDAR"]
+features = ["calendarFullAccess", "calendarWriteOnly"]
+
+[android.permission_rules."android.permission.WRITE_EXTERNAL_STORAGE"]
+features = ["storage", "photosAddOnly"]
+max_sdk = 32

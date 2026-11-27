@@ -1,7 +1,7 @@
 use crate::ios::IosConfig;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Deserialize)]
@@ -17,12 +17,21 @@ struct Manifest {
     ios: IosConfig,
     #[serde(default)]
     macos: MacConfig,
-    #[serde(default, rename = "dependencies")]
-    _dependencies: BTreeMap<String, toml::Value>,
+    #[serde(default)]
+    dependencies: BTreeMap<String, toml::Value>,
+    #[serde(default)]
+    plugins: BTreeMap<String, PluginOptions>,
     #[serde(default, rename = "theme")]
     _theme: toml::Table,
     #[serde(default, rename = "i18n")]
     _i18n: toml::Table,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct PluginOptions {
+    pub enabled: Option<BTreeSet<String>>,
+    pub android_bluetooth_never_for_location: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -45,20 +54,27 @@ impl MacConfig {
                 );
             }
         }
-        for name in self.entitlements.keys() {
-            if !name.starts_with("com.apple.")
-                || name.split('.').any(|part| {
-                    part.is_empty()
-                        || !part
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                })
-            {
-                bail!("无效的 macOS entitlement {name}");
-            }
-        }
-        Ok(())
+        validate_entitlements("macos", &self.entitlements)
     }
+}
+
+pub(crate) fn validate_entitlements(
+    target: &str,
+    entitlements: &BTreeMap<String, bool>,
+) -> Result<()> {
+    for name in entitlements.keys() {
+        if !name.starts_with("com.apple.")
+            || name.split('.').any(|part| {
+                part.is_empty()
+                    || !part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        {
+            bail!("无效的 {target} entitlement {name}");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default, Deserialize)]
@@ -148,9 +164,17 @@ pub struct App {
     pub macos: MacConfig,
     pub native: Option<crate::plugins::Local>,
     pub plugins: BTreeMap<String, crate::plugins::Dependency>,
+    pub(crate) plugin_options: BTreeMap<String, PluginOptions>,
     pub sources: BTreeMap<String, PathBuf>,
 }
 impl App {
+    pub(crate) fn entry_for(&self, target: Option<&str>) -> PathBuf {
+        target
+            .map(|target| self.root.join(format!("src/main.{target}.tsx")))
+            .filter(|entry| entry.is_file())
+            .unwrap_or_else(|| self.entry.clone())
+    }
+
     pub fn current() -> Result<Self> {
         let cwd = std::env::current_dir()?;
         if cwd.join("app.toml").is_file() {
@@ -177,6 +201,7 @@ impl App {
             macos: MacConfig::default(),
             native: Some(native),
             plugins: discovered.plugins,
+            plugin_options: BTreeMap::new(),
             sources: discovered.sources,
         })
     }
@@ -213,6 +238,11 @@ impl App {
             bail!("缺少 {}", entry.display());
         }
         let discovered = crate::plugins::discover(&root, None)?;
+        for name in manifest.plugins.keys() {
+            if !manifest.dependencies.contains_key(name) || !discovered.plugins.contains_key(name) {
+                bail!("[plugins.{name:?}] 需要在 [dependencies] 声明对应的原生插件");
+            }
+        }
         let native = root
             .join("rust/Cargo.toml")
             .is_file()
@@ -231,6 +261,7 @@ impl App {
             macos: manifest.macos,
             native,
             plugins: discovered.plugins,
+            plugin_options: manifest.plugins,
             sources: discovered.sources,
         })
     }
