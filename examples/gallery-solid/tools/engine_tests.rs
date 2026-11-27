@@ -122,9 +122,6 @@ fn chart_recorded_volume(frame: &session::FrameOutput, height: f32) -> bool {
     found
 }
 
-/// Pumps frames until the first screen lands. The quotes app mounts a
-/// heavier first screen than the old counter.
-
 /// Center of the first button whose accessible label matches exactly.
 /// Icon controls have no text to spot, so the tests reach them by label.
 fn label_spot(session: &mut JsSession, label: &str) -> Option<(f32, f32)> {
