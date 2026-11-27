@@ -1,8 +1,10 @@
 import { createSignal } from "solid-js";
+import { UNIVERSE } from "../engine/universe.ts";
+
 const KEY = "impasto.quotes.watchlist.v1";
 
-/** Watchlist state. Persisted via async-storage; falls back to memory when unlinked. */
-const DEFAULT = [
+// Keep the familiar first rows and seed the rest of the simulated market.
+const featured = [
   "HSI.HK",
   "HSTECH.HK",
   "SPX.US",
@@ -16,7 +18,13 @@ const DEFAULT = [
   "TSLA.US",
   "09988.HK",
 ];
-const [watchlist, setWatchlist] = createSignal<string[]>(DEFAULT);
+const defaults = [
+  ...featured,
+  ...UNIVERSE.filter(({ index, symbol }) => !index && !featured.includes(symbol))
+    .map(({ symbol }) => symbol),
+];
+/** Watchlist state. Persisted via async-storage; falls back to memory when unlinked. */
+const [watchlist, setWatchlist] = createSignal<string[]>(defaults);
 const [loaded, setLoaded] = createSignal(false);
 export const watchlistSig = watchlist;
 export const watchlistLoaded = loaded;

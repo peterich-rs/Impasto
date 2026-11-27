@@ -45,9 +45,9 @@ const section = useScrollSegment(scroll, () => [180, 420, 860]);
 
 ## Gallery 业务页
 
-自选与行情列表由 `VirtualList` 管理挂载窗口。行情行内的迷你图随该行预挂载，按行情发布批次更新。股票详情的主栏和分栏独立滚动。每次布局后由区块位置和视口高度生成两个 `useScrollThreshold` 边界，让快照在进入视口前 48 个逻辑点恢复接收行情。十字线读数和底部实时价格通过 `RepaintBoundary` 各自录制。 [详情区块](../examples/gallery-solid/src/widgets/stocks/section-visibility.ts) · [分时与 K 线](../examples/gallery-solid/src/widgets/stocks/chart.tsx)
+自选与行情列表由 `VirtualList` 管理挂载窗口。默认自选包含模拟市场的全部股票，已保存的自选名单优先。行情行内的迷你图随该行预挂载。股票详情的主栏和分栏独立滚动。每次布局后由区块位置和视口高度生成两个 `useScrollThreshold` 边界，让快照在进入视口前 48 个逻辑点恢复接收行情。十字线读数和底部实时价格通过 `RepaintBoundary` 各自录制。 [详情区块](../examples/gallery-solid/src/widgets/stocks/section-visibility.ts) · [分时与 K 线](../examples/gallery-solid/src/widgets/stocks/chart.tsx)
 
-模拟行情使用单调时钟每 200 ms 推进并发布一次。唤醒超时会限制模拟时间增量。行情列表仅在分批发布行数据时监听帧，股票详情仅在分批挂载区块时监听帧。Raster 可以在这些 UI 工作之间接管惯性滚动。 [行情时钟](../examples/gallery-solid/src/state/quotes-provider.tsx)
+模拟行情使用单调时钟每 200 ms 推进并发布一次。唤醒超时会限制模拟时间增量。活动列表在拖动、惯性与回弹期间继续接收行情，只有已挂载的行参与更新。行情发布时，迷你图仅在数据或颜色变化后重新录制。股票详情仅在分批挂载区块时监听帧。Raster 可以在行情发布之间接管惯性滚动。 [行情时钟](../examples/gallery-solid/src/state/quotes-provider.tsx)
 
 列表记录当前行 key 和行内偏移。空闲时，数据重排与高度校正以该位置为准。原行删除后，沿更新前的次序查找最近的存活行，并按新范围裁剪偏移。活动手势和显式滚动保持优先。
 

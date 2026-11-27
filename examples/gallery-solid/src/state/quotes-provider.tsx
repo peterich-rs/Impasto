@@ -20,7 +20,7 @@ let publicationAt: number | undefined;
 export const marketRunning = running;
 export const marketPulse = pulse;
 
-/** Resumes at the next market publication so ending a gesture does not repaint every quote. */
+/** Delivers new publications while the consumer is active, without replaying missed ticks. */
 export function useMarketPulse(active: () => boolean): () => number {
   const [revision, setRevision] = createSignal(untrack(marketPulse));
   createTrackedEffect(() => {
