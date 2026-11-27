@@ -200,11 +200,10 @@ impl AnimProp {
     }
 }
 
-/// Rubber-band spring that returns overscroll to zero, per second.
-/// Critical damping at ω = 50 settles to about 2% in 80ms.
-pub const OVERSCROLL_STIFFNESS: f32 = 2500.0;
-pub const OVERSCROLL_DAMPING: f32 = 100.0;
-/// Paging spring, per second. Slower than the rubber band.
+/// Critical damping at ω = 16 retraces 95% of a resting stretch in about 300ms.
+pub const OVERSCROLL_STIFFNESS: f32 = 256.0;
+pub const OVERSCROLL_DAMPING: f32 = 32.0;
+/// Paging and programmatic scroll spring, per second.
 pub const SNAP_STIFFNESS: f32 = 220.0;
 pub const SNAP_DAMPING: f32 = 30.0;
 /// Fraction of the distance past the scroll edge that becomes overscroll.
@@ -213,9 +212,8 @@ pub const OVERSCROLL_FACTOR: f32 = 0.55;
 /// How a drag past the edge maps to overscroll.
 ///
 /// `Linear` multiplies the overflow by a constant factor: the historical
-/// behavior. `Curve` is the UIScrollView asymptotic band: the stretch grows
-/// with the overflow but its slope shrinks, and the stretch never reaches
-/// `dimension / c`. `dimension` is the scroll's own extent on that axis.
+/// behavior. For `Curve`, the stretch grows with the overflow, its slope
+/// shrinks, and the stretch approaches the viewport extent on that axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Band {
     Linear { factor: f32 },
@@ -248,8 +246,7 @@ impl Band {
 
     /// Derivative of [`Band::stretch`] with respect to overflow.
     ///
-    /// Release velocity is multiplied by this so the band keeps the finger's
-    /// speed. `Linear` is the constant factor. `Curve` is `c D² / (c|over| + D)²`,
+    /// `Linear` is the constant factor. `Curve` is `c D² / (c|over| + D)²`,
     /// which is `c` at the edge and falls as the pull deepens.
     pub fn slope(self, over: f32, dimension: f32) -> f32 {
         if !over.is_finite() || !dimension.is_finite() || dimension <= 0.0 {
@@ -267,9 +264,24 @@ impl Band {
                 if !(c.is_finite() && c > 0.0) {
                     return 0.0;
                 }
-                let denom = c * over.abs() + dimension;
-                c * dimension * dimension / (denom * denom)
+                let ratio = dimension / (c * over.abs() + dimension);
+                c * ratio * ratio
             }
+        }
+    }
+
+    /// Derivative evaluated at the already stretched viewport position.
+    pub(crate) fn slope_at_stretch(self, stretch: f32, dimension: f32) -> f32 {
+        if !stretch.is_finite() {
+            return 0.0;
+        }
+        let edge_slope = self.slope(0.0, dimension);
+        if matches!(self, Self::Curve { .. }) && edge_slope > 0.0 {
+            // The fraction of the viewport still covered is D / (c|over| + D).
+            let remaining = (1.0 - stretch.abs() / dimension).max(0.0);
+            edge_slope * remaining * remaining
+        } else {
+            edge_slope
         }
     }
 }
@@ -304,7 +316,7 @@ impl Decay {
 /// How a scroll treats a drag past its limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverscrollMode {
-    /// Offset stays on the limit. The leftover times `OVERSCROLL_FACTOR` is overscroll.
+    /// Offset stays on the limit. The band maps the overflow to overscroll.
     RubberBand,
     /// Offset stays on the limit and overscroll stays zero.
     Clamp,
@@ -444,7 +456,7 @@ impl Default for ScrollPhysics {
 }
 
 impl ScrollPhysics {
-    /// Asymptotic rubber band, 500ms coast, and an 80ms return spring.
+    /// Asymptotic rubber band, 500ms coast, and a critically damped return.
     /// A behavior preset, not a platform. `accept` stays [`ScrollAccept::Content`].
     pub const BOUNCING: Self = Self {
         decay: Decay::Tau(500.0),
@@ -543,8 +555,25 @@ mod tests {
             "16ms should still be in flight, got {}",
             spring.x(16.0)
         );
-        assert!(spring.done(120.0));
-        assert!((spring.x(120.0) - 10.0).abs() < 0.5);
+        assert!(spring.done(400.0));
+        assert!((spring.x(400.0) - 10.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn release_slope_matches_the_drag_at_its_displayed_stretch() {
+        let band = ScrollPhysics::BOUNCING.band;
+        let dimension = 400.0;
+        for overflow in [-600.0, -40.0, 0.0, 40.0, 600.0] {
+            let stretch = band.stretch(overflow, dimension);
+            let drag_slope =
+                band.stretch(overflow + 0.5, dimension) - band.stretch(overflow - 0.5, dimension);
+            assert!(
+                (band.slope_at_stretch(stretch, dimension) - drag_slope).abs() < 0.001,
+                "release velocity did not match drag velocity at overflow {overflow}"
+            );
+        }
+        let linear = Band::Linear { factor: 0.5 };
+        assert_eq!(linear.slope_at_stretch(-40.0, dimension), 0.5);
     }
 
     #[test]

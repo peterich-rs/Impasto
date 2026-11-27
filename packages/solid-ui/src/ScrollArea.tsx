@@ -51,7 +51,7 @@ export type ScrollPhysics = {
   accept?: "content" | "always" | "never";
 };
 
-/** Asymptotic band, 500ms coast, 80ms return. `accept` is left unset. */
+/** Asymptotic band, 500ms coast, and a critically damped return. */
 export const bouncing: ScrollPhysics = {
   decay: {
     tau: 500,
@@ -61,8 +61,9 @@ export const bouncing: ScrollPhysics = {
   },
   overscroll: "rubber",
   spring: {
-    stiffness: 2500,
-    damping: 100,
+    // Match the engine's default overscroll spring.
+    stiffness: 256,
+    damping: 32,
   },
   snap: {
     stiffness: 220,
