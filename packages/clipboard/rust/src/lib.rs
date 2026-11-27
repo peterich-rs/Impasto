@@ -136,6 +136,23 @@ use ios as apple;
 #[cfg(target_os = "macos")]
 use macos as apple;
 
+impl Clipboard {
+    /// In-process clipboard buffer.
+    ///
+    /// Native hosts return `None` while the system clipboard variant is active.
+    /// Other hosts only construct `Memory`, and this match covers that shape so
+    /// callers can branch on `Option` on every target.
+    fn as_memory(&self) -> Option<&Mutex<ClipboardContent>> {
+        match self {
+            Self::Memory(value) => Some(value),
+            #[cfg(target_os = "android")]
+            Self::Android(_) => None,
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            Self::Apple => None,
+        }
+    }
+}
+
 #[impasto::module(name = "Clipboard", specifier = "@impasto/clipboard/native", init = init, object = true)]
 struct ClipboardPlugin {
     text: Clipboard,
@@ -220,7 +237,7 @@ impl ClipboardPlugin {
     }
 
     pub async fn available_formats(&self) -> Result<Vec<ClipboardFormat>, ClipboardError> {
-        if let Clipboard::Memory(value) = &self.text {
+        if let Some(value) = self.text.as_memory() {
             return Ok(value
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -240,7 +257,7 @@ impl ClipboardPlugin {
     }
 
     pub async fn read(&self) -> Result<ClipboardContent, ClipboardError> {
-        if let Clipboard::Memory(value) = &self.text {
+        if let Some(value) = self.text.as_memory() {
             return Ok(value
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -286,7 +303,7 @@ impl ClipboardPlugin {
                 Ok(content)
             })
             .await?;
-        if let Clipboard::Memory(value) = &self.text {
+        if let Some(value) = self.text.as_memory() {
             *value.lock().unwrap_or_else(|error| error.into_inner()) = content;
         } else {
             let wire = self
@@ -305,7 +322,7 @@ impl ClipboardPlugin {
     }
 
     pub async fn clear(&self) -> Result<(), ClipboardError> {
-        if let Clipboard::Memory(value) = &self.text {
+        if let Some(value) = self.text.as_memory() {
             *value.lock().unwrap_or_else(|error| error.into_inner()) = ClipboardContent::default();
         } else {
             self.native.request::<()>("clear", &()).await?;
@@ -331,7 +348,7 @@ impl ClipboardPlugin {
         format: ClipboardFormat,
         action: &str,
     ) -> Result<bool, ClipboardError> {
-        if let Clipboard::Memory(value) = &self.text {
+        if let Some(value) = self.text.as_memory() {
             return Ok(value
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
