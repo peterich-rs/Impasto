@@ -1,5 +1,12 @@
 use super::*;
 
+fn touch(phase: Phase, x: f32, y: f32, time_ms: f64) -> PointerEvent {
+    PointerEvent {
+        kind: crate::input::PointerKind::Touch,
+        ..timed(phase, x, y, time_ms)
+    }
+}
+
 #[test]
 fn click_fires_once_inside_and_not_after_leaving() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
@@ -103,7 +110,7 @@ fn removing_the_pressed_subtree_drops_the_route() -> Result<(), crate::Error> {
         tree.pointer(event(Phase::Down, 1.0, 1.0)),
         vec![Gesture::Press(region)]
     );
-    tree.remove(column, region)?;
+    assert_eq!(tree.remove(column, region)?, vec![Gesture::Release(region)]);
     tree.layout()?;
     assert!(tree.pointer(event(Phase::Up, 1.0, 1.0)).is_empty());
     Ok(())
@@ -205,12 +212,9 @@ fn passing_the_slop_over_a_scroll_locks_a_drag() -> Result<(), crate::Error> {
         tree.pointer(timed(Phase::Down, 10.0, 10.0, 0.0)),
         vec![Gesture::Press(region)]
     );
-    assert!(
-        tree.pointer(timed(Phase::Move, 10.0, 14.0, 10.0))
-            .is_empty()
-    );
+    assert!(tree.pointer(timed(Phase::Move, 10.0, 14.0, 4.0)).is_empty());
     assert_eq!(
-        tree.pointer(timed(Phase::Move, 10.0, 30.0, 26.0)),
+        tree.pointer(timed(Phase::Move, 10.0, 30.0, 20.0)),
         vec![
             Gesture::Release(region),
             Gesture::DragBegin(scroll),
@@ -218,11 +222,11 @@ fn passing_the_slop_over_a_scroll_locks_a_drag() -> Result<(), crate::Error> {
         ]
     );
     assert_eq!(
-        tree.pointer(timed(Phase::Move, 10.0, 46.0, 42.0)),
+        tree.pointer(timed(Phase::Move, 10.0, 46.0, 36.0)),
         vec![Gesture::DragBy(scroll, 0.0, 16.0)]
     );
     assert_eq!(
-        tree.pointer(timed(Phase::Up, 10.0, 46.0, 42.0)),
+        tree.pointer(timed(Phase::Up, 10.0, 46.0, 40.0)),
         vec![Gesture::DragEnd(scroll, 0.0, 1.0)]
     );
     Ok(())
@@ -247,14 +251,14 @@ fn leaving_a_short_row_before_the_slop_still_scrolls() -> Result<(), crate::Erro
     tree.layout()?;
 
     assert_eq!(
-        tree.pointer(timed(Phase::Down, 10.0, 6.0, 0.0)),
+        tree.pointer(touch(Phase::Down, 10.0, 6.0, 0.0)),
         vec![Gesture::Press(region)]
     );
     assert_eq!(
-        tree.pointer(timed(Phase::Move, 10.0, 13.0, 8.0)),
+        tree.pointer(touch(Phase::Move, 10.0, 13.0, 8.0)),
         vec![Gesture::Release(region)]
     );
-    let locked = tree.pointer(timed(Phase::Move, 10.0, 20.0, 16.0));
+    let locked = tree.pointer(touch(Phase::Move, 10.0, 20.0, 16.0));
     assert!(
         locked
             .iter()
@@ -283,14 +287,14 @@ fn leaving_the_list_before_the_slop_drops_the_drag() -> Result<(), crate::Error>
     tree.layout()?;
 
     assert_eq!(
-        tree.pointer(timed(Phase::Down, 10.0, 6.0, 0.0)),
+        tree.pointer(touch(Phase::Down, 10.0, 6.0, 0.0)),
         vec![Gesture::Press(region)]
     );
     assert_eq!(
-        tree.pointer(timed(Phase::Move, 10.0, -1.0, 8.0)),
+        tree.pointer(touch(Phase::Move, 10.0, -1.0, 8.0)),
         vec![Gesture::Release(region)]
     );
-    let later = tree.pointer(timed(Phase::Move, 10.0, -20.0, 24.0));
+    let later = tree.pointer(touch(Phase::Move, 10.0, -20.0, 24.0));
     assert!(
         later
             .iter()
@@ -319,14 +323,14 @@ fn leaving_a_row_inside_the_list_does_not_click() -> Result<(), crate::Error> {
     tree.layout()?;
 
     assert_eq!(
-        tree.pointer(timed(Phase::Down, 10.0, 6.0, 0.0)),
+        tree.pointer(touch(Phase::Down, 10.0, 6.0, 0.0)),
         vec![Gesture::Press(region)]
     );
     assert_eq!(
-        tree.pointer(timed(Phase::Move, 10.0, 13.0, 8.0)),
+        tree.pointer(touch(Phase::Move, 10.0, 13.0, 8.0)),
         vec![Gesture::Release(region)]
     );
-    let up = tree.pointer(timed(Phase::Up, 10.0, 13.0, 16.0));
+    let up = tree.pointer(touch(Phase::Up, 10.0, 13.0, 16.0));
     assert!(
         up.iter()
             .all(|gesture| !matches!(gesture, Gesture::Click(_))),
@@ -355,16 +359,15 @@ fn detaching_the_pressed_row_still_locks_the_scroll() -> Result<(), crate::Error
     tree.layout()?;
 
     assert_eq!(
-        tree.pointer(timed(Phase::Down, 10.0, 6.0, 0.0)),
+        tree.pointer(touch(Phase::Down, 10.0, 6.0, 0.0)),
         vec![Gesture::Press(region)]
     );
     assert_eq!(
-        tree.pointer(timed(Phase::Move, 10.0, 13.0, 8.0)),
+        tree.detach(content, region)?,
         vec![Gesture::Release(region)]
     );
-    let _ = tree.detach(content, region)?;
     tree.layout()?;
-    let locked = tree.pointer(timed(Phase::Move, 10.0, 20.0, 16.0));
+    let locked = tree.pointer(touch(Phase::Move, 10.0, 20.0, 16.0));
     assert!(
         locked
             .iter()
@@ -423,7 +426,7 @@ fn cancel_during_a_drag_ends_with_zero_velocity() -> Result<(), crate::Error> {
         locked,
         vec![
             Gesture::DragBegin(scroll),
-            Gesture::DragBy(scroll, 0.0, 19.0)
+            Gesture::DragBy(scroll, 0.0, 15.0)
         ]
     );
     assert_eq!(
@@ -435,7 +438,110 @@ fn cancel_during_a_drag_ends_with_zero_velocity() -> Result<(), crate::Error> {
 }
 
 #[test]
-fn structure_change_drops_a_locked_drag() -> Result<(), crate::Error> {
+fn move_history_shapes_a_flick_and_a_held_release_stops_it() -> Result<(), crate::Error> {
+    for (up_ms, expected) in [(42.0, -1.0), (540.0, 0.0)] {
+        let mut tree = Tree::new(MonoShaper::default());
+        tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+        let root = tree.column(0.0)?;
+        tree.set_fill(root)?;
+        let scroll = tree.scroll()?;
+        let content = tree.sized(100.0, 400.0)?;
+        tree.add_child(scroll, content)?;
+        tree.add_child(root, scroll)?;
+        tree.layout()?;
+
+        tree.pointer(touch(Phase::Down, 20.0, 60.0, 0.0));
+        let history = [
+            touch(Phase::Move, 20.0, 50.0, 10.0).into(),
+            touch(Phase::Move, 20.0, 40.0, 20.0).into(),
+            touch(Phase::Move, 20.0, 30.0, 30.0).into(),
+        ];
+        assert_eq!(
+            tree.pointer_with_history(touch(Phase::Move, 20.0, 20.0, 40.0), &history),
+            vec![
+                Gesture::DragBegin(scroll),
+                Gesture::DragBy(scroll, 0.0, -28.0)
+            ]
+        );
+        tree.pointer(touch(Phase::Move, 20.0, 16.0, 41.0));
+        assert_eq!(
+            tree.pointer(touch(Phase::Up, 20.0, 16.0, up_ms)),
+            vec![Gesture::DragEnd(scroll, 0.0, expected)]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn hiding_and_removing_a_scroller_end_its_locked_drag() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let content = tree.sized(100.0, 400.0)?;
+    tree.add_child(scroll, content)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+
+    let drag = |tree: &mut Tree, id, time| {
+        let pointer = PointerId(id);
+        tree.pointer(PointerEvent {
+            pointer,
+            ..touch(Phase::Down, 20.0, 60.0, time)
+        });
+        tree.pointer(PointerEvent {
+            pointer,
+            ..touch(Phase::Move, 20.0, 30.0, time + 20.0)
+        })
+    };
+    assert!(drag(&mut tree, 1, 0.0).contains(&Gesture::DragBegin(scroll)));
+    tree.set_class(scroll, "hidden")?;
+    tree.layout()?;
+    assert_eq!(
+        tree.take_style_gestures(),
+        vec![Gesture::DragEnd(scroll, 0.0, 0.0)]
+    );
+    tree.set_class(scroll, "")?;
+    tree.layout()?;
+    assert!(drag(&mut tree, 2, 40.0).contains(&Gesture::DragBegin(scroll)));
+    assert_eq!(
+        tree.remove(root, scroll)?,
+        vec![Gesture::DragEnd(scroll, 0.0, 0.0)]
+    );
+    Ok(())
+}
+
+#[cfg(feature = "js")]
+#[test]
+fn a_locked_scroll_does_not_resolve_hover_or_active_styles() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let region = tree.pointer_region()?;
+    tree.set_class(region, "hover:bg-[#ff0000] active:bg-[#0000ff]")?;
+    let content = tree.sized(100.0, 400.0)?;
+    tree.add_child(region, content)?;
+    tree.add_child(scroll, region)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    tree.pointer(touch(Phase::Down, 20.0, 60.0, 0.0));
+    assert!(
+        tree.pointer(touch(Phase::Move, 20.0, 42.0, 16.0))
+            .contains(&Gesture::DragBegin(scroll))
+    );
+    tree.flush_styles()?;
+    tree.take_style_resolves();
+    tree.pointer(touch(Phase::Move, 20.0, 25.0, 32.0));
+    tree.flush_styles()?;
+    assert_eq!(tree.take_style_resolves(), 0);
+    Ok(())
+}
+
+#[test]
+fn structure_change_preserves_a_locked_drag() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
     let root = tree.column(0.0)?;
@@ -1038,6 +1144,52 @@ fn a_long_press_wins_and_the_lift_is_not_a_click() -> Result<(), crate::Error> {
     assert_eq!(
         tree.pointer(timed(Phase::Up, 8.0, 8.0, 600.0)),
         vec![Gesture::Release(region)]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_fired_long_press_cannot_take_a_scroll_lock() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let region = tree.pointer_region()?;
+    let content = tree.sized(100.0, 400.0)?;
+    tree.add_child(region, content)?;
+    tree.add_child(scroll, region)?;
+    tree.add_child(root, scroll)?;
+    tree.set_recognizers(
+        region,
+        RecognizerSet {
+            long_press: true,
+            ..RecognizerSet::default()
+        },
+    )?;
+    tree.layout()?;
+
+    tree.pointer(touch(Phase::Down, 20.0, 60.0, 0.0));
+    assert_eq!(tree.tick(500.0), vec![Gesture::LongPress(region)]);
+    assert!(
+        tree.pointer(touch(Phase::Move, 20.0, 20.0, 510.0))
+            .is_empty()
+    );
+    assert_eq!(
+        tree.pointer(touch(Phase::Up, 20.0, 20.0, 520.0)),
+        vec![Gesture::Release(region)]
+    );
+
+    tree.pointer(PointerEvent {
+        pointer: PointerId(2),
+        ..touch(Phase::Down, 20.0, 60.0, 600.0)
+    });
+    assert!(
+        tree.pointer(PointerEvent {
+            pointer: PointerId(2),
+            ..touch(Phase::Move, 20.0, 20.0, 620.0)
+        })
+        .contains(&Gesture::DragBegin(scroll))
     );
     Ok(())
 }

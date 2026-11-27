@@ -6,25 +6,25 @@
 //! Compiled pictures are cached by `PictureId + generation` and reused
 //! until the picture leaves the tree or its generation changes.
 
-use std::sync::{
-    Arc, OnceLock,
-    atomic::{AtomicU64, Ordering},
-};
+mod canvas;
+mod path;
+mod picture;
+
+pub use path::mesh_bounds;
+pub use picture::{CompileContext, PreparedPicture, compile, prepare};
+
+use std::sync::{Arc, OnceLock};
 
 use engine::scene::{
-    BlendMode, BoxShadow, CanvasBrush, CanvasComposite, CanvasIsolation, CanvasList, CanvasOp,
-    CanvasPath, Command, ContentMode, Gradient, Picture, Shadow, ShapedParagraph, ShapedRun,
-    SpanPaint,
+    BlendMode, BoxShadow, CanvasComposite, Command, ContentMode, Gradient, Shadow, ShapedParagraph,
+    ShapedRun, SpanPaint,
 };
-use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::batch::{
-    self, Brush, GpuMeshBuffer, ImageInstance, Mesh, MeshBuffer, PackedGradient, RECT_FILL,
-    RECT_FILL_STROKE, RECT_GRADIENT, RECT_SHADOW, RECT_STROKE, RectInstance, StencilFill,
-    image_slices, lyon_fill_rule, pack_canvas_gradient, pack_gradient, tessellation_path,
+    self, ImageInstance, Mesh, MeshBuffer, PackedGradient, RECT_FILL, RECT_FILL_STROKE,
+    RECT_GRADIENT, RECT_SHADOW, RECT_STROKE, RectInstance, image_slices, pack_gradient,
 };
 use crate::color::linear_premultiplied;
-use crate::gpu::Gpu;
 use crate::pipelines::BlendKey;
 use crate::status::Status;
 use crate::textures::Load;
@@ -32,8 +32,6 @@ use crate::textures::Load;
 /// Column-major 3x3 affine in scene points: `[a, b, c, d, e, f]` as
 /// `x' = a*x + c*y + e`, `y' = b*x + d*y + f`.
 pub type Affine = [f32; 6];
-
-static NEXT_COMPILED_PICTURE: AtomicU64 = AtomicU64::new(1);
 
 pub const IDENTITY: Affine = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
@@ -132,7 +130,6 @@ pub struct ClipShape {
     pub transform: Affine,
     /// Tessellated path for a canvas clip, in the clip's space.
     pub mesh: Option<Arc<Mesh>>,
-    pub path: Option<CanvasPath>,
 }
 
 /// State every draw in a scope runs under.
@@ -183,7 +180,6 @@ pub struct Scope {
     pub draws: Vec<Draw>,
     pub bounds: PictureBounds,
     has_rects: bool,
-    pub resident_candidates: Vec<bool>,
 }
 
 impl Scope {
@@ -248,7 +244,7 @@ impl RectRun {
         let mut indices = HashMap::<[u32; size_of::<batch::PaintExtra>() / 4], u32>::new();
         self.vertices.reserve(self.rects.len());
         for rect in &self.rects {
-            let index = if let Some(paint) = rect.extra(0.0, 0) {
+            let index = if let Some(paint) = rect.extra(0.0) {
                 match indices.entry(bytemuck::cast(paint)) {
                     Entry::Occupied(entry) => *entry.get(),
                     Entry::Vacant(entry) => {
@@ -273,29 +269,6 @@ impl RectRun {
     }
 }
 
-fn resident_candidate(draw: &Draw) -> bool {
-    match draw {
-        Draw::Rects(run) => !run.rects.is_empty(),
-        Draw::Images {
-            source, instances, ..
-        } => {
-            !source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX)
-                && instances.first().is_some_and(|first| {
-                    instances
-                        .iter()
-                        .all(|instance| (instance.flags ^ first.flags) & batch::IMAGE_NEAREST == 0)
-                })
-        }
-        Draw::Glyphs(glyphs) => {
-            !glyphs.is_empty()
-                && glyphs
-                    .iter()
-                    .all(|glyph| glyph.gradient.is_none() && glyph.decoration.is_none())
-        }
-        Draw::Fill(_) | Draw::Mesh(_) | Draw::ShaderEffect { .. } => false,
-    }
-}
-
 impl Draw {
     pub fn source_over(&self) -> bool {
         match self {
@@ -317,16 +290,9 @@ impl Draw {
                 bounds.union(rect(draw.rect).expand(draw.stroke_width * 0.5 + 1.0))
             }),
             Self::Fill(_) => B::Unbounded,
-            Self::Glyphs(glyphs) => glyphs.iter().fold(B::Empty, |bounds, glyph| {
-                // Covers the font box, overhang, synthetic paint and subpixel placement.
-                let pad = glyph.size * 2.0 + 1.0;
-                bounds.union(rect(glyph.decoration.unwrap_or([
-                    glyph.x - pad,
-                    glyph.y - pad,
-                    2.0 * pad,
-                    2.0 * pad,
-                ])))
-            }),
+            Self::Glyphs(glyphs) => glyphs
+                .iter()
+                .fold(B::Empty, |bounds, glyph| bounds.union(glyph.bounds())),
             Self::Images { instances, .. } => instances
                 .iter()
                 .fold(B::Empty, |bounds, image| bounds.union(rect(image.rect))),
@@ -357,6 +323,19 @@ pub struct GlyphDraw {
     pub decoration: Option<[f32; 4]>,
 }
 
+impl GlyphDraw {
+    pub(crate) fn bounds(&self) -> PictureBounds {
+        // Include the font box, overhang, synthetic paint and subpixel placement.
+        let pad = self.size * 2.0 + 1.0;
+        PictureBounds::rect(self.decoration.unwrap_or([
+            self.x - pad,
+            self.y - pad,
+            2.0 * pad,
+            2.0 * pad,
+        ]))
+    }
+}
+
 /// A picture compiled for one point scale.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledPicture {
@@ -367,10 +346,7 @@ pub struct CompiledPicture {
     pub bounds: PictureBounds,
     pub mesh_buffer: Arc<OnceLock<MeshBuffer>>,
     pub reads_root: bool,
-    pub has_resident_candidate: bool,
     pub has_glyphs: bool,
-    pub cache_safe: bool,
-    pub cache_expensive: bool,
     pub has_shader_effect: bool,
     pub supports_partial: bool,
     /// Picture origin in the parent layer's space.
@@ -421,242 +397,7 @@ fn summarize_bounds(
     (bounds, content_by_group)
 }
 
-/// Inputs used while resolving picture images.
-pub struct CompileContext<'a, 'store, 'pixels> {
-    pub gpu: &'a Gpu,
-    pub device_generation: u64,
-    pub resolve: &'a mut dyn FnMut(&str) -> Option<crate::ImagePixels<'pixels>>,
-    pub textures: &'a mut crate::textures::TextureTransaction<'store>,
-    pub point_scale: f32,
-    pub stream_mesh: bool,
-}
-
-/// Compiles one picture.
-pub fn compile(
-    picture: &Picture,
-    context: &mut CompileContext<'_, '_, '_>,
-    pool: Option<&rayon::ThreadPool>,
-) -> Result<CompiledPicture, Status> {
-    let prepared = prepare(picture, context.point_scale, pool, &mut |source| {
-        context.textures.load(context.gpu, source, context.resolve)
-    })?;
-    prepared.install(context.gpu, context.device_generation, context.stream_mesh)
-}
-
-type Tessellation = lyon_tessellation::VertexBuffers<[f32; 3], u32>;
-
-/// Upload-free geometry prepared on a worker and installed in paint order.
-pub struct PreparedPicture {
-    compiled: CompiledPicture,
-    vertices: Vec<[f32; 3]>,
-    indices: Vec<u32>,
-}
-
-impl PreparedPicture {
-    pub fn install(
-        mut self,
-        gpu: &Gpu,
-        device: u64,
-        stream_mesh: bool,
-    ) -> Result<CompiledPicture, Status> {
-        self.compiled.device = device;
-        self.compiled.resident_id = NEXT_COMPILED_PICTURE.fetch_add(1, Ordering::Relaxed);
-        if !self.indices.is_empty() {
-            use crate::arena::FrameArena;
-            let mesh = if stream_mesh
-                && self.vertices.len() <= FrameArena::vertex_limit::<[f32; 3]>(gpu)
-                && self.indices.len() <= FrameArena::vertex_limit::<u32>(gpu)
-            {
-                MeshBuffer::Streamed {
-                    id: self.compiled.resident_id,
-                    vertices: self.vertices.into_boxed_slice(),
-                    indices: self.indices.into_boxed_slice(),
-                    resident: OnceLock::new(),
-                }
-            } else {
-                MeshBuffer::Resident(GpuMeshBuffer::upload(gpu, &self.vertices, &self.indices)?)
-            };
-            self.compiled
-                .mesh_buffer
-                .set(mesh)
-                .map_err(|_| Status::BadScene)?;
-        }
-        Ok(self.compiled)
-    }
-}
-
-pub fn prepare(
-    picture: &Picture,
-    point_scale: f32,
-    pool: Option<&rayon::ThreadPool>,
-    load: &mut dyn FnMut(&Arc<str>) -> Load,
-) -> Result<PreparedPicture, Status> {
-    let origin = picture.origin;
-    let mut compiler = Compiler {
-        load,
-        pool,
-        point_scale,
-        stack: vec![root_state()],
-        scopes: vec![Scope {
-            state: root_state(),
-            draws: Vec::new(),
-            bounds: PictureBounds::Empty,
-            has_rects: false,
-            resident_candidates: Vec::new(),
-        }],
-        images: Vec::new(),
-        waiting: Vec::new(),
-        groups: Vec::new(),
-        meshes: Arc::new(OnceLock::new()),
-        vertices: Vec::new(),
-        indices: Vec::new(),
-    };
-    for command in picture.commands().iter() {
-        compiler.command(command)?;
-    }
-    if compiler.stack.len() != 1 {
-        // An unbalanced push was rejected at record time. Nothing to do.
-        return Err(Status::BadScene);
-    }
-    let mut has_resident_candidate = false;
-    let mut has_glyphs = false;
-    let mut has_shader_effect = false;
-    let mut supports_partial = compiler.groups.is_empty();
-    let mut cache_safe = true;
-    let mut shadows = 0usize;
-    let mut paths = 0usize;
-    let mut glyph_count = 0usize;
-    for scope in &mut compiler.scopes {
-        for draw in &mut scope.draws {
-            if let Draw::Rects(run) = draw {
-                run.prepare()?;
-                shadows += run
-                    .rects
-                    .iter()
-                    .filter(|rect| rect.kind == RECT_SHADOW)
-                    .count();
-            }
-            if let Draw::Glyphs(glyphs) = draw {
-                has_glyphs = true;
-                glyph_count += glyphs.len();
-            }
-            has_shader_effect |= matches!(draw, Draw::ShaderEffect { .. });
-            supports_partial &= matches!(
-                draw,
-                Draw::Rects(_)
-                    | Draw::Images { .. }
-                    | Draw::Glyphs(_)
-                    | Draw::Fill(_)
-                    | Draw::Mesh(_)
-            ) && draw.source_over();
-            paths += usize::from(matches!(draw, Draw::Mesh(_)));
-            cache_safe &= matches!(
-                draw,
-                Draw::Rects(_) | Draw::Mesh(_) | Draw::Glyphs(_) | Draw::Images { .. }
-            ) && (draw.source_over() || !scope.state.groups.is_empty());
-        }
-        if compiler.groups.is_empty() {
-            let candidates: Vec<_> = scope.draws.iter().map(resident_candidate).collect();
-            if candidates.contains(&true) {
-                scope.resident_candidates = candidates;
-                has_resident_candidate = true;
-            }
-        }
-    }
-    let scope_blocks = if compiler.groups.is_empty() && compiler.scopes.len() > SCOPES_PER_BLOCK {
-        compiler
-            .scopes
-            .chunks(SCOPES_PER_BLOCK)
-            .map(|scopes| summarize_bounds(scopes, &[], IDENTITY, point_scale).0)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let (bounds, content_by_group) = if scope_blocks.is_empty() {
-        summarize_bounds(&compiler.scopes, &compiler.groups, IDENTITY, point_scale)
-    } else {
-        (
-            scope_blocks
-                .iter()
-                .copied()
-                .fold(PictureBounds::Empty, PictureBounds::union),
-            Vec::new(),
-        )
-    };
-    for (group, content) in compiler.groups.iter_mut().zip(content_by_group) {
-        group.content = content;
-    }
-    cache_safe &= compiler.groups.iter().all(|group| {
-        !matches!(
-            group.effect,
-            Effect::BackdropBlur | Effect::BackdropMaterial(..)
-        )
-    }) && compiler.scopes.iter().all(|scope| {
-        scope.state.groups.first().is_none_or(|id| {
-            matches!(
-                compiler.groups[*id].effect,
-                Effect::Opacity
-                    | Effect::Isolation
-                    | Effect::Blur
-                    | Effect::Blend(BlendMode::SrcOver)
-            )
-        })
-    });
-    let cache_expensive = paths >= 32
-        || glyph_count >= 256
-        || shadows >= 2
-        || compiler.groups.iter().any(|group| {
-            matches!(
-                group.effect,
-                Effect::Blur | Effect::Opacity | Effect::Blend(_)
-            )
-        });
-    let compiled = CompiledPicture {
-        resident_id: 0,
-        generation: picture.generation,
-        has_resident_candidate,
-        has_glyphs,
-        cache_safe,
-        cache_expensive,
-        has_shader_effect,
-        supports_partial,
-        device: 0,
-        bounds,
-        mesh_buffer: compiler.meshes,
-        reads_root: compiler.scopes.iter().any(|scope| {
-            use engine::scene::shader::BACKDROP_TEXTURE;
-            if scope.state.groups.is_empty()
-                && scope.draws.iter().any(|draw| {
-                    matches!(draw, Draw::ShaderEffect { textures, .. }
-                        if textures.iter().any(|source| source.as_ref() == BACKDROP_TEXTURE))
-                })
-            {
-                return true;
-            }
-            scope.state.groups.first().is_some_and(|&id| {
-                matches!(
-                    compiler.groups[id].effect,
-                    Effect::BackdropBlur
-                        | Effect::BackdropMaterial(..)
-                        | Effect::Blend(BlendMode::Multiply)
-                        | Effect::Canvas(CanvasComposite::Multiply)
-                )
-            })
-        }),
-        scale: point_scale,
-        origin,
-        scopes: compiler.scopes,
-        scope_blocks,
-        images: compiler.images,
-        waiting: compiler.waiting,
-        groups: compiler.groups,
-    };
-    Ok(PreparedPicture {
-        compiled,
-        vertices: compiler.vertices,
-        indices: compiler.indices,
-    })
-}
+pub(crate) type Tessellation = lyon_tessellation::VertexBuffers<[f32; 3], u32>;
 
 pub fn effect_scale(transform: Affine) -> f32 {
     transform[0]
@@ -721,7 +462,6 @@ impl Compiler<'_> {
                 draws: Vec::new(),
                 bounds: PictureBounds::Empty,
                 has_rects: false,
-                resident_candidates: Vec::new(),
             });
         }
         if let Some(scope) = self.scopes.last_mut() {
@@ -773,7 +513,6 @@ impl Compiler<'_> {
             draws: Vec::new(),
             bounds: PictureBounds::Empty,
             has_rects: false,
-            resident_candidates: Vec::new(),
         });
     }
 
@@ -993,29 +732,58 @@ impl Compiler<'_> {
                 return Ok(());
             }
         };
-        let (flags, gradient_a, gradient_b, stops) = match gradient {
+        let (flags, gradient_a, gradient_b, stops, inline) = match gradient {
             Some(gradient) => {
                 let Some(packed) = pack_gradient(gradient, x, y, w, h, 255) else {
                     return Ok(());
                 };
+                let inline = packed.inline_pair();
                 (
                     RECT_GRADIENT,
                     packed.a,
                     [
-                        packed.kind as f32,
+                        inline.map_or(packed.kind, |_| batch::INLINE_LINEAR_GRADIENT) as f32,
                         0.0,
-                        packed.stops.len() as f32 / 2.0,
+                        if inline.is_none() {
+                            packed.stops.len() as f32 / 2.0
+                        } else {
+                            0.0
+                        },
                         1.0,
                     ],
-                    Some(packed.stops),
+                    inline.is_none().then_some(packed.stops),
+                    inline,
                 )
             }
-            None => (0, [0.0; 4], [0.0, 0.0, 0.0, 1.0], None),
+            None => (0, [0.0; 4], [0.0, 0.0, 0.0, 1.0], None, None),
         };
         let fill_color = match gradient {
             Some(gradient) => gradient_solid(gradient).unwrap_or([0.0; 4]),
             None => linear_premultiplied(*color, 255).unwrap_or([0.0; 4]),
         };
+        let opaque_fill = stops.as_ref().map_or(
+            fill_color[3] == 1.0 && inline.is_none_or(|[_, end]| end[3] == 1.0),
+            |stops| {
+                stops
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .all(|[color, _]| color[3] == 1.0)
+            },
+        );
+        if opaque_fill {
+            let radius = corners.map_or_else(
+                || clamped_radius(corner_radius, w, h),
+                |shape| shape.radii.into_iter().fold(0.0, f32::max),
+            );
+            let inset = radius * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
+            for shadow in &mut instances {
+                let dx = x - shadow.rect[0];
+                let dy = y - shadow.rect[1];
+                shadow.gradient_a = [dx + inset, dy + inset, dx + w - inset, dy + h - inset];
+                shadow.stroke_color[3] = 1.0;
+            }
+        }
         let stroke_color = linear_premultiplied(*stroke_color, 255).unwrap_or([0.0; 4]);
         // Gradient stops are shared per draw batch; store them on the
         // compositor's stop buffer at encode time.
@@ -1030,7 +798,7 @@ impl Compiler<'_> {
             stroke_color,
             gradient_a,
             gradient_b,
-            shadow: [0.0; 4],
+            shadow: inline.map_or([0.0; 4], |[_, end]| end),
         };
         self.push_rects(
             instances.into_iter().chain([fill]),
@@ -1056,13 +824,16 @@ impl Compiler<'_> {
         }
         let mut glyphs = Vec::new();
         for run in &shaped.runs {
-            let Some(paint) = run_paint(run, color, span_paints, x, y) else {
+            let Some(paint) = span_paint(run.span_index, run.span_bounds, color, span_paints, x, y)
+            else {
                 continue;
             };
             append_glyphs(&mut glyphs, run, x, y, &paint);
         }
         for line in &shaped.decorations {
-            let Some(paint) = decoration_paint(line, color, span_paints, x, y) else {
+            let Some(paint) =
+                span_paint(line.span_index, line.span_bounds, color, span_paints, x, y)
+            else {
                 continue;
             };
             let rect = [
@@ -1210,7 +981,6 @@ impl Compiler<'_> {
                 corners: corners.map(|shape| shape.fitted(w, h)),
                 transform,
                 mesh: None,
-                path: None,
             });
         }
         self.stack.push(state);
@@ -1277,286 +1047,6 @@ impl Compiler<'_> {
             self.boundary();
         }
     }
-
-    fn canvas(
-        &mut self,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        list: &CanvasList,
-    ) -> Result<(), Status> {
-        if list.ops().is_empty() || !positive_box(x, y, width, height) {
-            return Ok(());
-        }
-        let entry = self.stack.len();
-        let isolated = list.isolation() == CanvasIsolation::Isolated;
-        if isolated {
-            self.push_effect(Effect::Isolation, 1.0, 0.0, None);
-        }
-        self.push_clip(x, y, width, height, 0.0, None);
-        self.push_transform(x, y, 0.0, 1.0, 1.0);
-        let floor = self.stack.len();
-        let ops = list.ops();
-        let stencil = std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() != Ok("0")
-            && !ops.iter().any(|op| matches!(op, CanvasOp::Clip { .. }));
-        if let Some(pool) = self.pool.filter(|_| crate::prepare::path_count(ops) >= 16) {
-            // Canvas paths already contain their local transforms. Save/restore
-            // and the remaining ops leave the enclosing scale unchanged.
-            let tolerance = self.tessellation_tolerance();
-            let prepared: Vec<_> = pool.install(|| {
-                ops.par_iter()
-                    .map(|op| match op {
-                        CanvasOp::Clip { path } if path.verbs.is_empty() => Ok(None),
-                        CanvasOp::Fill { path, .. } => {
-                            prepare_path(path, tolerance, stencil).map(Some)
-                        }
-                        CanvasOp::Clip { path } => prepare_path(path, tolerance, false).map(Some),
-                        _ => Ok(None),
-                    })
-                    .collect()
-            });
-            for (op, buffers) in ops.iter().zip(prepared) {
-                self.canvas_op(op, floor, buffers?)?;
-            }
-        } else {
-            for op in ops {
-                let buffers = match op {
-                    CanvasOp::Fill { path, .. } => {
-                        Some(prepare_path(path, self.tessellation_tolerance(), stencil)?)
-                    }
-                    CanvasOp::Clip { path } if !path.verbs.is_empty() => {
-                        Some(prepare_path(path, self.tessellation_tolerance(), false)?)
-                    }
-                    _ => None,
-                };
-                self.canvas_op(op, floor, buffers)?;
-            }
-        }
-        self.stack.truncate(entry);
-        self.boundary();
-        Ok(())
-    }
-
-    fn mesh(
-        &mut self,
-        brush: Brush,
-        composite: CanvasComposite,
-        prepared: PreparedPath,
-    ) -> Result<Mesh, Status> {
-        let PreparedPath { buffers, stencil } = prepared;
-        let base = u32::try_from(self.vertices.len()).map_err(|_| Status::BadScene)?;
-        let start = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
-        let bounds = mesh_bounds(&buffers.vertices);
-        for index in buffers.indices {
-            self.indices
-                .push(base.checked_add(index).ok_or(Status::BadScene)?);
-        }
-        let end = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
-        self.vertices.extend(buffers.vertices);
-        let stencil_fill = if let Some(rule) = stencil {
-            let base = u32::try_from(self.vertices.len()).map_err(|_| Status::BadScene)?;
-            let [x, y, w, h] = bounds;
-            self.vertices.extend([
-                [x, y, 1.0],
-                [x + w, y, 1.0],
-                [x + w, y + h, 1.0],
-                [x, y + h, 1.0],
-            ]);
-            for index in [0, 1, 2, 0, 2, 3] {
-                self.indices
-                    .push(base.checked_add(index).ok_or(Status::BadScene)?);
-            }
-            let cover_end = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
-            Some(StencilFill {
-                rule,
-                cover_indices: end..cover_end,
-            })
-        } else {
-            None
-        };
-        Ok(Mesh {
-            buffer: Arc::clone(&self.meshes),
-            indices: start..end,
-            stencil_fill,
-            bounds,
-            brush,
-            composite,
-        })
-    }
-
-    fn canvas_op(
-        &mut self,
-        op: &CanvasOp,
-        floor: usize,
-        buffers: Option<PreparedPath>,
-    ) -> Result<(), Status> {
-        match op {
-            CanvasOp::Save => {
-                self.stack.push(self.current().clone());
-                self.boundary();
-            }
-            CanvasOp::Restore => {
-                if self.stack.len() > floor {
-                    self.pop();
-                }
-            }
-            CanvasOp::Clip { path } => {
-                let transform = self.current().transform;
-                if path.verbs.is_empty() {
-                    let clip = &mut self.current_mut().clip;
-                    clip.scissor = Some([0.0; 4]);
-                    clip.hard_scissor = Some([0.0; 4]);
-                } else {
-                    let mesh = self.mesh(
-                        Brush::Solid([1.0; 4]),
-                        CanvasComposite::SourceOver,
-                        buffers.ok_or(Status::BadScene)?,
-                    )?;
-                    self.current_mut().clip.shapes.push(ClipShape {
-                        rect: mesh.bounds,
-                        radius: 0.0,
-                        corners: None,
-                        transform,
-                        mesh: Some(Arc::new(mesh)),
-                        path: Some(path.clone()),
-                    });
-                }
-                self.boundary();
-            }
-            CanvasOp::Fill { paint, .. } => {
-                let brush = match &paint.brush {
-                    CanvasBrush::Color(color) => {
-                        Brush::Solid(linear_premultiplied(*color, paint.alpha).unwrap_or([0.0; 4]))
-                    }
-                    gradient => Brush::Gradient(
-                        pack_canvas_gradient(gradient, paint.alpha).ok_or(Status::BadScene)?,
-                    ),
-                };
-                let mesh = self.mesh(brush, paint.composite, buffers.ok_or(Status::BadScene)?)?;
-                let isolated = paint.composite == CanvasComposite::Multiply
-                    && self.push_canvas_composite(paint.composite);
-                self.push_draw(Draw::Mesh(mesh));
-                if isolated {
-                    self.pop();
-                }
-            }
-            CanvasOp::SolidRect {
-                bounds,
-                radius,
-                color,
-                alpha,
-            } => {
-                let [x, y, w, h] = *bounds;
-                if positive_box(x, y, w, h)
-                    && let Some(color) = linear_premultiplied(*color, *alpha)
-                {
-                    let mut instance = solid_rect(*bounds, color);
-                    instance.radius = radius.clamp(0.0, w.min(h) * 0.5);
-                    self.push_rects([instance], None, BlendKey::SrcOver);
-                }
-            }
-            CanvasOp::Text(text) => {
-                if let Some(shaped) = &text.shaped {
-                    let Some(paint) = canvas_brush(&text.paint.brush, text.paint.alpha, 1.0) else {
-                        return Ok(());
-                    };
-                    let isolated = self.push_canvas_composite(text.paint.composite);
-                    let mut state = self.current().clone();
-                    let squeeze = [
-                        text.compress,
-                        0.0,
-                        0.0,
-                        1.0,
-                        text.anchor_x * (1.0 - text.compress),
-                        0.0,
-                    ];
-                    let transform = compose(state.transform, compose(text.ctm, squeeze));
-                    let transformed = state.transform != transform;
-                    if transformed {
-                        state.transform = transform;
-                        self.stack.push(state);
-                    }
-                    let mut glyphs = Vec::new();
-                    for run in &shaped.runs {
-                        append_glyphs(&mut glyphs, run, text.x, text.y, &paint);
-                    }
-                    if !glyphs.is_empty() {
-                        self.push_draw(Draw::Glyphs(glyphs));
-                    }
-                    if transformed {
-                        self.pop();
-                    }
-                    if isolated {
-                        self.pop();
-                    }
-                }
-            }
-            CanvasOp::Image(image) => {
-                let load = (self.load)(&image.source);
-                match load {
-                    Load::Ready {
-                        width: tex_w,
-                        height: tex_h,
-                        ..
-                    } => {
-                        let Some((rect, uv)) = canvas_image_sample(image, tex_w, tex_h) else {
-                            return Ok(());
-                        };
-                        let blend = BlendKey::from_mode(batch::canvas_composite(image.composite));
-                        let isolated =
-                            blend.is_none() && self.push_canvas_composite(image.composite);
-                        let mut state = self.current().clone();
-                        state.transform = compose(state.transform, image.ctm);
-                        self.stack.push(state);
-                        let alpha = f32::from(image.alpha) / 255.0;
-                        self.remember_image(&image.source, false);
-                        self.push_draw(Draw::Images {
-                            source: Arc::clone(&image.source),
-                            blend: blend.unwrap_or_default(),
-                            instances: vec![ImageInstance {
-                                rect,
-                                uv,
-                                color: [alpha, alpha, alpha, alpha],
-                                flags: batch::IMAGE_BASE_LEVEL
-                                    | if image.smoothing {
-                                        0
-                                    } else {
-                                        batch::IMAGE_NEAREST
-                                    },
-                            }],
-                        });
-                        self.pop();
-                        if isolated {
-                            self.pop();
-                        }
-                    }
-                    Load::Missing => {
-                        if !image
-                            .source
-                            .starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX)
-                        {
-                            self.waiting.push(Arc::clone(&image.source));
-                        }
-                    }
-                    Load::Empty => self.waiting.push(Arc::clone(&image.source)),
-                    Load::Failed => return Err(Status::BadScene),
-                }
-            }
-            CanvasOp::Clear { x, y, w, h, ctm } => {
-                let mut state = self.current().clone();
-                state.transform = compose(state.transform, *ctm);
-                self.stack.push(state);
-                self.push_rects(
-                    [solid_rect([*x, *y, *w, *h], [1.0; 4])],
-                    None,
-                    BlendKey::DstOut,
-                );
-                self.pop();
-            }
-        }
-        Ok(())
-    }
 }
 
 pub fn solid_rect(rect: [f32; 4], color: [f32; 4]) -> RectInstance {
@@ -1575,7 +1065,7 @@ pub fn solid_rect(rect: [f32; 4], color: [f32; 4]) -> RectInstance {
     }
 }
 
-fn pack_glyph_color(color: [f32; 4]) -> [u16; 4] {
+pub(crate) fn pack_glyph_color(color: [f32; 4]) -> [u16; 4] {
     color.map(|component| half::f16::from_f32(component).to_bits())
 }
 
@@ -1606,50 +1096,18 @@ struct RunPaint {
     gradient: Option<Arc<PackedGradient>>,
 }
 
-fn run_paint(
-    run: &ShapedRun,
+fn span_paint(
+    span_index: Option<u32>,
+    mut bounds: [f32; 4],
     color: &[u8; 4],
     span_paints: &[SpanPaint],
     x: f32,
     y: f32,
 ) -> Option<RunPaint> {
-    let span = match run.span_index {
+    let span = match span_index {
         Some(index) => span_paints.get(index as usize)?,
         None => &SpanPaint::Color(*color),
     };
-    let bounds = [
-        x + run.span_bounds[0],
-        y + run.span_bounds[1],
-        run.span_bounds[2],
-        run.span_bounds[3],
-    ];
-    match span {
-        SpanPaint::Color(color) => Some(RunPaint {
-            solid: linear_premultiplied(*color, 255)?,
-            gradient: None,
-        }),
-        SpanPaint::Gradient(gradient) => {
-            let packed = pack_gradient(gradient, bounds[0], bounds[1], bounds[2], bounds[3], 255)?;
-            Some(RunPaint {
-                solid: [1.0; 4],
-                gradient: Some(Arc::new(packed)),
-            })
-        }
-    }
-}
-
-fn decoration_paint(
-    decoration: &engine::scene::DecorationLine,
-    color: &[u8; 4],
-    span_paints: &[SpanPaint],
-    x: f32,
-    y: f32,
-) -> Option<RunPaint> {
-    let span = match decoration.span_index {
-        Some(index) => span_paints.get(index as usize)?,
-        None => &SpanPaint::Color(*color),
-    };
-    let mut bounds = decoration.span_bounds;
     bounds[0] += x;
     bounds[1] += y;
     match span {
@@ -1665,151 +1123,6 @@ fn decoration_paint(
             })
         }
     }
-}
-
-fn canvas_brush(brush: &CanvasBrush, alpha: u8, opacity: f32) -> Option<RunPaint> {
-    let coverage = crate::color::coverage_alpha(alpha, opacity);
-    match brush {
-        CanvasBrush::Color(color) => Some(RunPaint {
-            solid: linear_premultiplied(*color, alpha)?,
-            gradient: None,
-        })
-        .map(|mut paint| {
-            paint.solid = scale_color(paint.solid, opacity);
-            paint
-        }),
-        gradient => {
-            let packed = pack_canvas_gradient(gradient, alpha)?;
-            let solid = [0.0, 0.0, 0.0, coverage];
-            Some(RunPaint {
-                solid,
-                gradient: Some(Arc::new(packed)),
-            })
-        }
-    }
-}
-
-fn canvas_image_sample(
-    image: &engine::scene::CanvasImageOp,
-    width: f32,
-    height: f32,
-) -> Option<([f32; 4], [f32; 4])> {
-    let [x, y, w, h] = image.src.unwrap_or([0.0, 0.0, width, height]);
-    let [dw, dh] = [image.w.unwrap_or(w), image.h.unwrap_or(h)];
-    if !positive_box(x, y, w, h) || !positive_box(image.x, image.y, dw, dh) {
-        return None;
-    }
-    let left = x.max(0.0);
-    let top = y.max(0.0);
-    let right = (x + w).min(width);
-    let bottom = (y + h).min(height);
-    if right <= left || bottom <= top {
-        return None;
-    }
-    let rect = [
-        image.x + (left - x) * dw / w,
-        image.y + (top - y) * dh / h,
-        (right - left) * dw / w,
-        (bottom - top) * dh / h,
-    ];
-    let uv = [left / width, top / height, right / width, bottom / height];
-    Some((rect, uv))
-}
-
-struct PreparedPath {
-    buffers: Tessellation,
-    stencil: Option<engine::scene::FillRule>,
-}
-
-fn prepare_path(path: &CanvasPath, tolerance: f32, stencil: bool) -> Result<PreparedPath, Status> {
-    // Small shapes already tessellate cheaply. A bounded fan lets the GPU
-    // resolve the more complex overlaps without overflowing 8-bit winding.
-    if stencil
-        && path.verbs.len() >= 16
-        && let Some(buffers) = stencil_fan(path, tolerance)
-    {
-        return Ok(PreparedPath {
-            buffers,
-            stencil: Some(path.fill),
-        });
-    }
-    Ok(PreparedPath {
-        buffers: tessellate(path, tolerance)?,
-        stencil: None,
-    })
-}
-
-fn stencil_fan(path: &CanvasPath, tolerance: f32) -> Option<Tessellation> {
-    use lyon_path::{Event, iterator::PathIterator};
-
-    const MAX_TRIANGLES: usize = 255;
-    let mut buffers = Tessellation::new();
-    let geometry = tessellation_path(&path.verbs);
-    let mut first = 0;
-    for event in geometry.iter().flattened(tolerance) {
-        match event {
-            Event::Begin { at } => {
-                first = u32::try_from(buffers.vertices.len()).ok()?;
-                buffers.vertices.push([at.x, at.y, 1.0]);
-            }
-            Event::Line { to, .. } => {
-                let index = u32::try_from(buffers.vertices.len()).ok()?;
-                if index >= first + 2 {
-                    if buffers.indices.len() >= MAX_TRIANGLES * 3 {
-                        return None;
-                    }
-                    buffers.indices.extend([first, index - 1, index]);
-                }
-                buffers.vertices.push([to.x, to.y, 1.0]);
-            }
-            Event::End { .. } => {}
-            Event::Quadratic { .. } | Event::Cubic { .. } => return None,
-        }
-    }
-    (!buffers.indices.is_empty()).then_some(buffers)
-}
-
-/// Tessellates a path in canvas points into position+coverage vertices.
-pub fn tessellate(
-    canvas_path: &CanvasPath,
-    tolerance: f32,
-) -> Result<lyon_tessellation::VertexBuffers<[f32; 3], u32>, Status> {
-    let mut tessellator = lyon_tessellation::FillTessellator::new();
-    let mut buffers: lyon_tessellation::VertexBuffers<[f32; 3], u32> =
-        lyon_tessellation::VertexBuffers::new();
-    let path = tessellation_path(&canvas_path.verbs);
-    let result = tessellator.tessellate_path(
-        &path,
-        &lyon_tessellation::FillOptions::tolerance(tolerance)
-            .with_fill_rule(lyon_fill_rule(canvas_path.fill)),
-        &mut lyon_tessellation::BuffersBuilder::new(
-            &mut buffers,
-            |vertex: lyon_tessellation::FillVertex| {
-                let position = vertex.position();
-                [position.x, position.y, 1.0]
-            },
-        ),
-    );
-    result.map_err(|error| {
-        tracing::warn!(target: "impasto::canvas", %error, "path tessellation failed");
-        Status::BadScene
-    })?;
-    Ok(buffers)
-}
-
-pub fn mesh_bounds(vertices: &[[f32; 3]]) -> [f32; 4] {
-    let mut min = [f32::INFINITY; 2];
-    let mut max = [f32::NEG_INFINITY; 2];
-    for vertex in vertices {
-        min[0] = min[0].min(vertex[0]);
-        min[1] = min[1].min(vertex[1]);
-        max[0] = max[0].max(vertex[0]);
-        max[1] = max[1].max(vertex[1]);
-    }
-    if min[0].is_infinite() {
-        return [0.0; 4];
-    }
-    [min[0], min[1], max[0] - min[0], max[1] - min[1]]
 }
 
 /// Analytic box shadow: one quad grown by the blur margin.
@@ -1935,6 +1248,32 @@ pub fn apply(transform: Affine, x: f32, y: f32) -> (f32, f32) {
 }
 
 /// `outer ∘ inner`: apply `inner` first, then `outer`.
+pub(crate) fn paint_slot_rect(slot: engine::scene::PaintSlot) -> Option<RectInstance> {
+    let [x, y, w, h] = slot.bounds;
+    if !positive_box(x, y, w, h) {
+        return None;
+    }
+    let color = linear_premultiplied(slot.color, 255);
+    let stroke = slot.stroke_width.is_finite() && slot.stroke_width > 0.0;
+    if color.is_none() && !stroke {
+        return None;
+    }
+    let has_fill = color.is_some();
+    let mut rect = solid_rect(slot.bounds, color.unwrap_or([0.0; 4]));
+    rect.radius = clamped_radius(slot.radius, w, h);
+    rect.corners = slot.corners.map(|shape| shape.fitted(w, h));
+    if stroke {
+        rect.kind = if has_fill {
+            RECT_FILL_STROKE
+        } else {
+            RECT_STROKE
+        };
+        rect.stroke_width = slot.stroke_width;
+        rect.stroke_color = linear_premultiplied(slot.stroke_color, 255).unwrap_or([0.0; 4]);
+    }
+    Some(rect)
+}
+
 pub fn layer_transform(kind: &engine::scene::LayerKind) -> Affine {
     use engine::scene::LayerKind;
     match *kind {

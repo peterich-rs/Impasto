@@ -20,6 +20,7 @@ pub struct Path2D {
     path: BezPath,
     generation: u64,
     segments: usize,
+    svg_asset: bool,
 }
 
 impl Default for Path2D {
@@ -34,6 +35,7 @@ impl Path2D {
             path: BezPath::new(),
             generation: 1,
             segments: 0,
+            svg_asset: false,
         }
     }
 
@@ -42,6 +44,7 @@ impl Path2D {
             path: other.path.clone(),
             generation: 1,
             segments: other.segments,
+            svg_asset: other.svg_asset,
         }
     }
 
@@ -55,6 +58,7 @@ impl Path2D {
             path,
             generation: 1,
             segments,
+            svg_asset: true,
         }
     }
 
@@ -64,6 +68,10 @@ impl Path2D {
 
     pub fn segments(&self) -> usize {
         self.segments
+    }
+
+    pub(crate) fn svg_asset(&self) -> bool {
+        self.svg_asset && self.segments <= 128
     }
 
     pub(crate) fn path(&self) -> &BezPath {
@@ -267,6 +275,7 @@ impl Path2D {
 
     fn bump(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.svg_asset = false;
     }
 
     fn reserve_segments(&self, count: usize) -> Result<(), CanvasError> {

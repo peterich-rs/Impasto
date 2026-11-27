@@ -1,9 +1,16 @@
 // Analytic rectangles and tessellated paths in linear premultiplied color.
-override two_dimensional_shadow: bool = false;
 override circular_shadow: bool = false;
 override output_dither: bool = false;
+override unclipped: bool = false;
 @group(1) @binding(0) var clip_mask_tex: texture_2d<f32>;
 @group(1) @binding(1) var clip_mask_sampler: sampler;
+
+fn geometry_aa(local: vec2<f32>, width: f32) -> f32 {
+    if width > 0.0 {
+        return width;
+    }
+    return max(length(dpdx(local)) + length(dpdy(local)), 1e-6) * 0.5;
+}
 
 struct RectVertex {
     @location(1) rect: vec4<f32>,
@@ -11,7 +18,7 @@ struct RectVertex {
     @location(3) color: vec4<f32>,
     @location(4) opacity: f32,
     @location(5) paint_index: u32,
-    @location(6) depth: f32,
+    @location(6) depth: u32,
     @location(7) curve: f32,
 };
 
@@ -24,6 +31,7 @@ struct VertexOut {
     @location(4) @interpolate(flat) opacity: f32,
     @location(5) @interpolate(flat) paint_index: u32,
     @location(6) @interpolate(flat) curve: f32,
+    @location(8) @interpolate(flat) aa: f32,
 };
 
 fn vertex_out(data: RectVertex, p: vec3<f32>) -> VertexOut {
@@ -36,6 +44,7 @@ fn vertex_out(data: RectVertex, p: vec3<f32>) -> VertexOut {
     out.opacity = data.opacity;
     out.paint_index = data.paint_index;
     out.curve = data.curve;
+    out.aa = view.target_info.z;
     return out;
 }
 
@@ -58,6 +67,7 @@ struct SolidOut {
     @location(0) local: vec2<f32>,
     @location(1) @interpolate(flat) half_radius: vec3<f32>,
     @location(2) @interpolate(flat) color: vec4<f32>,
+    @location(4) @interpolate(flat) aa: f32,
 };
 
 @vertex
@@ -65,22 +75,16 @@ fn vs_solid(@builtin(vertex_index) vertex: u32, data: RectVertex) -> SolidOut {
     let p = rect_point(vertex, data);
     let half = data.rect.zw * 0.5;
     return SolidOut(view.transform * vec4(p, 0.0, 1.0),
-        p - (data.rect.xy + half), vec3(half, data.shape.x), data.color * data.opacity);
-}
-
-@vertex
-fn vs_depth_solid(@builtin(vertex_index) vertex: u32, data: RectVertex) -> SolidOut {
-    let p = rect_point(vertex, data);
-    let half = data.rect.zw * 0.5;
-    return SolidOut(view.transform * vec4(p, data.depth, 1.0),
-        p - (data.rect.xy + half), vec3(half, data.shape.x), data.color * data.opacity);
+        p - (data.rect.xy + half), vec3(half, data.shape.x), data.color * data.opacity, view.target_info.z);
 }
 
 @fragment
 fn fs_solid(in: SolidOut) -> @location(0) vec4<f32> {
-    let aa = max(length(dpdx(in.local)) + length(dpdy(in.local)), 1e-6) * 0.5;
+    let aa = geometry_aa(in.local, in.aa);
     let d = sd_rounded_box(in.local, in.half_radius.xy, in.half_radius.z);
-    return in.color * clamp(0.5 - d / aa, 0.0, 1.0) * clip_coverage(in.position.xy);
+    let color = in.color * clamp(0.5 - d / aa, 0.0, 1.0);
+    if unclipped { return color; }
+    return color * clip_coverage(in.position.xy);
 }
 
 @vertex
@@ -192,8 +196,39 @@ struct ShadowOut {
 
 @vertex
 fn vs_shadow(@builtin(vertex_index) vertex: u32, data: RectVertex) -> ShadowOut {
-    let p = rect_point(vertex, data);
     let extra = load_paint(data.paint_index);
+    let margin = vec2(1.0 / max(view.info.x, 0.001));
+    let outer_min = data.rect.xy - margin;
+    let outer_max = data.rect.xy + data.rect.zw + margin;
+    var hole_min = outer_max;
+    var hole_max = outer_max;
+    // A fractional mask makes even an opaque fill translucent. Restrict
+    // the hole to full coverage using the local width of a pixel.
+    if extra.stroke.w > 0.0 && data.opacity == 1.0 && view.info.y == 0.0 && view.info.z == 0.0 &&
+        view.target_info.z > 0.0 {
+        let pixel = vec2(view.target_info.z);
+        let candidate_min = clamp(data.rect.xy + extra.geometry.xy + pixel, outer_min, outer_max);
+        let candidate_max = clamp(data.rect.xy + extra.geometry.zw - pixel, candidate_min, outer_max);
+        let span = candidate_max - candidate_min;
+        let outer = outer_max - outer_min;
+        if span.x * span.y > 0.2 * outer.x * outer.y {
+            hole_min = candidate_min;
+            hole_max = candidate_max;
+        }
+    }
+    var low = outer_min;
+    var high = vec2(outer_max.x, hole_min.y);
+    switch (vertex / 6u) {
+        case 1u: { low = vec2(outer_min.x, hole_max.y); high = outer_max; }
+        case 2u: { low = vec2(outer_min.x, hole_min.y); high = vec2(hole_min.x, hole_max.y); }
+        case 3u: { low = vec2(hole_max.x, hole_min.y); high = vec2(outer_max.x, hole_max.y); }
+        default: {}
+    }
+    let corners = array(
+        vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+        vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0),
+    );
+    let p = mix(low, high, corners[vertex % 6u]);
     let sigma = max(extra.shadow.w, 0.0);
     let half = data.rect.zw * 0.5 - vec2(3.0 * sigma);
     let r = clamp(data.shape.x + extra.shadow.z, 0.0, max(0.0, min(half.x, half.y)));
@@ -215,15 +250,12 @@ fn shadow_alpha(in: ShadowOut) -> f32 {
     let curve = in.shape.y;
     let shaped = !circular_shadow && in.shape.z != 0.0;
     let halo = 3.0 * sigma;
-    if !two_dimensional_shadow || sigma < 0.3 {
+    if sigma < 0.3 {
         var distance = sd_rounded_box(q, half, r);
         if shaped {
             distance = sd_shaped_box(q, half, radii, curve);
         }
-        if sigma < 0.3 {
-            return select(0.0, 1.0, distance <= 0.0);
-        }
-        return 0.5 + 0.5 * erf(-distance * 0.70710678 / sigma);
+        return select(0.0, 1.0, distance <= 0.0);
     }
 
     let inv = 0.70710678 / sigma;
@@ -262,7 +294,7 @@ fn fs_shadow(in: ShadowOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let data = in;
-    let aa = max(length(dpdx(in.local_coverage.xy)) + length(dpdy(in.local_coverage.xy)), 1e-6) * 0.5;
+    let aa = geometry_aa(in.local_coverage.xy, in.aa);
     let p = in.local_coverage.xy;
     let extra = load_paint(data.paint_index);
     let kind = u32(data.shape.z);
@@ -282,7 +314,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let coverage = clamp(0.5 - d / aa, 0.0, 1.0);
             var brush = data.color;
             if ((u32(data.shape.w) & 1u) != 0u) {
-                brush = paint_gradient(extra, p);
+                brush = paint_gradient(extra, p, data.color);
             }
             color = brush * coverage;
         }
@@ -295,8 +327,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
     }
 
-    color = color * clip_coverage(in.position.xy) * data.opacity;
-    if output_dither && view.info.w > 0.0 && color.a >= 1.0 && (u32(data.shape.w) & 1u) != 0u {
+    if !unclipped {
+        color = color * clip_coverage(in.position.xy);
+    }
+    color = color * data.opacity;
+    if output_dither && color.a >= 1.0 && (u32(data.shape.w) & 1u) != 0u {
         let peak = max(color.r, max(color.g, color.b));
         // Fade out dark-gradient dithering where the linear channels are bright.
         if peak < 0.65 {
@@ -311,39 +346,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 fn fs_mesh(in: VertexOut) -> @location(0) vec4<f32> {
     var color = in.color;
     if ((u32(in.shape.w) & 1u) != 0u) {
-        color = paint_gradient(load_paint(in.paint_index), in.local_coverage.xy) * in.opacity;
+        color = paint_gradient(load_paint(in.paint_index), in.local_coverage.xy, in.color) * in.opacity;
     }
     return color * in.local_coverage.z * clip_coverage(in.position.xy);
-}
-
-
-struct DepthOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) @interpolate(flat) color: vec4<f32>,
-};
-
-@vertex
-fn vs_depth_rect(@builtin(vertex_index) vertex: u32, data: RectVertex) -> DepthOut {
-    let corners = array<vec2<f32>, 6>(
-        vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
-        vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0),
-    );
-    let scene = data.rect.xy + corners[vertex] * data.rect.zw;
-    return DepthOut(view.transform * vec4(scene, data.depth, 1.0), data.color);
-}
-
-@fragment
-fn fs_depth_rect(in: DepthOut) -> @location(0) vec4<f32> {
-    return in.color;
-}
-
-
-@vertex
-fn vs_stencil(@location(0) vertex: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return view.transform * vec4(vertex.xy, 0.0, 1.0);
-}
-
-@fragment
-fn fs_stencil() -> @location(0) vec4<f32> {
-    return vec4(0.0);
 }

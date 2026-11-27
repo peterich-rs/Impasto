@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onCleanup } from "solid-js";
+import { createSignal, For, Show, onCleanup, untrack } from "solid-js";
 import { onFrame, requestFrame } from "@impasto/solid-renderer";
 import { Column, Dialog, Row, Sheet, View } from "@impasto/solid-ui";
 import type { Router } from "@impasto/solid-router";
@@ -30,36 +30,42 @@ function OrderTicket(props: { engine: QuoteEngine; symbol: string; seed: TicketS
   onCleanup(stop);
   requestFrame();
   const account = accountRef();
-  const instrument = props.engine.ins(props.symbol);
-  const [side, setSide] = createSignal(props.seed.side);
+  // A mounted ticket keeps its instrument and seeds the editable draft once.
+  const { engine, symbol, seed } = untrack(() => ({
+    engine: props.engine,
+    symbol: props.symbol,
+    seed: props.seed,
+  }));
+  const instrument = engine.ins(symbol);
+  const [side, setSide] = createSignal(seed.side);
   const [type, setType] = createSignal<OrderType>("limit");
-  const [cents, setCents] = createSignal(Math.round(props.seed.price * 100));
+  const [cents, setCents] = createSignal(Math.round(seed.price * 100));
   const lotSize = (size: number) => Math.ceil(size / instrument.lot) * instrument.lot;
   const quantities = [...new Set(sizes.map(lotSize))];
   const [qty, setQty] = createSignal(lotSize(500));
   const [review, setReview] = createSignal(false);
   const [reviewPrice, setReviewPrice] = createSignal(0);
   const [error, setError] = createSignal("");
-  const last = () => { marketPulse(); return props.engine.quote(props.symbol).last; };
+  const last = () => { marketPulse(); return engine.quote(symbol).last; };
   const price = () => type() === "market" ? last() : cents() / 100;
   const amount = () => (review() ? reviewPrice() : price()) * qty();
   const fee = () => account.feeOf(amount());
-  const balance = () => side() === "buy" ? account.availableCash() : account.availableHolding(props.symbol);
+  const balance = () => side() === "buy" ? account.availableCash() : account.availableHolding(symbol);
   const percent = () => side() === "buy" ? (amount() + fee()) / Math.max(balance(), 1) : qty() / Math.max(balance(), 1);
   const submit = () => {
     const quote = price();
-    const result = account.submit(props.symbol, side(), type(), quote, qty());
+    const result = account.submit(symbol, side(), type(), quote, qty());
     if (!result.ok) {
       setError(result.reason);
       return;
     }
-    showToast(loc(`${sideLabel(side())} ${code(props.symbol)} · 已提交模拟订单`, `${sideLabel(side())} ${code(props.symbol)} · Paper order placed`));
+    showToast(loc(`${sideLabel(side())} ${code(symbol)} · 已提交模拟订单`, `${sideLabel(side())} ${code(symbol)} · Paper order placed`));
     props.onClose();
   };
 
   return <Column style={{ gap: 10, padding: 16, minWidth: 0 }}>
     <Row style={{ alignItems: "center", gap: 8 }}>
-      <Label size={20} weight={600} style={{ flex: 1 }}>{`${sideLabel(side())} ${code(props.symbol)}`}</Label>
+      <Label size={20} weight={600} style={{ flex: 1 }}>{`${sideLabel(side())} ${code(symbol)}`}</Label>
       <Label size={11} color={colors.faint}>{loc("模拟下单", "Paper order")}</Label>
       <Glyph name="close" title={loc("关闭", "Close")} onClick={props.onClose} size={18} color={colors.dim} style={{ backgroundColor: "#00000000" }} />
     </Row>

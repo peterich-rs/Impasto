@@ -58,6 +58,7 @@ fn launch(open_url: Option<OpenUrl>) -> Result<(), app::RunError> {
             loaded.dump_list,
             loaded.url,
             open_url,
+            &loaded.title,
         )
     })
 }
@@ -68,6 +69,7 @@ struct Loaded {
     font: Vec<u8>,
     dump_list: bool,
     url: Option<String>,
+    title: String,
 }
 
 fn load() -> anyhow::Result<Loaded> {
@@ -100,6 +102,7 @@ fn load() -> anyhow::Result<Loaded> {
         font,
         dump_list: paths.dump_list,
         url: paths.url,
+        title: paths.title,
     })
 }
 
@@ -109,6 +112,7 @@ struct Paths {
     script: Option<PathBuf>,
     dump_list: bool,
     url: Option<String>,
+    title: String,
 }
 
 impl Paths {
@@ -134,6 +138,7 @@ impl Paths {
         });
         let mut dump_list = false;
         let mut url = None;
+        let mut title = bundle_title().unwrap_or_else(|| "Impasto".to_owned());
         let mut positional = 0u8;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -142,6 +147,10 @@ impl Paths {
                     anyhow::bail!("--js needs a script path");
                 };
                 script = Some(PathBuf::from(path));
+                continue;
+            }
+            if arg == "--title" {
+                title = args.next().context("--title needs a window title")?;
                 continue;
             }
             if arg == "--dump-list" {
@@ -167,8 +176,23 @@ impl Paths {
             script,
             dump_list,
             url,
+            title,
         })
     }
 }
 
 pub use embedder::install_plugins;
+
+fn bundle_title() -> Option<String> {
+    use objc2_foundation::{NSBundle, NSString};
+    let bundle = NSBundle::mainBundle();
+    ["CFBundleDisplayName", "CFBundleName"]
+        .into_iter()
+        .find_map(|key| {
+            bundle
+                .objectForInfoDictionaryKey(&NSString::from_str(key))?
+                .downcast::<NSString>()
+                .ok()
+                .map(|value| value.to_string())
+        })
+}

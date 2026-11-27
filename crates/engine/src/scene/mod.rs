@@ -26,12 +26,15 @@ pub use command::{Command, DrawList, RectPaint};
 pub use compositor_track::{
     CompositorBlockReason, CompositorEligibility, CompositorProp, CompositorSample,
     CompositorSnapshot, CompositorTrack, CompositorTrackId, CompositorTransform,
-    apply_compositor_samples,
+    apply_compositor_samples, compositor_layer_samples,
 };
 pub(crate) use compositor_track::{compositor_alpha, list_scroll_prediction};
 pub use corners::CornerShape;
 pub use image::ContentMode;
-pub use layer::{Layer, LayerId, LayerKind, LayerTree, Picture, PictureId, SELF_PICTURE};
+pub use layer::{
+    Layer, LayerId, LayerKind, LayerTree, PaintSlot, Picture, PictureId, PictureUpdate,
+    SELF_PICTURE, SceneChanges, SceneDelta,
+};
 pub use paint::{
     BackdropMaterial, BlendMode, BoxShadow, ColorMatrix, ColorSpace, ColorStop, Gradient, Shadow,
 };

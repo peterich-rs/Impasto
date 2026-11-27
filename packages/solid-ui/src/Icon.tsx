@@ -1,4 +1,5 @@
 import { Stack as HostStack } from "@impasto/solid-renderer/host";
+import { untrack } from "solid-js";
 import { directionFor, type NodeHandle } from "@impasto/solid-renderer";
 import { Canvas } from "./Canvas.tsx";
 import { bindBox, eventsOf } from "./element.tsx";
@@ -8,7 +9,7 @@ import { useTheme } from "./use-theme.ts";
 /** Graphic container. `mirror` flips the horizontal scale in RTL; it does not load an icon font. */
 export function Icon(props: IconProps): NodeHandle {
   const theme = useTheme();
-  if (props.asset) {
+  if (untrack(() => props.asset)) {
     const canvas: CanvasProps = {
       get children() { return undefined; },
       get style() {

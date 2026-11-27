@@ -385,9 +385,6 @@ mod p0;
 
 #[test]
 fn odd_image_mips_average_linear_premultiplied_texels() {
-    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("cpu") {
-        return;
-    }
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };
@@ -422,23 +419,7 @@ fn odd_image_mips_average_linear_premultiplied_texels() {
         })
         .unwrap();
     let stats = raster.submit_stats().image_upload;
-    assert_eq!(
-        stats.render_passes + stats.compute_passes,
-        levels,
-        "{stats:?}"
-    );
-    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("compute")
-        && raster.device.as_ref().unwrap().gpu.caps.has_compute
-    {
-        let feature =
-            wgpu::TextureFormat::Rgba16Float.guaranteed_format_features(wgpu::Features::empty());
-        if feature
-            .flags
-            .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
-        {
-            assert_eq!(stats.compute_passes, levels, "{stats:?}");
-        }
-    }
+    assert_eq!(stats.render_passes, levels, "{stats:?}");
     let pixel = raster.render_rgba(PixelSize::new(1, 1)).unwrap();
     assert!(
         pixel[0] >= 250 && pixel[1] == 0 && pixel[2] == 0 && pixel[3].abs_diff(28) <= 1,
@@ -447,36 +428,76 @@ fn odd_image_mips_average_linear_premultiplied_texels() {
 }
 
 #[test]
-fn compute_blur_writes_bounded_output_and_counts_both_axes() {
-    if std::env::var("IMPASTO_COMPUTE_BLUR").as_deref() != Ok("1") {
-        return;
-    }
+fn three_texel_mip_keeps_the_two_edge_texels() {
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };
-    let size = PixelSize::new(64, 64);
+    let mut pixels = [[0; 4]; 192];
+    pixels[..64].fill([255, 0, 0, 255]);
+    let scene = tree(
+        1,
+        [Command::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            source: Arc::from("left-third"),
+            mode: ContentMode::Fill,
+            required: true,
+        }],
+    );
+    raster
+        .submit_layers(&scene, 1.0, |_| {
+            Some(ImagePixels {
+                width: 192,
+                height: 1,
+                rgba: pixels.as_flattened(),
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        raster.render_rgba(PixelSize::new(1, 1)).unwrap(),
+        [255, 0, 0, 85]
+    );
+}
+
+#[test]
+fn compute_blur_writes_bounded_output_and_counts_both_axes() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let size = PixelSize::new(112, 104);
     let scene = tree(
         1,
         [
             Command::PushBlur {
                 x: 16.0,
                 y: 16.0,
-                w: 32.0,
-                h: 32.0,
+                w: 79.0,
+                h: 71.0,
                 sigma: 3.0,
             },
-            rect([16.0, 16.0, 32.0, 32.0], [255; 4]),
+            rect([16.0, 16.0, 79.0, 71.0], [5, 5, 5, 255]),
             Command::Pop,
         ],
     );
     raster.submit_layers(&scene, 1.0, |_| None).unwrap();
     let image = raster.render_rgba(size).unwrap();
     let stats = raster.submit_stats().render;
-    if raster.device.as_ref().unwrap().gpu.caps.has_compute {
+    let gpu = &raster.device.as_ref().unwrap().gpu;
+    if gpu.caps.has_compute
+        && gpu
+            .caps
+            .downlevel_flags
+            .contains(wgpu::DownlevelFlags::VIEW_FORMATS)
+    {
         assert_eq!(stats.compute_passes, 2, "{stats:?}");
     }
-    assert_eq!(pixel(&image, 64, 0, 0), [0; 4]);
-    assert_eq!(pixel(&image, 64, 32, 32), [255; 4]);
+    assert_eq!(pixel(&image, 112, 0, 0), [0; 4]);
+    assert_eq!(pixel(&image, 112, 55, 51), [5, 5, 5, 255]);
+    let alpha = |x, y| pixel(&image, 112, x, y)[3];
+    assert_eq!(alpha(15, 51), alpha(55, 15));
+    assert_eq!(alpha(95, 51), alpha(55, 87));
 }
 
 #[test]
@@ -532,3 +553,121 @@ fn staged_texture_replacements_are_published_only_after_valid_submission() {
 }
 
 mod gpu_extensions;
+
+#[test]
+fn retained_paint_slots_change_pixels_without_picture_compilation() {
+    use engine::scene::SceneChanges;
+    use engine::text::MonoShaper;
+    use engine::tree::Tree;
+
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut ui = Tree::new(MonoShaper::default());
+    let rect = ui.decorated([255, 0, 0, 255], 0.0).unwrap();
+    ui.set_size(rect, 20.0, 20.0).unwrap();
+    ui.layout().unwrap();
+    ui.record_layers().unwrap();
+    ui.clear_paint();
+    ui.set_color(rect, [0, 255, 0, 255]).unwrap();
+    ui.record_layers().unwrap();
+    ui.clear_paint();
+    let base = ui.layer_tree();
+    raster.submit_layers(&base, 1.0, |_| None).unwrap();
+    let size = PixelSize::new(64, 64);
+    let green = raster.render_rgba(size).unwrap();
+    assert_eq!(&green[(4 * 64 + 4) * 4..][..4], &[0, 255, 0, 255]);
+
+    ui.set_color(rect, [0, 0, 255, 255]).unwrap();
+    ui.record_layers().unwrap();
+    let delta = ui.take_scene_delta().unwrap();
+    assert_eq!(delta.changes, SceneChanges::LayerValues);
+    assert_eq!(ui.layer_record_visits(), 0);
+    let next = Arc::new(ui.layer_tree());
+    let stats = raster
+        .submit_layer_delta(&next, 1.0, &delta)
+        .unwrap()
+        .unwrap()
+        .stats;
+    assert_eq!(stats.picture_rebuilt, 0);
+    assert!(matches!(stats.damage, crate::DamageRect::Rect(_)));
+    let blue = raster.render_rgba(size).unwrap();
+    assert_eq!(&blue[(4 * 64 + 4) * 4..][..4], &[0, 0, 255, 255]);
+    assert!(
+        raster
+            .submit_layer_delta(&next, 1.0, &delta)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn reusable_canvas_path_keeps_even_odd_holes_through_transforms() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let asset = CanvasPath {
+        verbs: Arc::from([
+            PathVerb::Move(0.0, 0.0),
+            PathVerb::Line(20.0, 0.0),
+            PathVerb::Line(20.0, 20.0),
+            PathVerb::Line(0.0, 20.0),
+            PathVerb::Close,
+            PathVerb::Move(6.0, 6.0),
+            PathVerb::Line(14.0, 6.0),
+            PathVerb::Line(14.0, 14.0),
+            PathVerb::Line(6.0, 14.0),
+            PathVerb::Close,
+        ]),
+        fill: FillRule::EvenOdd,
+    };
+    let size = PixelSize::new(64, 64);
+    for (generation, translate, scale) in [(1, 4.0, 1.0), (2, 4.0, 1.0), (3, 10.0, 1.5)] {
+        let transform = [scale, 0.0, 0.0, scale, translate, translate];
+        let mapped = CanvasPath {
+            verbs: asset
+                .verbs
+                .iter()
+                .map(|verb| {
+                    let coord = |value| value * scale + translate;
+                    match *verb {
+                        PathVerb::Move(x, y) => PathVerb::Move(coord(x), coord(y)),
+                        PathVerb::Line(x, y) => PathVerb::Line(coord(x), coord(y)),
+                        other => other,
+                    }
+                })
+                .collect(),
+            fill: asset.fill,
+        };
+        let command = Command::Canvas {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+            list: CanvasList {
+                body: Arc::new(CanvasBody {
+                    ops: Box::new([CanvasOp::Vector {
+                        path: mapped,
+                        asset: asset.clone(),
+                        transform,
+                        paint: CanvasPaint {
+                            brush: CanvasBrush::Color([255, 0, 0, 255]),
+                            alpha: 255,
+                            composite: CanvasComposite::SourceOver,
+                        },
+                    }]),
+                    images: Box::new([]),
+                    isolation: CanvasIsolation::Shared,
+                    bytes: 0,
+                }),
+            },
+        };
+        raster
+            .submit_layers(&tree(generation, [command]), 1.0, |_| None)
+            .unwrap();
+        let pixels = raster.render_rgba(size).unwrap();
+        let (solid, hole) = if generation < 3 { (7, 14) } else { (14, 25) };
+        assert_eq!(pixels[(solid * 64 + solid) * 4 + 3], 255);
+        assert_eq!(pixels[(hole * 64 + hole) * 4 + 3], 0);
+    }
+}

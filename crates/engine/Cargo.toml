@@ -12,6 +12,7 @@ name = "style-types"
 path = "src/bin/style-types.rs"
 
 [features]
+gallery-tests = ["js"]
 default = []
 js = ["dep:rquickjs", "javascript/runtime", "tracing/attributes", "style-binary"]
 style-binary = ["dep:base64", "dep:postcard", "dep:serde"]

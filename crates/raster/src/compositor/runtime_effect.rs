@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytemuck::Zeroable;
 use engine::scene::{BACKDROP_TEXTURE, MAX_SHADER_TEXTURES, ShaderProgramId};
 
-use super::{Coverage, Frame, Image, pipelines};
+use super::{Coverage, DrawPipeline, Frame, Image, pipelines};
 use crate::Status;
 use crate::arena::Extra;
 use crate::compiler::{Affine, PictureBounds};
@@ -51,7 +51,8 @@ impl Frame<'_> {
             .iter()
             .take(MAX_SHADER_TEXTURES)
             .any(|source| source.as_ref() == BACKDROP_TEXTURE)
-            .then(|| self.snapshot(target, area));
+            .then(|| self.snapshot(target, area))
+            .transpose()?;
         let mut params = EffectParams::zeroed();
         let (uniform_words, _) = uniforms.as_chunks::<4>();
         for (value, bytes) in params.uniforms.iter_mut().flatten().zip(uniform_words) {
@@ -68,12 +69,12 @@ impl Frame<'_> {
             }
         }
         let compositor = &mut self.compositor;
-        let mut views = [&compositor.white; MAX_SHADER_TEXTURES];
+        let mut views = std::array::from_fn(|_| compositor.white.clone());
         let mut backdrops = [false; MAX_SHADER_TEXTURES];
         for (index, source) in textures.iter().take(MAX_SHADER_TEXTURES).enumerate() {
             if source.as_ref() == BACKDROP_TEXTURE {
                 if let Some(backdrop) = &backdrop {
-                    views[index] = &backdrop.view;
+                    views[index] = backdrop.view.clone();
                     backdrops[index] = true;
                     params.mappings[index] = backdrop.uv_bounds();
                     params.sample_modes[index] = 1;
@@ -81,14 +82,59 @@ impl Frame<'_> {
             } else if let Some(image) = self.scene.textures.get(source)
                 && image.nv12().is_none()
             {
-                views[index] = image.view();
+                views[index] = image.view().clone();
                 params.mappings[index] = [0.0, 0.0, 1.0, 1.0];
                 params.sample_modes[index] = if image.premultiplied_srgb { 2 } else { 1 };
             }
         }
+        let material = self.runtime_texture_group(views, backdrops);
+        let time = if program.animated {
+            self.compositor.effect_seconds
+        } else {
+            0.0
+        };
+        let view = self.geometry_uniform(target, transform, clip, time)?;
+        let uniforms = self.uniform(&params)?;
+        let globals = self.globals(view, Extra::RuntimeEffect(uniforms));
+        let mask = self.mask_group(clip);
+
+        // Normal draws share the enclosing render pass. During a capture the
+        // effect gets timestamp boundaries so its cost can be attributed.
+        let measuring = self.capture.is_some() && !(self.late_acquire && target.view == self.root);
+        if measuring {
+            self.flush_target(&target.view);
+        }
+        self.read_mask(target, clip);
+        self.record(
+            target,
+            DrawPipeline::Runtime(pipeline),
+            globals,
+            material,
+            Some(mask),
+            &[bounds],
+            clip.scissor,
+            6,
+        )?;
+        if measuring {
+            self.pending_pass(target).shader = Some(id);
+        }
+        if measuring || backdrop.is_some() {
+            self.flush_target(&target.view);
+        }
+        if let Some(backdrop) = backdrop {
+            self.release(backdrop);
+        }
+        Ok(())
+    }
+    pub(super) fn runtime_texture_group(
+        &mut self,
+        views: [wgpu::TextureView; MAX_SHADER_TEXTURES],
+        backdrops: [bool; MAX_SHADER_TEXTURES],
+    ) -> wgpu::BindGroup {
+        let compositor = &mut self.compositor;
         let cached = compositor
             .runtime_texture_groups
-            .entry(views.map(Clone::clone))
+            .entry(views)
             .or_insert_with_key(|views| {
                 compositor.render_stats.bind_groups_created += 1;
                 TextureGroup {
@@ -108,41 +154,6 @@ impl Frame<'_> {
                 }
             });
         cached.used = true;
-        let material = cached.group.clone();
-        let time = if program.animated {
-            self.compositor.effect_seconds
-        } else {
-            0.0
-        };
-        let view = self.geometry_uniform(target, transform, clip, time)?;
-        let uniforms = self.uniform(&params)?;
-        let globals = self.globals(view, Extra::RuntimeEffect(uniforms));
-        let mask = self.mask_group(clip);
-
-        // Normal draws share the enclosing render pass. During a capture the
-        // effect gets timestamp boundaries so its cost can be attributed.
-        let measuring = self.capture.is_some();
-        if measuring {
-            self.flush_target(&target.view);
-        }
-        self.record(
-            target,
-            pipeline,
-            globals,
-            material,
-            Some(mask),
-            &[bounds],
-            clip.scissor,
-        )?;
-        if measuring {
-            self.pending_pass(target).shader = Some(id);
-        }
-        if measuring || backdrop.is_some() {
-            self.flush_target(&target.view);
-        }
-        if let Some(backdrop) = backdrop {
-            self.release(backdrop);
-        }
-        Ok(())
+        cached.group.clone()
     }
 }

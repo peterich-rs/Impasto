@@ -10,16 +10,12 @@
 //! source prefix stays visible, then shapes that prefix with the same span
 //! styles. Line boxes, carets, and glyphs all come from the visible layout.
 
-use std::collections::HashMap;
-use std::ops::Range;
 use std::sync::Arc;
 
-use engine::scene::{
-    DecorationLine, PositionedGlyph, ShapedParagraph, ShapedRun, TextAlign, TextOverflow, TextStyle,
-};
+use engine::scene::{TextAlign, TextOverflow, TextStyle};
 use engine::text::{
     Affinity, CanvasMetrics, CanvasTextLayout, Caret, MetricsKey, ParagraphMetrics, Shaper,
-    SpanMetrics, TextLine, TextSize,
+    SpanMetrics, TextSize,
 };
 use parley::style::{FontFamily, FontFamilyName, FontStyle, FontWeight};
 use parley::{
@@ -27,19 +23,29 @@ use parley::{
     StyleProperty, TextWrapMode,
 };
 
+use crate::cache::BudgetCache;
 use crate::fonts::{FontLibrary, ShapeStats};
 use crate::text_index::Utf8ToUtf16;
+
+mod freeze;
+
+use freeze::{freeze_paragraph, read_lines, size_of};
 
 /// Brush: the logical span whose paint colors a run. `None` is the default.
 type SpanBrush = Option<u32>;
 
 const SHAPE_CAP: usize = 2048;
-const FROZEN_CAP: usize = 16;
+const SHAPE_BYTES: usize = 12 * 1024 * 1024;
+const FROZEN_CAP: usize = 4096;
+const FROZEN_BYTES: usize = 16 * 1024 * 1024;
+const CANVAS_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CACHEABLE_TEXT: usize = 4096;
 const CANVAS_SHAPE_CAP: usize = 1024;
 const CANVAS_SHAPE_MAX_BYTES: usize = 256;
 
 #[derive(PartialEq, Eq, Hash)]
-struct CanvasShapeStyle {
+struct CanvasShapeKey {
+    text: Box<str>,
     revision: u64,
     style: TextStyle,
     size: u32,
@@ -71,9 +77,15 @@ struct Frozen {
     source_end: u32,
 }
 
-struct ShapeEntry {
-    shaped: ShapedText,
-    frozen: HashMap<u32, Frozen>,
+#[derive(PartialEq, Eq, Hash)]
+struct FrozenKey {
+    shape: ShapeId,
+    width: u32,
+}
+
+fn estimate_shape_bytes(text: &str, spans: &[SpanMetrics]) -> usize {
+    // Parley layouts also retain runs, clusters and font handles.
+    512 + text.len() * 96 + spans.len() * 192
 }
 
 /// Parley shaper owned by the UI queue.
@@ -81,9 +93,9 @@ pub struct ParleyShaper {
     library: FontLibrary,
     layout: LayoutContext<SpanBrush>,
     fonts: FontContext,
-    shapes: HashMap<ShapeId, ShapeEntry>,
-    canvas_shapes: HashMap<CanvasShapeStyle, HashMap<String, CanvasTextLayout>>,
-    canvas_shape_count: usize,
+    shapes: BudgetCache<ShapeId, Arc<ShapedText>>,
+    frozen_shapes: BudgetCache<FrozenKey, Arc<Frozen>>,
+    canvas_shapes: BudgetCache<CanvasShapeKey, CanvasTextLayout>,
     stats: ShapeStats,
 }
 
@@ -102,9 +114,9 @@ impl ParleyShaper {
             library,
             layout: LayoutContext::new(),
             fonts: FontContext::new(),
-            shapes: HashMap::new(),
-            canvas_shapes: HashMap::new(),
-            canvas_shape_count: 0,
+            shapes: BudgetCache::new(SHAPE_CAP, SHAPE_BYTES),
+            frozen_shapes: BudgetCache::new(FROZEN_CAP, FROZEN_BYTES),
+            canvas_shapes: BudgetCache::new(CANVAS_SHAPE_CAP, CANVAS_BYTES),
             stats: ShapeStats::default(),
         }
     }
@@ -120,14 +132,24 @@ impl ParleyShaper {
         std::mem::take(&mut self.stats)
     }
 
+    /// Releases cached layouts after a host memory-pressure notification.
+    pub fn trim(&mut self) {
+        self.shapes.clear();
+        self.frozen_shapes.clear();
+        self.canvas_shapes.clear();
+    }
+
     /// Registers a face under `family`. Returns `false` when the bytes are
     /// not a font. A changed mapping clears every cached layout.
     pub fn register_shared(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {
         match self.library.register(&mut self.fonts, bytes, family) {
             Ok(_) => {
-                self.shapes.clear();
-                self.canvas_shapes.clear();
-                self.canvas_shape_count = 0;
+                let invalidated =
+                    self.shapes.clear() + self.frozen_shapes.clear() + self.canvas_shapes.clear();
+                self.stats.registration_invalidated = self
+                    .stats
+                    .registration_invalidated
+                    .saturating_add(u32::try_from(invalidated).unwrap_or(u32::MAX));
                 true
             }
             Err(status) => {
@@ -141,26 +163,34 @@ impl ParleyShaper {
         self.register_shared(family, Arc::from(bytes))
     }
 
-    /// Cached shaping, or a fresh one. Does not break lines. Returns
-    /// whether the shaping cache hit.
-    fn ensure_shaped(&mut self, key: &MetricsKey) -> bool {
-        let id = shape_id(&self.library, key);
-        if self.shapes.contains_key(&id) {
-            return true;
+    /// Retrieves or builds the width-independent layout.
+    fn shaped(&mut self, id: &ShapeId) -> (Arc<ShapedText>, bool) {
+        if let Some(shaped) = self.shapes.get(id) {
+            return (Arc::clone(shaped), true);
         }
-        let font_size = f32::from_bits(key.font_size);
-        let (layout, widths) = self.shape(&key.text, &key.style, &key.spans, font_size);
-        if self.shapes.len() >= SHAPE_CAP {
-            self.shapes.clear();
+        self.note_text_size(id.text.len());
+        let font_size = f32::from_bits(id.font_size);
+        let (layout, widths) = self.shape(&id.text, &id.style, &id.spans, font_size);
+        let shaped = Arc::new(ShapedText { layout, widths });
+        if id.text.len() <= MAX_CACHEABLE_TEXT {
+            let evicted = self.shapes.insert(
+                id.clone(),
+                Arc::clone(&shaped),
+                estimate_shape_bytes(&id.text, &id.spans),
+            );
+            self.stats.evicted = self.stats.evicted.saturating_add(evicted);
         }
-        self.shapes.insert(
-            id,
-            ShapeEntry {
-                shaped: ShapedText { layout, widths },
-                frozen: HashMap::new(),
-            },
-        );
-        false
+        (shaped, false)
+    }
+
+    fn note_text_size(&mut self, bytes: usize) {
+        let bucket = match bytes {
+            0..=64 => 0,
+            65..=256 => 1,
+            257..=4096 => 2,
+            _ => 3,
+        };
+        self.stats.size_buckets[bucket] = self.stats.size_buckets[bucket].saturating_add(1);
     }
 
     /// Shapes without line breaks. Whitespace is preserved so the line
@@ -242,25 +272,24 @@ impl ParleyShaper {
         (layout, widths)
     }
 
-    /// Lines and frozen glyphs for one width, cached per width. Returns
-    /// whether the per-width cache hit.
-    fn frozen(&mut self, key: &MetricsKey) -> (Arc<ParagraphMetrics>, bool) {
+    /// Lines and frozen glyphs at the requested width.
+    fn frozen(
+        &mut self,
+        key: &MetricsKey,
+        shape: ShapeId,
+        shaped: &ShapedText,
+    ) -> (Arc<Frozen>, bool) {
         let max_width = f32::from_bits(key.max_width);
-        self.ensure_shaped(key);
-        let id = shape_id(&self.library, key);
-        if let Some(frozen) = self
-            .shapes
-            .get(&id)
-            .and_then(|entry| entry.frozen.get(&key.max_width))
-        {
-            return (Arc::clone(&frozen.metrics), true);
+        let cache_key = FrozenKey {
+            shape,
+            width: key.max_width,
+        };
+        if let Some(frozen) = self.frozen_shapes.get(&cache_key) {
+            return (Arc::clone(frozen), true);
         }
         let font_size = f32::from_bits(key.font_size);
-        let Some(entry) = self.shapes.get_mut(&id) else {
-            unreachable!("ensure_shaped inserted the entry")
-        };
         let (visible, spans, source_end) = visible_prefix(
-            &entry.shaped.layout,
+            &shaped.layout,
             key,
             max_width,
             font_size,
@@ -268,7 +297,7 @@ impl ParleyShaper {
             &mut self.fonts,
         );
         let mut layout = if visible == key.text {
-            entry.shaped.layout.clone()
+            shaped.layout.clone()
         } else {
             let (layout, _) = self.shape(&visible, &key.style, &spans, font_size);
             self.stats.built = self.stats.built.saturating_add(1);
@@ -292,22 +321,21 @@ impl ParleyShaper {
             Some(shaped) => ParagraphMetrics::shaped(size, Arc::from(lines), baseline, shaped),
             None => ParagraphMetrics::with_baseline(size, Arc::from(lines), baseline),
         });
-        let Some(entry) = self.shapes.get_mut(&id) else {
-            unreachable!("ensure_shaped inserted the entry")
-        };
-        if entry.frozen.len() >= FROZEN_CAP {
-            entry.frozen.clear();
+        let frozen = Arc::new(Frozen {
+            metrics,
+            layout,
+            map,
+            source_end,
+        });
+        if key.text.len() <= MAX_CACHEABLE_TEXT {
+            let evicted = self.frozen_shapes.insert(
+                cache_key,
+                Arc::clone(&frozen),
+                estimate_shape_bytes(&visible, &spans) * 2,
+            );
+            self.stats.evicted = self.stats.evicted.saturating_add(evicted);
         }
-        entry.frozen.insert(
-            key.max_width,
-            Frozen {
-                metrics: Arc::clone(&metrics),
-                layout,
-                map,
-                source_end,
-            },
-        );
-        (metrics, false)
+        (frozen, false)
     }
 
     /// The broken layout for caret and word queries.
@@ -316,9 +344,9 @@ impl ParleyShaper {
         key: &MetricsKey,
         read: impl FnOnce(&Layout<SpanBrush>, &Utf8ToUtf16, u32) -> R,
     ) -> Option<R> {
-        self.frozen(key);
-        let entry = self.shapes.get(&shape_id(&self.library, key))?;
-        let frozen = entry.frozen.get(&key.max_width)?;
+        let id = shape_id(&self.library, key);
+        let (shaped, _) = self.shaped(&id);
+        let (frozen, _) = self.frozen(key, id, &shaped);
         Some(read(&frozen.layout, &frozen.map, frozen.source_end))
     }
 }
@@ -468,237 +496,6 @@ fn mark_width(
     layout.width()
 }
 
-/// Converts Parley's lines into Impasto line boxes.
-fn read_lines(
-    layout: &Layout<SpanBrush>,
-    visible: &str,
-    map: &Utf8ToUtf16,
-    source_end: u32,
-) -> Vec<TextLine> {
-    let bytes = visible.as_bytes();
-    let mut lines = Vec::with_capacity(layout.len());
-    for index in 0..layout.len() {
-        let Some(line) = layout.get(index) else {
-            continue;
-        };
-        let metrics = line.metrics();
-        let range = line.text_range();
-        let hard = line.break_reason() == parley::BreakReason::Explicit;
-        let start = map.unit_at(range.start).min(source_end);
-        let trimmed = visible.get(range.clone()).map_or(range.end, |text| {
-            range.start + text.trim_end_matches(['\r', '\n']).len()
-        });
-        let end = map.unit_at(trimmed).min(source_end);
-        let end_with_break = if hard {
-            let mut stop = range.end;
-            if bytes.get(stop) == Some(&b'\r') {
-                stop += 1;
-            }
-            if bytes.get(stop) == Some(&b'\n') {
-                stop += 1;
-            }
-            map.unit_at(stop).min(source_end)
-        } else {
-            end
-        };
-        lines.push(TextLine {
-            start,
-            end,
-            end_with_break,
-            x: metrics.offset,
-            y: metrics.block_min_coord,
-            w: metrics.advance,
-            h: metrics.line_height,
-            hard_break: hard,
-            baseline: metrics.baseline,
-        });
-    }
-    lines
-}
-
-fn size_of(
-    layout: &Layout<SpanBrush>,
-    lines: &[TextLine],
-    max_width: f32,
-    style: &TextStyle,
-) -> TextSize {
-    let widest = layout.width();
-    let width = match style.overflow {
-        TextOverflow::Visible => widest,
-        _ if lines.len() == 1 && widest > max_width => widest,
-        _ => widest.min(max_width),
-    };
-    TextSize {
-        width,
-        height: layout.height(),
-    }
-}
-
-/// Freezes glyphs, runs, and decoration bars into scene data.
-fn freeze_paragraph(
-    layout: &Layout<SpanBrush>,
-    library: &FontLibrary,
-    spans: &[SpanMetrics],
-) -> Option<Arc<ShapedParagraph>> {
-    let mut runs: Vec<ShapedRun> = Vec::new();
-    let mut decorations: Vec<DecorationLine> = Vec::new();
-    let mut faces: HashMap<(*const u8, u32), Arc<engine::scene::FontFaceId>> = HashMap::new();
-    for index in 0..layout.len() {
-        let line = layout.get(index)?;
-        let metrics = line.metrics();
-        let baseline = metrics.baseline;
-        let line_text = line.text_range();
-        let extents = line_span_extents(&line, spans, &line_text);
-        for item in line.items() {
-            let parley::PositionedLayoutItem::GlyphRun(run) = item else {
-                continue;
-            };
-            let style = run.style();
-            let data = run.run().font();
-            let key = (data.data.data().as_ptr(), data.index);
-            let face = match faces.get(&key) {
-                Some(id) => Arc::clone(id),
-                None => {
-                    let id = library.resolve(data);
-                    faces.insert(key, Arc::clone(&id));
-                    id
-                }
-            };
-            let glyphs: Vec<PositionedGlyph> = run
-                .positioned_glyphs()
-                .map(|glyph| PositionedGlyph {
-                    id: u16::try_from(glyph.id).unwrap_or(0),
-                    x: glyph.x,
-                    y: glyph.y,
-                })
-                .collect();
-            if glyphs.is_empty() {
-                continue;
-            }
-            let synthesis = run.run().synthesis();
-            let font_metrics = run.run().font_metrics();
-            let span_index = style.brush;
-            let span_bounds = match span_index {
-                Some(index) => extents
-                    .get(index as usize)
-                    .copied()
-                    .unwrap_or((run.offset(), run.offset() + run.advance())),
-                None => (run.offset(), run.offset() + run.advance()),
-            };
-            let span_bounds = [
-                span_bounds.0,
-                baseline - font_metrics.ascent,
-                span_bounds.1 - span_bounds.0,
-                font_metrics.ascent + font_metrics.descent,
-            ];
-            let size = run.run().font_size();
-            let x = run.offset();
-            let advance = run.advance();
-            runs.push(ShapedRun {
-                face,
-                font_size: size,
-                normalized_coords: run
-                    .run()
-                    .normalized_coords()
-                    .iter()
-                    .map(|coord| coord.to_bits())
-                    .collect(),
-                embolden: synthesis.embolden(),
-                skew_degrees: synthesis.skew(),
-                span_index,
-                span_bounds,
-                glyphs: glyphs.into(),
-            });
-            if let Some(decoration) = &style.underline {
-                decorations.push(decoration_line(
-                    x,
-                    advance,
-                    baseline,
-                    -decoration.offset.unwrap_or(font_metrics.underline_offset),
-                    decoration.size.unwrap_or(font_metrics.underline_size),
-                    span_index,
-                    span_bounds,
-                ));
-            }
-            if let Some(decoration) = &style.strikethrough {
-                decorations.push(decoration_line(
-                    x,
-                    advance,
-                    baseline,
-                    -decoration
-                        .offset
-                        .unwrap_or(font_metrics.strikethrough_offset),
-                    decoration.size.unwrap_or(font_metrics.strikethrough_size),
-                    span_index,
-                    span_bounds,
-                ));
-            }
-        }
-    }
-    if runs.is_empty() {
-        return None;
-    }
-    Some(Arc::new(ShapedParagraph {
-        size: [layout.width(), layout.height()],
-        runs: runs.into(),
-        decorations: decorations.into(),
-    }))
-}
-
-/// Horizontal extent `[x0, x1]` of each span on one line, from the glyph
-/// runs whose text range overlaps the span. Gradients sample this box, so
-/// every run of one span on one line shares the same box and a fallback
-/// font does not restart the gradient.
-fn line_span_extents(
-    line: &parley::Line<'_, SpanBrush>,
-    spans: &[SpanMetrics],
-    line_text: &Range<usize>,
-) -> Vec<(f32, f32)> {
-    let mut extents = vec![(f32::INFINITY, f32::NEG_INFINITY); spans.len()];
-    let mut offsets = Vec::with_capacity(spans.len());
-    let mut offset = 0usize;
-    for span in spans {
-        offsets.push(offset);
-        offset += span.utf8.len();
-    }
-    for item in line.items() {
-        let parley::PositionedLayoutItem::GlyphRun(run) = item else {
-            continue;
-        };
-        let range = run.run().text_range();
-        if range.start >= range.end {
-            continue;
-        }
-        let (x0, x1) = (run.offset(), run.offset() + run.advance());
-        for (index, (start, extent)) in offsets.iter().zip(extents.iter_mut()).enumerate() {
-            let from = (*start).max(line_text.start);
-            let to = (start + spans[index].utf8.len()).min(line_text.end);
-            if from >= to || range.end <= from || range.start >= to {
-                continue;
-            }
-            extent.0 = extent.0.min(x0);
-            extent.1 = extent.1.max(x1);
-        }
-    }
-    extents
-}
-
-fn decoration_line(
-    x: f32,
-    width: f32,
-    baseline: f32,
-    offset: f32,
-    thickness: f32,
-    span_index: Option<u32>,
-    span_bounds: [f32; 4],
-) -> DecorationLine {
-    DecorationLine {
-        rect: [x, baseline + offset - thickness * 0.5, width, thickness],
-        span_index,
-        span_bounds,
-    }
-}
-
 fn empty_metrics(style: &TextStyle, font_size: f32) -> ParagraphMetrics {
     ParagraphMetrics::with_baseline(
         TextSize {
@@ -766,31 +563,27 @@ impl Shaper for ParleyShaper {
                 0.0,
             ));
         }
-        let hit = self.ensure_shaped(key);
+        let id = shape_id(&self.library, key);
+        let (shaped, hit) = self.shaped(&id);
         self.stats.note_shape(hit);
-        let (metrics, hit) = self.frozen(key);
+        let (frozen, hit) = self.frozen(key, id, &shaped);
         self.stats.note_freeze(hit);
-        metrics
+        Arc::clone(&frozen.metrics)
     }
 
     fn intrinsic_width(&mut self, key: &MetricsKey) -> f32 {
-        let hit = self.ensure_shaped(key);
+        let (shaped, hit) = self.shaped(&shape_id(&self.library, key));
         self.stats.note_shape(hit);
-        self.shapes
-            .get(&shape_id(&self.library, key))
-            .map_or(0.0, |entry| entry.shaped.widths.min)
+        shaped.widths.min
     }
 
     fn min_content_metrics(&mut self, key: &MetricsKey) -> (f32, Arc<ParagraphMetrics>) {
-        let hit = self.ensure_shaped(key);
+        let id = shape_id(&self.library, key);
+        let (shaped, hit) = self.shaped(&id);
         self.stats.note_shape(hit);
-        let min = self
-            .shapes
-            .get(&shape_id(&self.library, key))
-            .map_or(0.0, |entry| entry.shaped.widths.min);
-        let (metrics, hit) = self.frozen(key);
+        let (frozen, hit) = self.frozen(key, id, &shaped);
         self.stats.note_freeze(hit);
-        (min, metrics)
+        (shaped.widths.min, Arc::clone(&frozen.metrics))
     }
 
     fn touch(&mut self, _key: &MetricsKey) {}
@@ -891,20 +684,18 @@ impl Shaper for ParleyShaper {
         if !font_size.is_finite() || font_size <= 0.0 {
             return None;
         }
-        let key = (text.len() <= CANVAS_SHAPE_MAX_BYTES).then(|| CanvasShapeStyle {
+        let key = (text.len() <= CANVAS_SHAPE_MAX_BYTES).then(|| CanvasShapeKey {
+            text: text.into(),
             revision: self.library.revision(),
             style: style.clone(),
             size: font_size.to_bits(),
         });
-        if let Some(cached) = key
-            .as_ref()
-            .and_then(|key| self.canvas_shapes.get(key))
-            .and_then(|by_text| by_text.get(text))
-        {
+        if let Some(cached) = key.as_ref().and_then(|key| self.canvas_shapes.get(key)) {
             self.stats.note_shape(true);
             self.stats.note_freeze(true);
             return Some(cached.clone());
         }
+        self.note_text_size(text.len());
         self.stats.note_shape(false);
         self.stats.note_freeze(false);
 
@@ -937,15 +728,10 @@ impl Shaper for ParleyShaper {
             shaped,
         };
         if let Some(key) = key {
-            if self.canvas_shape_count >= CANVAS_SHAPE_CAP {
-                self.canvas_shapes.clear();
-                self.canvas_shape_count = 0;
-            }
-            self.canvas_shapes
-                .entry(key)
-                .or_default()
-                .insert(text.to_owned(), result.clone());
-            self.canvas_shape_count += 1;
+            let evicted = self
+                .canvas_shapes
+                .insert(key, result.clone(), 256 + text.len() * 40);
+            self.stats.evicted = self.stats.evicted.saturating_add(evicted);
         }
         Some(result)
     }
@@ -976,6 +762,30 @@ mod tests {
         };
         shaper.shape_canvas("交易", &rtl, 12.0).unwrap();
         assert_eq!(shaper.take_shape_stats().built, 2);
+    }
+
+    #[test]
+    fn one_use_labels_evict_cold_entries_and_keep_recent_widths() {
+        let mut shaper = ParleyShaper::new(crate::FontLibrary::new());
+        assert!(shaper.register("Sans", crate::tests::ROBOTO));
+        let narrow = key("Hot label", 14.0, 50.0, TextStyle::default());
+        let wide = key("Hot label", 14.0, 150.0, TextStyle::default());
+        let first = shaper.metrics(&narrow);
+        let second = shaper.metrics(&wide);
+        for index in 0..=super::SHAPE_CAP {
+            shaper.metrics(&key(
+                &format!("Cold label {index}"),
+                14.0,
+                150.0,
+                TextStyle::default(),
+            ));
+            assert!(Arc::ptr_eq(&first, &shaper.metrics(&narrow)));
+            assert!(Arc::ptr_eq(&second, &shaper.metrics(&wide)));
+        }
+        let stats = shaper.take_shape_stats();
+        assert!(stats.evicted > 0);
+        assert!(stats.paint_hit > stats.paint_miss);
+        assert!(stats.size_buckets[0] > 0);
     }
 
     #[cfg(target_os = "macos")]

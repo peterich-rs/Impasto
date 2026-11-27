@@ -1,4 +1,5 @@
 import {
+  batch,
   createContext,
   createTrackedEffect,
   createSignal,
@@ -7,7 +8,7 @@ import {
   useContext,
   type Accessor,
 } from "solid-js";
-import { onBack, onFrame, type NodeHandle } from "@impasto/solid-renderer";
+import { onBack, onFrame, onMemoryPressure, SubtreeVisibleContext, type NodeHandle } from "@impasto/solid-renderer";
 import { matchPath, routePath } from "./path.ts";
 export type RouteParams = Record<string, string>;
 export type RouteComponent = (props: { params: RouteParams; phase: RoutePhase }) => NodeHandle;
@@ -29,9 +30,24 @@ export type RouteEntry = {
   lazy?: LazyRouteLoader;
   fallback?: RouteDef["fallback"];
 };
+export type TabOptions = {
+  branches: Readonly<Record<string, string>>;
+  initial: string;
+  retain?: "active-only";
+  /** Maximum number of inactive stacks kept mounted. */
+  maxRetained?: number;
+};
+export type RouterTabs = {
+  active: Accessor<string>;
+  select: (key: string) => boolean;
+  /** Disposes all inactive branches, for example after a memory pressure notification. */
+  trim: () => void;
+};
 export type Router = {
   stack: Accessor<RouteEntry[]>;
   depth: Accessor<number>;
+  tabs?: RouterTabs;
+  retainedStack?: Accessor<RouteEntry[]>;
   push: (path: string) => boolean;
   replace: (path: string) => boolean;
   pop: () => boolean;
@@ -57,14 +73,20 @@ export function usePageFrame(
 ): void {
   const active = useContext(PageActiveContext);
   const keepAlive = useContext(PageKeepContext);
+  const branch = useContext(SubtreeVisibleContext);
   createTrackedEffect(() => {
-    if (keepAlive() && !active()) {
+    if (!branch() || (keepAlive() && !active())) {
       return;
     }
     const stop = onFrame(fn);
     onCleanup(stop);
   });
 }
+/** Whether the current route owns focus and can receive input. */
+export function usePageActive(): Accessor<boolean> {
+  return useContext(PageActiveContext);
+}
+
 function resolved(
   defs: readonly RouteDef[],
   path: string,
@@ -114,13 +136,18 @@ export function createRouter(
   defs: readonly RouteDef[],
   options: {
     initial?: string;
+    tabs?: TabOptions;
     onBack?: () => boolean;
     restoration?: RouteRestoration;
     /** Disable the automatic link handler when the application restores or maps its own routes. */
     linking?: boolean;
   } = {},
 ): Router {
-  const initialPath = options.initial ?? "/";
+  const tabOptions = options.tabs;
+  const tabRoots = new Map(Object.entries(tabOptions?.branches ?? {}).map(
+    ([key, path]) => [key, routePath(path)],
+  ));
+  const initialPath = options.initial ?? tabRoots.get(tabOptions?.initial ?? "") ?? "/";
   const first = resolved(defs, initialPath);
   const restored = options.restoration && restoreRoutes(defs, options.restoration);
   const [entries, setEntries] = createSignal<RouteEntry[]>(
@@ -134,6 +161,11 @@ export function createRouter(
         ]
       : []),
   );
+  const matchedTab = [...tabRoots].find(([, path]) => path === first?.path)?.[0];
+  const [activeTab, setActiveTab] = createSignal(matchedTab ?? tabOptions?.initial ?? "");
+  const retained = new Map<string, RouteEntry[]>();
+  const [inactive, setInactive] = createSignal<RouteEntry[]>([]);
+  let committedKey: string | undefined;
   const [backPreview, setBackPreview] = createSignal<ReturnType<Router["backPreview"]>>(null);
   function navigate(path: string, previousPhase: "cover" | "exit"): boolean {
     const match = resolved(defs, path);
@@ -220,8 +252,48 @@ export function createRouter(
       return next;
     });
   }
+  function selectTab(key: string): boolean {
+    if (key === activeTab()) return tabRoots.has(key);
+    const path = tabRoots.get(key);
+    const match = path === undefined ? null : resolved(defs, path);
+    if (match === null) return false;
+    const next = retained.get(key) ?? [{ ...match, key: nextKey(), phase: "live" as const }];
+    retained.delete(key);
+    const limit = tabOptions?.maxRetained ?? 2;
+    const maxRetained = tabOptions?.retain === "active-only" || !Number.isFinite(limit)
+      ? 0 : Math.max(0, Math.floor(limit));
+    const previous = entries().filter(entry => entry.phase !== "exit");
+    if (maxRetained > 0 && previous.length > 0) {
+      retained.set(activeTab(), previous.map(entry =>
+        entry.phase === "live" ? entry : { ...entry, phase: "live" },
+      ));
+    }
+    for (const oldest of retained.keys()) {
+      if (retained.size <= maxRetained) break;
+      retained.delete(oldest);
+    }
+    batch(() => {
+      if (backPreview()) committedKey = backPreview()?.key;
+      setBackPreview(null);
+      setInactive([...retained.values()].flat());
+      setActiveTab(key);
+      setEntries(next);
+    });
+    return true;
+  }
   const router: Router = {
     stack: entries,
+    ...(tabOptions && {
+      tabs: {
+        active: activeTab,
+        select: selectTab,
+        trim() {
+          retained.clear();
+          setInactive([]);
+        },
+      },
+      retainedStack: () => [...inactive(), ...entries()],
+    }),
     depth: () => entries().length,
     push: (path) => navigate(path, "cover"),
     replace: (path) => navigate(path, "exit"),
@@ -246,7 +318,6 @@ export function createRouter(
       }
     });
   }
-  let committedKey: string | undefined;
   const releasePop = onBack(200, () => {
     const key = committedKey;
     committedKey = undefined;
@@ -261,7 +332,7 @@ export function createRouter(
       } else if (event.phase === "progress") {
         setBackPreview((preview) => preview && { ...preview, progress: event.progress });
       } else {
-        committedKey = event.phase === "commit" ? backPreview()?.key : undefined;
+        committedKey = event.phase === "commit" ? backPreview()?.key ?? committedKey : undefined;
         setBackPreview(null);
       }
     },
@@ -270,7 +341,9 @@ export function createRouter(
   let disposed = false;
   let releaseLinking: (() => void) | undefined;
   if (getOwner()) {
+    const stopMemoryPressure = router.tabs && onMemoryPressure(router.tabs.trim);
     onCleanup(() => {
+      stopMemoryPressure?.();
       disposed = true;
       releasePop();
       releaseApp();

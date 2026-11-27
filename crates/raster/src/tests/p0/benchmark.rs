@@ -91,6 +91,8 @@ pub(super) fn run_in_format(
     format: wgpu::TextureFormat,
 ) {
     let raster = &mut host.raster;
+    raster.set_resource_viewport(Some(size));
+    raster.set_resource_wake(|| {});
     let gpu = raster.device.as_ref().unwrap().gpu.clone();
     let target = output(&gpu, format, size);
     let view = target.create_view(&Default::default());
@@ -110,6 +112,7 @@ pub(super) fn run_in_format(
                 })
             })
             .unwrap();
+        raster.collect_resources();
         let scene_install = prepare.elapsed();
         raster.encode_and_submit(&view, format, size).unwrap();
         let stats = raster.submit_stats();
@@ -133,6 +136,8 @@ pub(super) fn run_in_format(
         });
         let times = [
             ("picture_prepare_us", stats.picture_prepare),
+            ("mask_raster_us", stats.atlas.mask_raster),
+            ("glyph_prepare_us", stats.glyph_prepare),
             ("compose_us", stats.compose),
             ("encode_us", stats.encode),
             ("flush_us", stats.flush),
@@ -175,25 +180,22 @@ pub(super) fn run_in_format(
         let counters = json!({
                 "picture_workers": stats.picture_workers,
                 "prerasterized_glyphs": stats.atlas.prerasterized,
+                "atlas_misses": stats.atlas.misses,
+                "atlas_upload_calls": stats.atlas.upload_calls,
+                "texture_entries": stats.textures,
                 "atlas_region_reclaims": stats.atlas.region_reclaims,
-                "backdrop_cache_hits": r.backdrop_cache_hits,
-                "transition_snapshot_hits": r.transition_snapshot_hits,
-                "transition_snapshot_bakes": r.transition_snapshot_bakes,
                 "occluded_siblings": r.occluded_siblings,
-                "subtree_cache_hits": r.subtree_cache.hits,
-                "subtree_cache_bytes": r.subtree_cache.bytes,
                 "damage_pct": stats.damage.fraction(size) * 100.0,
-                "partial_redraw": r.partial_redraw,
                 "draws": r.draws, "passes": r.passes, "offscreen_passes": r.offscreen_passes,
                 "compute_passes": r.compute_passes, "direct_present": r.direct_present,
                 "buffers_created": r.buffers_created, "bind_groups_created": r.bind_groups_created,
                 "vertex_bytes": r.vertex_bytes, "uniform_bytes": r.uniform_bytes,
                 "stop_bytes": r.stop_bytes, "extra_bytes": r.extra_bytes, "mesh_upload_bytes": r.mesh_upload_bytes,
-                "atlas_upload_bytes": r.atlas_upload_bytes, "gradient_lut_bytes": r.gradient_lut_bytes,
-                "gradient_lut_hits": r.gradient_lut_hits, "copy_pixels": r.copy_pixels,
+                "atlas_upload_bytes": r.atlas_upload_bytes,
+                "copy_pixels": r.copy_pixels,
                 "blur_pixels": r.blur_pixels, "offscreen_alloc_bytes": r.offscreen_alloc_bytes,
                 "offscreen_peak_bytes": r.offscreen_peak_bytes, "pooled_texture_bytes": r.pooled_texture_bytes,
-                "stencil_draws": r.stencil_draws, "early_z_instances": r.early_z_instances,
+                "synchronous_pipeline_compiles": r.synchronous_pipeline_compiles,
                 "transient_bytes": r.transient_bytes,
         });
         samples.push(json!({
@@ -206,7 +208,6 @@ pub(super) fn run_in_format(
             "image_upload": {
                 "source_bytes": stats.image_upload.source_bytes, "temporary_bytes": stats.image_upload.temporary_bytes,
                 "resident_bytes": stats.image_upload.resident_bytes, "render_passes": stats.image_upload.render_passes,
-                "compute_passes": stats.image_upload.compute_passes,
             },
             "counters": counters,
         }));
@@ -218,7 +219,13 @@ pub(super) fn run_in_format(
             let percentile = |p: usize| samples[(samples.len() * p).div_ceil(100) - 1];
             (
                 name,
-                json!({ "samples": samples.len(), "p50": percentile(50), "p95": percentile(95) }),
+                json!({
+                    "samples": samples.len(),
+                    "p50": percentile(50),
+                    "p95": percentile(95),
+                    "p99": percentile(99),
+                    "max": percentile(100),
+                }),
             )
         })
         .collect::<BTreeMap<String, Value>>();

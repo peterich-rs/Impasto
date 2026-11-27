@@ -1,5 +1,8 @@
 //! One native surface. A stale id cannot replace the current one.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use engine::session::Metrics;
 
 use crate::command::{SurfaceId, SurfaceTarget};
@@ -35,6 +38,7 @@ pub enum Ready {
         replaced: Option<SurfaceId>,
     },
     Failed(raster::Status),
+    Stale,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,14 +63,25 @@ struct Open {
 pub struct SurfaceHost {
     current: Option<Open>,
     pending: Option<PendingOpen>,
+    retired: Arc<AtomicU64>,
 }
 
 impl SurfaceHost {
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_gate(Arc::new(AtomicU64::new(0)))
+    }
+
+    pub(crate) fn with_gate(retired: Arc<AtomicU64>) -> Self {
         Self {
             current: None,
             pending: None,
+            retired,
         }
+    }
+
+    fn admits(&self, id: SurfaceId) -> bool {
+        id.0 > self.retired.load(Ordering::Acquire)
     }
 
     /// Attempts already spent on `id`, if a retry is still armed.
@@ -153,7 +168,7 @@ impl SurfaceHost {
     }
 
     pub fn is_open(&self) -> bool {
-        self.current.is_some()
+        self.id().is_some_and(|id| self.admits(id))
     }
 
     #[allow(dead_code, reason = "hosts read the current surface id")]
@@ -168,9 +183,13 @@ impl SurfaceHost {
         open: &mut crate::SurfaceOpener,
     ) -> Ready {
         let id = target.id;
+        if !self.admits(id) || self.id().is_some_and(|current| current.0 > id.0) {
+            return Ready::Stale;
+        }
         let metrics = target.metrics;
         let pixels = target.pixels;
         match open(raster, target) {
+            Ok(_) if !self.admits(id) => Ready::Stale,
             Ok(surface) => {
                 let replaced = self.current.as_ref().map(|open| open.id);
                 self.current = Some(Open {
@@ -228,6 +247,9 @@ impl SurfaceHost {
         raster: &mut raster::Rasterizer,
         views: &[engine::tree::PlatformViewPlacement],
     ) -> Result<Presented, raster::Status> {
+        if !self.is_open() {
+            return Err(raster::Status::NotReady);
+        }
         let Some(open) = self.current.as_mut() else {
             return Err(raster::Status::NotReady);
         };
@@ -239,6 +261,9 @@ impl SurfaceHost {
         &mut self,
         raster: &mut raster::Rasterizer,
     ) -> Result<(), raster::Status> {
+        if !self.is_open() {
+            return Err(raster::Status::NotReady);
+        }
         let open = self.current.as_mut().ok_or(raster::Status::NotReady)?;
         open.surface.recover_device(raster, open.pixels)
     }

@@ -53,6 +53,7 @@ impl Tree {
             layer_epoch: 0,
             canvas_geometry_epoch: 0,
             layers: crate::scene::LayerTree::empty(),
+            retained_layers: Default::default(),
             shader_effects: HashMap::new(),
             semantics_cache: HashMap::new(),
             semantics_order: Vec::new(),
@@ -365,6 +366,15 @@ impl Tree {
     /// A view with pointer listeners participates in target selection.
     pub fn set_pointer_target(&mut self, id: NodeId) -> Result<(), Error> {
         self.node_mut(id)?.role.insert(Role::POINTER);
+        Ok(())
+    }
+
+    pub fn set_zoom_target(&mut self, id: NodeId, enabled: bool) -> Result<(), Error> {
+        if enabled {
+            self.node_mut(id)?.role.insert(Role::POINTER | Role::ZOOM);
+        } else if let Ok(node) = self.node_mut(id) {
+            node.role.remove(Role::ZOOM);
+        }
         Ok(())
     }
 
@@ -855,6 +865,7 @@ impl Tree {
         if let Some(generation) = generation {
             let id = NodeId { index, generation };
             self.remove_shader_effect(id);
+            self.forget_paint_slot(id);
             self.forget_scroll_rules(id);
             self.pictures.remove(&id);
             self.runs.remove(&id);
@@ -1164,6 +1175,7 @@ impl Tree {
         self.note_layout(super::LayoutCause::Structure);
         self.mark_layout();
         if let Some(id) = self.arena.hovered.take() {
+            self.invalidate_style_deps(crate::style::DepMask::HOVER);
             self.arena.pending.push(Gesture::Leave(id));
         }
     }

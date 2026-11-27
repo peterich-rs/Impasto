@@ -15,6 +15,39 @@ UI_IMPORT = re.compile(
 )
 
 
+# Surface configuration is one diagnostics group with separate inputs.
+RASTER_SWITCHES = {
+    "IMPASTO_PREWARM",
+    "IMPASTO_LATE_ACQUIRE",
+    "IMPASTO_PARALLEL_PREPARE",
+    "IMPASTO_SURFACE_COLOR",
+    "IMPASTO_SURFACE_LATENCY",
+    "IMPASTO_PRESENT_MODE",
+    "IMPASTO_GPU_VALIDATE",
+}
+RASTER_ENV = re.compile(r"""["'](IMPASTO_[A-Z0-9_]+)["']""")
+DISTANCE_FIELD_CRATES = {"fdsm", "msdfgen", "msdfgen-sys", "msdfgen-rs"}
+STATIC_TOPOLOGY = re.compile(r"\b(?:ThreadTopology|IMPASTO_THREAD_TOPOLOGY|impastoThreadTopology)\b|app\.thread_topology")
+
+
+def check_raster_architecture(raster_deps):
+    if forbidden := DISTANCE_FIELD_CRATES & raster_deps:
+        raise SystemExit(f"raster reaches runtime distance-field generation: {sorted(forbidden)}")
+
+    for path in (ROOT / "crates/raster/src").rglob("*.rs"):
+        if path.name == "tests.rs" or "tests" in path.parts:
+            continue
+        if forbidden := set(RASTER_ENV.findall(path.read_text())) - RASTER_SWITCHES:
+            raise SystemExit(f"{path.relative_to(ROOT)} adds raster environment switches: {sorted(forbidden)}")
+
+    android_projects = (ROOT / "examples").glob("*/android/app/build.gradle.kts")
+    for path in [*(ROOT / "crates/embedder").rglob("*.rs"),
+                 *(ROOT / "crates/embedder").rglob("*.gradle.kts"),
+                 *android_projects]:
+        if match := STATIC_TOPOLOGY.search(path.read_text()):
+            raise SystemExit(f"{path.relative_to(ROOT)} reintroduces static thread placement: {match[0]}")
+
+
 def dependencies(package, *features):
     output = subprocess.check_output(
         [
@@ -40,6 +73,7 @@ def main():
 
     engine_deps = dependencies("engine")
     raster_deps = dependencies("raster")
+    check_raster_architecture(raster_deps)
     for package, package_deps in (("engine", engine_deps), ("raster", raster_deps)):
         if forbidden := {
             name for name in package_deps

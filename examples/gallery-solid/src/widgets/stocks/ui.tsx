@@ -86,9 +86,19 @@ export function Legend(props: { color: string; label: string; value: string; val
  * follows the up/down convention from settings. Width is clamped so digits
  * ticking in and out never relayout the row.
  */
+/** Reserves the width of a signed, grouped six-digit price at the current text scale. */
+export function priceSlotWidth(size: number, scale: number): number {
+  return Math.ceil(10 * size * scale * 0.61);
+}
+
 export function PriceTag(props: { value: string; change: number; size?: number; width?: number }) {
-  return <View style={{ minWidth: props.width ?? 76, height: 28, paddingLeft: 8, paddingRight: 8, borderRadius: 6, alignItems: "center", justifyContent: "center",
+  const theme = useTheme();
+  const size = () => props.size ?? 15;
+  return <View style={{ width: props.width ?? priceSlotWidth(size(), theme().textScale) + 16,
+    maxWidth: "42%", minHeight: Math.ceil(size() * theme().textScale * 1.2 + 8),
+    paddingLeft: 8, paddingRight: 8, borderRadius: 6, justifyContent: "center",
     backgroundColor: tone(props.change) }}>
-    <Label size={props.size ?? 15} weight={600} color={colors.bg}>{props.value}</Label>
+    <Label size={size()} weight={600} color={colors.bg}
+      style={{ fontFamily: "Monospace", textAlign: "right" }}>{props.value}</Label>
   </View>;
 }

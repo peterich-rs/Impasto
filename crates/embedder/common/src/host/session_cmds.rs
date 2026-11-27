@@ -1,12 +1,13 @@
 use engine::session::{Metrics, PlatformSettings};
 
-use super::{UiHost, arm, flush_gpu, note_wake, session_call};
+use super::{UiHost, arm, flush_gpu, refresh_wake, session_call};
 use crate::command::Command;
 use crate::error::BootError;
 
 pub(super) fn handle(runtime: &mut UiHost, command: Command) -> Result<bool, BootError> {
     match command {
         command @ (Command::Pointer(_)
+        | Command::PointerMoves { .. }
         | Command::Input(_)
         | Command::ImeDismissed
         | Command::Metrics(_)) => input(runtime, command),
@@ -36,6 +37,11 @@ fn input(runtime: &mut UiHost, command: Command) -> Result<bool, BootError> {
     match command {
         Command::Pointer(event) => {
             if runtime.input.push_pointer(event) {
+                arm(runtime);
+            }
+        }
+        Command::PointerMoves { event, history } => {
+            if runtime.input.push_pointer_moves(event, history) {
                 arm(runtime);
             }
         }
@@ -140,12 +146,8 @@ fn lifecycle(runtime: &mut UiHost, state: engine::session::Lifecycle) {
     if let Some(plugins) = &runtime.plugins {
         plugins.lifecycle(state);
     }
-    let deadline = runtime.session.as_mut().map(|session| {
+    if let Some(session) = runtime.session.as_mut() {
         session_call(|| session.lifecycle(state));
-        session.next_wake_ms().map(crate::timing::ms_i64)
-    });
-    if let Some(deadline) = deadline {
-        note_wake(runtime, deadline);
     }
     let arm_frame = match (state, runtime.input.is_paused()) {
         (engine::session::Lifecycle::Hidden | engine::session::Lifecycle::Paused, _) => {
@@ -173,8 +175,7 @@ fn lifecycle(runtime: &mut UiHost, state: engine::session::Lifecycle) {
             runtime.present_retry_at = None;
             // A stuck armed token cannot be replaced by `arm`. Drop it so resume
             // can post a fresh vsync even if the surface never went away.
-            runtime.scheduler.cancel();
-            runtime.vsync.cancel();
+            runtime.cancel_vsync();
             runtime.input.resume()
         }
         (engine::session::Lifecycle::Inactive, false)
@@ -183,6 +184,7 @@ fn lifecycle(runtime: &mut UiHost, state: engine::session::Lifecycle) {
     if arm_frame {
         arm(runtime);
     }
+    refresh_wake(runtime);
 }
 
 fn settings_cmd(runtime: &mut UiHost, settings: &PlatformSettings) {
@@ -214,11 +216,7 @@ fn io_done(runtime: &mut UiHost, dispatch: impl FnOnce(&mut dyn engine::session:
     if let Some(session) = runtime.session.as_mut() {
         session_call(|| dispatch(session.as_mut()));
         let wants_frame = session.wants_frame();
-        let deadline = session.next_wake_ms().map(crate::timing::ms_i64);
-        note_wake(
-            runtime,
-            deadline.into_iter().chain(runtime.present_retry_at).min(),
-        );
+        refresh_wake(runtime);
         if wants_frame {
             arm(runtime);
         }

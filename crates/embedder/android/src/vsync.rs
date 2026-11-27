@@ -4,21 +4,24 @@ use std::sync::{Arc, Mutex};
 
 use embedder::{FrameRateHint, FrameTime, FrameToken, Vsync};
 
+type Schedule = dyn Fn(u64, Option<(FrameToken, FrameRateHint)>) + Send + Sync;
+
 type FrameSink = Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>;
 
 #[derive(Default)]
 struct ClockState {
     post: Option<FrameSink>,
     pending: Option<FrameToken>,
+    order: u64,
 }
 
 pub struct FrameClock {
     state: Mutex<ClockState>,
-    schedule: Arc<dyn Fn(FrameToken, FrameRateHint) + Send + Sync>,
+    schedule: Arc<Schedule>,
 }
 
 impl FrameClock {
-    pub fn new(schedule: Arc<dyn Fn(FrameToken, FrameRateHint) + Send + Sync>) -> Arc<Self> {
+    pub fn new(schedule: Arc<Schedule>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(ClockState::default()),
             schedule,
@@ -83,18 +86,26 @@ impl Vsync for FrameClock {
     }
 
     fn request_frame_with_rate(&self, token: FrameToken, hint: FrameRateHint) {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .pending = Some(token);
-        (self.schedule)(token, hint);
+        self.publish(Some((token, hint)), None);
     }
 
-    fn cancel(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .pending = None;
+    fn cancel_if_token(&self, token: FrameToken) {
+        self.publish(None, Some(token));
+    }
+}
+
+impl FrameClock {
+    fn publish(&self, request: Option<(FrameToken, FrameRateHint)>, cancel: Option<FrameToken>) {
+        let order = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if cancel.is_some() && cancel != state.pending {
+                return;
+            }
+            state.pending = request.map(|(token, _)| token);
+            state.order = state.order.wrapping_add(1);
+            state.order
+        };
+        (self.schedule)(order, request);
     }
 }
 
@@ -112,7 +123,8 @@ mod tests {
         let delivered = Arc::new(Mutex::new(Vec::new()));
         let schedule_log = Arc::clone(&scheduled);
         let frame_log = Arc::clone(&delivered);
-        let clock = FrameClock::new(Arc::new(move |token, _| {
+        let clock = FrameClock::new(Arc::new(move |_, request| {
+            let Some((token, _)) = request else { return };
             schedule_log
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -126,8 +138,9 @@ mod tests {
         }));
 
         clock.request_frame(FrameToken(1));
-        clock.cancel();
+        clock.cancel_if_token(FrameToken(1));
         clock.request_frame(FrameToken(2));
+        clock.cancel_if_token(FrameToken(1));
         clock.on_vsync(FrameToken(1), 1_000_000, 2_000_000, 1_000_000);
         clock.on_vsync(FrameToken(2), 2_000_000, 3_000_000, 1_000_000);
         clock.on_vsync(FrameToken(2), 3_000_000, 4_000_000, 1_000_000);

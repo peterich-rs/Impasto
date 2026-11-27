@@ -45,11 +45,13 @@ javascript = { path = "crates/javascript", default-features = false }
 embedder = { path = "crates/embedder/common" }
 rquickjs = { package = "quickjs-jit", version = "=0.14.2", default-features = false, features = ["std", "loader", "macro", "bindgen"] }
 
+# Keep the UI and rendering hot paths usable in debuggable builds.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.dev.package.quickjs-jit-sys]
 opt-level = 3
 
-# Keep Android debug builds debuggable without running the per-frame graph and
-# scene bridge unoptimized against the same wall-clock budget as release.
 [profile.dev.package.javascript]
 opt-level = 2
 
@@ -59,29 +61,12 @@ opt-level = 2
 [profile.dev.package.raster]
 opt-level = 2
 
-[profile.dev.package.wgpu]
+[profile.dev.package.embedder]
 opt-level = 2
 
-[profile.dev.package.wgpu-core]
-opt-level = 2
-
-[profile.dev.package.wgpu-hal]
-opt-level = 2
-
-[profile.dev.package.naga]
-opt-level = 2
-
-[profile.dev.package.parley]
-opt-level = 2
-
-[profile.dev.package.swash]
-opt-level = 2
-
-[profile.dev.package.lyon_tessellation]
-opt-level = 2
-
-[profile.dev.package.kurbo]
-opt-level = 2
+[profile.release-profile]
+inherits = "release"
+debug = "line-tables-only"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

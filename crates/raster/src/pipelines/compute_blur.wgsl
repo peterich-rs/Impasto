@@ -1,5 +1,8 @@
-// A tile with an apron of at most 24 pixels for separable Gaussian filtering.
+// WGSL uses the same apron layout for both axes. In the vertical pass the
+// invocation coordinates are transposed to keep 16 threads along the kernel.
 override vertical: bool = false;
+override output_srgb: bool = false;
+const MAX_RADIUS: u32 = 24u;
 struct BlurParams {
     size: vec2<u32>,
     radius: u32,
@@ -9,36 +12,48 @@ struct BlurParams {
 @group(0) @binding(1) var target_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> params: BlurParams;
 alias TilePixel = vec4<f32>;
-var<workgroup> tile: array<TilePixel, 448>;
+var<workgroup> tile: array<TilePixel, 512>;
+var<workgroup> weights: array<f32, 25>;
 
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(16, 8)
 fn blur(
     @builtin(local_invocation_index) index: u32,
     @builtin(local_invocation_id) local: vec3<u32>,
     @builtin(workgroup_id) group: vec3<u32>,
-    @builtin(global_invocation_id) global: vec3<u32>,
 ) {
-    let stride = 8u + 2u * params.radius;
-    for (var i = index; i < stride * 8u; i += 64u) {
-        let along = i32(i % stride) - i32(params.radius);
+    let radius = min(params.radius, MAX_RADIUS);
+    if index <= radius {
+        let distance = f32(index) / params.sigma;
+        weights[index] = exp(-0.5 * distance * distance);
+    }
+    let stride = 16u + 2u * radius;
+    let group_size = select(vec2(16u, 8u), vec2(8u, 16u), vertical);
+    let base = vec2<i32>(group.xy * group_size);
+    for (var i = index; i < stride * 8u; i += 128u) {
+        let along = i32(i % stride) - i32(radius);
         let across = i32(i / stride);
         let offset = select(vec2(along, across), vec2(across, along), vertical);
-        let pixel = clamp(vec2<i32>(group.xy * 8u) + offset,
-            vec2(0), vec2<i32>(params.size) - vec2(1));
+        let pixel = clamp(base + offset, vec2(0), vec2<i32>(params.size) - vec2(1));
         tile[i] = TilePixel(textureLoad(source_tex, pixel, 0));
     }
     workgroupBarrier();
-    if any(global.xy >= params.size) { return; }
+    let pixel = base + vec2<i32>(select(local.xy, local.yx, vertical));
+    if any(pixel >= vec2<i32>(params.size)) { return; }
 
-    let position = select(local.x, local.y, vertical);
-    let row = select(local.y, local.x, vertical) * stride;
-    var color = vec4(0.0);
-    var total = 0.0;
-    for (var tap = 0u; tap <= params.radius * 2u; tap++) {
-        let distance = f32(i32(tap) - i32(params.radius)) / params.sigma;
-        let weight = exp(-0.5 * distance * distance);
-        color += vec4<f32>(tile[row + position + tap]) * weight;
-        total += weight;
+    let center = local.y * stride + local.x + radius;
+    var color = vec4<f32>(tile[center]) * weights[0];
+    var total = weights[0];
+    for (var tap = 1u; tap <= radius; tap++) {
+        let weight = weights[tap];
+        color += (vec4<f32>(tile[center - tap]) + vec4<f32>(tile[center + tap])) * weight;
+        total += 2.0 * weight;
     }
-    textureStore(target_tex, vec2<i32>(global.xy), color / total);
+    var result = color / total;
+    if output_srgb {
+        let rgb = max(vec3(0.0), result.rgb);
+        let encoded = select(12.92 * rgb, 1.055 * pow(rgb, vec3(1.0 / 2.4)) - 0.055,
+            rgb > vec3(0.0031308));
+        result = vec4(encoded, result.a);
+    }
+    textureStore(target_tex, pixel, result);
 }

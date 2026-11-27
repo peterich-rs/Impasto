@@ -858,6 +858,18 @@ impl Tree {
         }
         let sim_v = -finger_v;
         let owner = self.fling_owner(id, prop, sim_v);
+        let Ok((over_x, over_y)) = self.overscroll(owner) else {
+            return;
+        };
+        let overscroll = if prop == crate::motion::AnimProp::ScrollX {
+            over_x
+        } else {
+            over_y
+        };
+        if overscroll.abs() > f32::EPSILON {
+            // The overscroll spring owns this axis until it returns to the edge.
+            return;
+        }
         let Ok((x, y)) = self.scroll_offset(owner) else {
             return;
         };

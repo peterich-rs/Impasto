@@ -238,6 +238,7 @@ bitflags::bitflags! {
         const TRANSFORM = 1 << 2;
         /// Author grid. A stack's single cell does not set this.
         const GRID = 1 << 3;
+        const ZOOM = 1 << 4;
     }
 }
 

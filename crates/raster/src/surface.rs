@@ -186,6 +186,13 @@ impl Rasterizer {
             *surface = configure(gpu, state.generation, surface.handle, replacement, pixels)?;
         }
         resize_if_needed(gpu, surface, pixels)?;
+        let format = crate::compositor::OutputFormat::surface(&surface.config);
+        let mut prepared = self
+            .late_acquire
+            .then(|| self.prepare_surface_frame(format, pixels))
+            .transpose()?;
+        let state = self.device.as_mut().ok_or(Status::NotReady)?;
+        let gpu = &state.gpu;
         let raw = surface.inner.as_ref().ok_or(Status::SurfaceLost)?;
         use wgpu::CurrentSurfaceTexture as Frame;
         let started = std::time::Instant::now();
@@ -196,6 +203,12 @@ impl Rasterizer {
             raw.get_current_texture()
         };
         self.stats.acquire = started.elapsed();
+        if !matches!(&acquired, Frame::Success(_) | Frame::Suboptimal(_))
+            && let Some(discarded) = prepared.take()
+        {
+            drop(discarded);
+            state.compositor.discard_frame();
+        }
         let texture = match acquired {
             Frame::Success(texture) => texture,
             Frame::Suboptimal(texture) => {
@@ -219,11 +232,11 @@ impl Rasterizer {
             Frame::Validation => return Err(Status::PresentFailed),
         };
         let view = texture.texture.create_view(&Default::default());
-        self.encode_and_submit(
-            &view,
-            crate::compositor::OutputFormat::surface(&surface.config),
-            pixels,
-        )?;
+        if let Some(prepared) = prepared {
+            self.submit_surface_frame(&view, prepared)?;
+        } else {
+            self.encode_and_submit(&view, format, pixels)?;
+        }
         let state = self.device.as_ref().ok_or(Status::NotReady)?;
         let started = std::time::Instant::now();
         {
@@ -441,18 +454,9 @@ fn configure(
         .unwrap_or(2);
     let present = std::env::var("IMPASTO_PRESENT_MODE").ok();
     config.present_mode = present_mode(present.as_deref(), &caps.present_modes);
-    let alpha = match std::env::var("IMPASTO_SURFACE_ALPHA").as_deref() {
-        Ok("opaque") => Some(wgpu::CompositeAlphaMode::Opaque),
-        Ok("premultiplied") => Some(wgpu::CompositeAlphaMode::PreMultiplied),
-        Ok("postmultiplied") => Some(wgpu::CompositeAlphaMode::PostMultiplied),
-        _ => None,
-    };
-    if let Some(alpha) = alpha.filter(|alpha| caps.alpha_modes.contains(alpha)) {
-        config.alpha_mode = alpha;
-    }
     resize(gpu, &raw, &mut config, pixels)?;
     tracing::info!(
-        target: "impasto::surface", ?present, requested_alpha = ?alpha,
+        target: "impasto::surface", ?present,
         present = ?config.present_mode, alpha = ?config.alpha_mode, format = ?config.format,
         color_space = ?config.color_space, latency = config.desired_maximum_frame_latency,
         "surface configured"

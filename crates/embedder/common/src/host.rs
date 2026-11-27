@@ -10,20 +10,21 @@ use std::time::{Duration, Instant};
 
 use engine::session::FrameTime;
 
-use crate::command::{Command, SurfaceId, SurfaceTarget};
+use crate::command::{Command, SurfaceId};
 use crate::diagnostics::TelemetryHub;
-use crate::diagnostics::telemetry::{ScheduleTiming, TelemetryProfile, mono_ns, mono_ns_at};
+use crate::diagnostics::telemetry::{TelemetryProfile, mono_ns};
 use crate::error::BootError;
 use crate::images::{self, ImageCache, ImageDecoder, ImageError, ImageReady, ImageRequest};
-use crate::input::{FrameInput, Input};
+use crate::input::Input;
 use crate::queue::Inbox;
 use crate::scheduler::{FrameScheduler, Gpu};
 
-use crate::surface::{OpenRetry, Ready, SurfaceHost};
+use crate::surface::SurfaceHost;
 use crate::task_runner::{RunnerSlot, WorkerTaskRunner};
 use crate::timing::FrameTiming;
 use crate::{
-    Boot, Launch, Services, TaskHandle, TaskRunner, TaskRunners, ThreadTaskRunner, ThreadTopology,
+    Boot, Launch, Services, SwitchableTaskRunner, TaskHandle, TaskRunner, TaskRunners,
+    ThreadTaskRunner,
 };
 
 mod cache_cmds;
@@ -33,6 +34,9 @@ mod raster_host;
 use raster_host::{FrameSubmission, RasterCompletion, RasterHost, RasterPort, raster_frame};
 mod session_cmds;
 mod surface_cmds;
+mod ui_frame;
+
+use ui_frame::{on_frame, skipped_frame};
 
 pub fn console_log() -> crate::ConsoleLog {
     Box::new(|level, message| {
@@ -128,6 +132,13 @@ impl DropWait {
     /// Blocks until `id` is signalled, or until shutdown marks every ack done.
     /// Returns immediately when `id` was never armed or was already taken.
     pub fn wait(self, id: SurfaceId) {
+        let _wait = tracing::info_span!(
+            target: "impasto::render::surface",
+            "surface_destroy_wait",
+            surface = id.0,
+            queue = "platform",
+        )
+        .entered();
         let mut state = lock(&self.acks.state);
         loop {
             match state.pending.get(&id).copied() {
@@ -178,9 +189,11 @@ impl Link {
         if !self.acks.arm(id) {
             return;
         }
+        tracing::event!(name: "surface_retire_requested", target: "impasto::render::surface",
+            tracing::Level::DEBUG, trace_event = true, surface = id.0);
+        self.inbox.discard_surface(id);
         let shell = lock(&self.shell).clone();
         if let Some(shell) = shell
-            && shell.ui.runner().runs_on_current_thread()
             && shell.retire_surface_on_raster(id)
         {
             return;
@@ -213,7 +226,11 @@ impl Link {
         self.drain_inline();
         let shell = lock(&self.shell).clone();
         if let Some(shell) = shell
-            && shell.ui.runner().runs_on_current_thread()
+            && (shell.ui.runner().runs_on_current_thread()
+                || shell
+                    .handoff
+                    .as_ref()
+                    .is_some_and(|handoff| handoff.platform.runs_on_current_thread()))
             && lock(&shell.exit).is_some()
         {
             return Err(BootError::Platform(
@@ -475,16 +492,15 @@ fn launch_boot(
 ) {
     let initialized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         boot.and_then(|boot| {
-            let runners = match runners {
-                Some(runners) => runners,
+            let (runners, handoff) = match runners {
+                Some(runners) => (runners, None),
                 None => task_runners(&boot)?,
             };
-            let fonts = collect_fonts(&boot)?;
-            Ok((boot, runners, fonts))
+            Ok((boot, runners, handoff))
         })
     }))
     .unwrap_or(Err(BootError::Panicked));
-    let (boot, runners, fonts) = match initialized {
+    let (boot, runners, handoff) = match initialized {
         Ok(pair) => pair,
         Err(error) => {
             guard.finish(Err(error.clone()));
@@ -499,14 +515,17 @@ fn launch_boot(
         acks: Arc::clone(&guard.acks),
         ui: RunnerSlot::new(Arc::clone(&ui)),
         remote_raster: Mutex::default(),
+        handoff,
         queued: AtomicBool::new(false),
+        draining: AtomicBool::new(false),
         exit: Mutex::new(Some((guard, on_exit))),
     });
     *lock(slot) = Some(Arc::clone(&shell));
     let initialize = move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             startup.checkpoint()?;
-            let mut runtime = run_boot(boot, fonts, &shell.inbox, runners, &startup)?;
+            let fonts = collect_fonts(&boot)?;
+            let mut runtime = run_boot(boot, fonts, &shell, runners, &startup)?;
             startup.checkpoint()?;
             publish_back_ownership(&mut runtime);
             if let RasterPort::Remote(slot) = &runtime.graphics {
@@ -536,7 +555,7 @@ fn launch_boot(
     }
 }
 
-fn task_runners(boot: &Boot) -> Result<TaskRunners, BootError> {
+fn task_runners(boot: &Boot) -> Result<(TaskRunners, Option<PlatformHandoff>), BootError> {
     let thread = |name| {
         ThreadTaskRunner::start(name)
             .map(|runner| runner as Arc<dyn TaskRunner>)
@@ -545,31 +564,60 @@ fn task_runners(boot: &Boot) -> Result<TaskRunners, BootError> {
     let io = Arc::new(WorkerTaskRunner::new(
         crate::rt::handle().map_err(BootError::Platform)?,
     ));
-    let ui = if boot.thread_topology == ThreadTopology::PlatformUi {
-        boot.platform_runner.clone().ok_or_else(|| {
-            BootError::Platform("platform UI topology requires a native main-loop runner".into())
-        })?
-    } else {
-        thread(if boot.thread_topology == ThreadTopology::SharedRender {
-            "render"
-        } else {
-            "ui"
-        })?
+    let background = thread("ui-boot")?;
+    let platform = boot
+        .platform_runner
+        .clone()
+        .unwrap_or_else(|| Arc::clone(&background));
+    let handoff = match (&boot.launch, &boot.platform_runner) {
+        (Launch::Migrating(_), Some(platform)) => Some(PlatformHandoff {
+            ui: Arc::new(SwitchableTaskRunner::new(Arc::clone(&background))),
+            platform: Arc::clone(platform),
+        }),
+        _ => None,
     };
-    let raster = if boot.thread_topology == ThreadTopology::SharedRender {
-        Arc::clone(&ui)
-    } else {
-        thread("raster")?
-    };
-    Ok(TaskRunners {
-        platform: boot
-            .platform_runner
-            .clone()
-            .unwrap_or_else(|| Arc::clone(&ui)),
-        ui,
-        raster,
-        io,
-    })
+    let ui = handoff.as_ref().map_or(background, |handoff| {
+        Arc::clone(&handoff.ui) as Arc<dyn TaskRunner>
+    });
+    Ok((
+        TaskRunners {
+            platform,
+            ui,
+            raster: thread("raster")?,
+            io,
+        },
+        handoff,
+    ))
+}
+
+struct PlatformHandoff {
+    ui: Arc<SwitchableTaskRunner>,
+    platform: Arc<dyn TaskRunner>,
+}
+
+struct MigratedUi(UiHost);
+
+#[expect(
+    unsafe_code,
+    reason = "transfers the unique, quiescent platform UI host"
+)]
+// SAFETY: only Shell::migrate constructs this after extracting the only
+// RunnerSlot owner and disarming the idle session. Launch::migrating guarantees
+// that the session and its callbacks form a closed ownership graph with the
+// host's shaper and VM. Platform services and plugin handles are Send, listeners
+// are host-owned, and RasterPort is remote. The destination installs the value
+// before resuming any UI callbacks.
+unsafe impl Send for MigratedUi {}
+
+impl MigratedUi {
+    fn install(self, shell: &Shell, target: &dyn TaskRunner) {
+        let mut ui = self.0;
+        ui.queue_placement = "platform-ui";
+        if let Some(session) = &mut ui.session {
+            session.finish_platform_handoff();
+        }
+        shell.ui.install_migrated(target, ui);
+    }
 }
 
 struct Shell {
@@ -577,7 +625,9 @@ struct Shell {
     acks: Arc<Acks>,
     ui: RunnerSlot<UiHost>,
     remote_raster: Mutex<Option<Arc<RunnerSlot<RasterHost>>>>,
+    handoff: Option<PlatformHandoff>,
     queued: AtomicBool,
+    draining: AtomicBool,
     exit: Mutex<Option<(ExitGuard, StartupCallback)>>,
 }
 
@@ -593,17 +643,41 @@ impl Shell {
     }
 
     fn drain(self: &Arc<Self>, limit: usize) {
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.ui.with(|runtime| {
-                for _ in 0..limit {
-                    if let Some(completion) = self.inbox.take_completion() {
+        if self.draining.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.ui.with(|runtime| self.drain_commands(runtime, limit))
+        }))
+        .unwrap_or(Some(Err(BootError::Panicked)));
+        self.draining.store(false, Ordering::Release);
+        match result {
+            Some(Ok(true)) => self.finish(Ok(())),
+            Some(Err(error)) => self.finish(Err(error)),
+            Some(Ok(false)) if !self.migrate() && self.inbox.has_pending() => self.schedule(),
+            _ => {}
+        }
+    }
+
+    fn drain_commands(
+        &self,
+        runtime: &mut UiHost,
+        mut remaining: usize,
+    ) -> Result<bool, BootError> {
+        use crate::queue::Work;
+
+        while remaining > 0 {
+            match self.inbox.take_work(remaining) {
+                Some(Work::Completions(batch)) => {
+                    remaining -= batch.len();
+                    for completion in batch {
                         if completion(runtime)? {
                             return Ok(true);
                         }
-                        continue;
                     }
-                    let Some(command) = self.inbox.pop() else { return Ok(false) };
+                }
+                Some(Work::Command(command)) => {
+                    remaining -= 1;
                     match on_command(runtime, command, &self.acks) {
                         Ok(true) => return Ok(true),
                         Ok(false) => publish_back_ownership(runtime),
@@ -613,17 +687,55 @@ impl Shell {
                             return Err(error);
                         }
                     }
+                    if self.handoff.is_some() && runtime.handoff_ready {
+                        break;
+                    }
                 }
-                Ok(false)
-            })
-            }))
-            .unwrap_or(Some(Err(BootError::Panicked)));
-        match result {
-            Some(Ok(true)) => self.finish(Ok(())),
-            Some(Err(error)) => self.finish(Err(error)),
-            Some(Ok(false)) if self.inbox.has_pending() => self.schedule(),
-            _ => {}
+                None => break,
+            }
         }
+        Ok(false)
+    }
+
+    fn migrate(self: &Arc<Self>) -> bool {
+        let Some(handoff) = &self.handoff else {
+            return false;
+        };
+        let prepared = self.ui.with(|ui| {
+            if !std::mem::take(&mut ui.handoff_ready) || ui.queue_placement != "ui-boot" {
+                return false;
+            }
+            ui.session
+                .as_mut()
+                .is_some_and(|session| session.prepare_platform_handoff())
+        });
+        if prepared != Some(true) {
+            return false;
+        }
+        let Some(source) = handoff.ui.begin_migration() else {
+            return false;
+        };
+        let Some(ui) = self.ui.extract(source.as_ref()) else {
+            handoff.ui.complete_migration(source);
+            self.finish(Err(BootError::Panicked));
+            return true;
+        };
+        let payload = MigratedUi(ui);
+        let shell = Arc::clone(self);
+        let platform = Arc::clone(&handoff.platform);
+        let target = Arc::clone(&platform);
+        if !platform.post(Box::new(move || {
+            let Some(handoff) = &shell.handoff else {
+                return;
+            };
+            payload.install(&shell, target.as_ref());
+            handoff.ui.complete_migration(target);
+            shell.schedule();
+        })) {
+            handoff.ui.complete_migration(source);
+            self.finish(Err(BootError::Cancelled));
+        }
+        true
     }
 
     // UIKit/Android can synchronously retire a window from within a platform
@@ -633,9 +745,19 @@ impl Shell {
         let Some(slot) = lock(&self.remote_raster).clone() else {
             return false;
         };
-        self.inbox.discard_surface(id);
         let inbox = Arc::clone(&self.inbox);
         let acks = Arc::clone(&self.acks);
+        if slot.runner().runs_on_current_thread() {
+            let Some(dropped) = slot.with(|graphics| surface_cmds::retire(graphics, id)) else {
+                return false;
+            };
+            inbox.complete(Box::new(move |runtime| {
+                surface_cmds::did_retire(runtime, id, dropped);
+                Ok(false)
+            }));
+            acks.signal(id);
+            return true;
+        }
         Arc::clone(slot.runner()).post(Box::new(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 slot.with(|graphics| surface_cmds::retire(graphics, id))
@@ -670,10 +792,11 @@ impl Shell {
 fn run_boot(
     boot: Boot,
     fonts: StartupFonts,
-    inbox: &Arc<Inbox>,
+    shell: &Arc<Shell>,
     runners: TaskRunners,
     startup: &Startup,
 ) -> Result<UiHost, BootError> {
+    let inbox = &shell.inbox;
     let trace_path =
         std::env::var_os("IMPASTO_TRACE").filter(|path| !path.is_empty() && path != "1");
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
@@ -695,10 +818,8 @@ fn run_boot(
     if let Some(hub) = &telemetry {
         hub.set_profile(profile);
     }
-    let enable_gpu_timing = trace_path.is_some()
-        || remote_enabled
-        || profile == TelemetryProfile::GpuAndTimeline
-        || (boot.devtools.is_some() && cfg!(debug_assertions) && profile != TelemetryProfile::Off);
+    let enable_gpu_timing =
+        trace_path.is_some() || remote_enabled || profile == TelemetryProfile::GpuAndTimeline;
     if telemetry.is_some() || boot.inspect.is_some() || boot.inspect_dir.is_some() {
         mono_ns();
     }
@@ -747,7 +868,7 @@ fn run_boot(
     let runtime = open_ui(
         boot,
         fonts,
-        inbox,
+        shell,
         startup,
         runners,
         RenderLinks {
@@ -870,12 +991,14 @@ pub(crate) struct UiHost {
     gpu_views: bool,
     point_scale: f32,
     frame_number: u64,
-    topology: ThreadTopology,
+    interaction: Option<u64>,
+    queue_placement: &'static str,
+    handoff_ready: bool,
     telemetry: Option<Arc<TelemetryHub>>,
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     _remote: Option<crate::diagnostics::remote::Server>,
     gpu_poll: bool,
-    semantics: Option<engine::semantics::SemanticsUpdate>,
+    semantics: Option<crate::semantics::Projection>,
     semantics_enabled: bool,
     autofill_enabled: bool,
     platform_views: Arc<[engine::tree::PlatformViewPlacement]>,
@@ -900,29 +1023,50 @@ impl UiHost {
         work: impl FnOnce(&mut RasterHost) -> R + Send + 'static,
         apply: impl FnOnce(&mut Self, R) + Send + 'static,
     ) {
+        let result = self.update_raster_checked(work, move |runtime, result| {
+            apply(runtime, result);
+            Ok(())
+        });
+        debug_assert!(result.is_ok(), "infallible raster update");
+    }
+
+    fn update_raster_checked<R: Send + 'static>(
+        &mut self,
+        work: impl FnOnce(&mut RasterHost) -> R + Send + 'static,
+        apply: impl FnOnce(&mut Self, R) -> Result<(), BootError> + Send + 'static,
+    ) -> Result<(), BootError> {
         match &mut self.graphics {
             RasterPort::Local(graphics) => {
                 let result = work(graphics);
-                apply(self, result);
+                apply(self, result)
             }
             RasterPort::Remote(_) => {
                 let inbox = Arc::clone(&self.inbox);
                 self.graphics.post(move |graphics| {
                     let result = work(graphics);
                     inbox.complete(Box::new(move |ui| {
-                        apply(ui, result);
+                        apply(ui, result)?;
                         Ok(false)
                     }));
                 });
+                Ok(())
             }
+        }
+    }
+}
+
+impl UiHost {
+    fn cancel_vsync(&mut self) {
+        if let Some(token) = self.scheduler.cancel() {
+            self.vsync.cancel_if_token(token);
         }
     }
 }
 
 impl Drop for UiHost {
     fn drop(&mut self) {
-        self.compositor_mode.cancel();
-        self.vsync.cancel();
+        self.compositor_mode.cancel(self.vsync.as_ref());
+        self.cancel_vsync();
         self.session.take();
         self.plugins.take();
         self.graphics.retire();
@@ -933,6 +1077,7 @@ impl Drop for UiHost {
 struct FramePipeline {
     in_flight: usize,
     waiting: bool,
+    pending: Option<Box<FrameSubmission>>,
 }
 
 impl FramePipeline {
@@ -942,6 +1087,24 @@ impl FramePipeline {
         let room = self.in_flight < depth;
         self.waiting |= !room;
         room
+    }
+
+    fn keep_latest(&mut self, mut next: FrameSubmission) {
+        if let Some(mut previous) = self.pending.take() {
+            next.layers_changed |= previous.layers_changed;
+            next.placements_changed |= previous.placements_changed;
+            if next.census.is_none() {
+                next.census = previous.census.take();
+            }
+            if previous.layers_changed {
+                next.scene_delta = None;
+            }
+            previous.reloads.extend(next.reloads);
+            previous.reloads.sort_unstable();
+            previous.reloads.dedup();
+            next.reloads = previous.reloads;
+        }
+        self.pending = Some(Box::new(next));
     }
 
     fn submit(&mut self) {
@@ -991,12 +1154,13 @@ fn collect_fonts(boot: &Boot) -> Result<StartupFonts, BootError> {
 fn open_ui(
     boot: Boot,
     fonts: StartupFonts,
-    inbox: &Arc<Inbox>,
+    shell: &Arc<Shell>,
     startup: &Startup,
     runners: TaskRunners,
     links: RenderLinks,
 ) -> Result<UiHost, BootError> {
     startup.checkpoint()?;
+    let inbox = &shell.inbox;
     let services = Rc::new(RefCell::new(boot.services));
     let StartupFonts {
         family,
@@ -1025,8 +1189,30 @@ fn open_ui(
     let open = boot.open_raster;
     let open_surface = boot.open_surface;
     let raster_telemetry = links.telemetry.clone();
+    let resource_inbox = Arc::downgrade(inbox);
+    let surface_gate = inbox.surface_gate();
     let create = move || {
         let mut raster = open(library).map_err(BootError::Engine)?;
+        raster.set_resource_wake(move || {
+            if let Some(inbox) = resource_inbox.upgrade() {
+                inbox.complete(Box::new(|runtime| {
+                    runtime.update_raster(
+                        |graphics| {
+                            let ready = graphics.surfaces.is_open()
+                                && graphics.raster.borrow_mut().collect_resources();
+                            graphics.needs_present |= ready;
+                            ready
+                        },
+                        |runtime, ready| {
+                            if ready && !runtime.input.is_paused() {
+                                arm(runtime);
+                            }
+                        },
+                    );
+                    Ok(false)
+                }));
+            }
+        });
         if links.enable_gpu_timing {
             raster.enable_gpu_timing();
         }
@@ -1034,7 +1220,7 @@ fn open_ui(
             raster: Rc::new(RefCell::new(raster)),
             telemetry: raster_telemetry,
             gpu_poll_pending: false,
-            surfaces: SurfaceHost::new(),
+            surfaces: SurfaceHost::with_gate(surface_gate),
             open_surface,
             external_textures: Default::default(),
             external_gpu: Default::default(),
@@ -1052,7 +1238,7 @@ fn open_ui(
             busy: raster_busy,
         })
     };
-    let graphics = if split {
+    let (graphics, raster_ready) = if split {
         let slot = Arc::new(RunnerSlot::new(Arc::clone(&runners.raster)));
         let target = Arc::clone(&slot);
         let (ready, response) = mpsc::sync_channel(1);
@@ -1060,13 +1246,15 @@ fn open_ui(
             let result = create().map(|raster| target.install(raster));
             let _ = ready.send(result);
         }));
-        response.recv().map_err(|_| BootError::Panicked)??;
-        RasterPort::Remote(slot)
+        (RasterPort::Remote(slot), Some(response))
     } else {
-        RasterPort::Local(Box::new(create()?))
+        (RasterPort::Local(Box::new(create()?)), None)
     };
     startup.checkpoint()?;
-    let Launch::Session(open) = boot.launch;
+    let open = match boot.launch {
+        Launch::Session(open) => open,
+        Launch::Migrating(factory) => factory.0,
+    };
     let parts = crate::SessionOpen {
         shaper: Box::new(Rc::clone(&shaper)),
         log: console_log(),
@@ -1120,7 +1308,9 @@ fn open_ui(
             let decoder = Arc::clone(&boot.decoder);
             move |relative, limit| decoder.read_packaged_asset(relative, limit)
         })),
-        script_execution: if boot.thread_topology == ThreadTopology::PlatformUi {
+        script_execution: if runners.ui.queue_id() == runners.platform.queue_id()
+            && boot.platform_runner.is_some()
+        {
             engine::session::ScriptExecution::PlatformUi
         } else {
             engine::session::ScriptExecution::DedicatedUi
@@ -1137,23 +1327,40 @@ fn open_ui(
             return Err(error);
         }
     };
+    if let Some(ready) = raster_ready {
+        ready.recv().map_err(|_| BootError::Panicked)??;
+    }
+    let frame_shell = Arc::downgrade(shell);
+    let platform = Arc::clone(&runners.platform);
     let inbox_frames = Arc::clone(inbox);
     let frame_clock = Arc::clone(&runners.ui);
     let compositor_mode = Arc::new(compositor_animation::CompositorMode::default());
-    let route_mode = Arc::clone(&compositor_mode);
+    let route_mode = Arc::downgrade(&compositor_mode);
     let render_queue = match &graphics {
         RasterPort::Remote(slot) => Some(Arc::downgrade(slot)),
         RasterPort::Local(_) => None,
     };
-    let frame_vsync = Arc::downgrade(&boot.vsync);
     boot.vsync.bind(Arc::new(move |token, mut time| {
         time.mono_ms = frame_clock.monotonic_ms();
         if compositor_animation::CompositorMode::is_raster_token(token) {
-            if let Some(slot) = render_queue.as_ref().and_then(std::sync::Weak::upgrade) {
-                route_mode.route(&slot, &inbox_frames, &frame_vsync, token, time);
+            if let Some(slot) = render_queue.as_ref().and_then(std::sync::Weak::upgrade)
+                && let Some(route_mode) = route_mode.upgrade()
+            {
+                route_mode.route(&slot, &inbox_frames, token, time);
             }
         } else {
-            inbox_frames.post(Command::Frame { token, time });
+            let inline = frame_shell.upgrade().filter(|shell| {
+                platform.runs_on_current_thread()
+                    && shell.ui.runner().runs_on_current_thread()
+                    && !shell.draining.load(Ordering::Acquire)
+            });
+            let command = Command::Frame { token, time };
+            if let Some(shell) = inline {
+                inbox_frames.post_inline_frame(command);
+                shell.drain(64);
+            } else {
+                inbox_frames.post(command);
+            }
         }
     }));
     let busy = Arc::new(crate::watchdog::Busy::new());
@@ -1185,7 +1392,19 @@ fn open_ui(
         gpu_views: false,
         point_scale: 1.0,
         frame_number: 0,
-        topology: boot.thread_topology,
+        interaction: None,
+        queue_placement: if !split {
+            "shared"
+        } else if runners.ui.queue_id() == runners.platform.queue_id() {
+            if boot.platform_runner.is_some() {
+                "platform-ui"
+            } else {
+                "dedicated-ui"
+            }
+        } else {
+            "ui-boot"
+        },
+        handoff_ready: false,
         telemetry: links.telemetry,
         #[cfg(any(debug_assertions, feature = "devtools-server"))]
         _remote: links.remote,
@@ -1320,13 +1539,62 @@ fn fault_followup(diag_armed: bool, faults: &[engine::session::ScriptFault]) -> 
     }
 }
 
-fn on_command(runtime: &mut UiHost, command: Command, acks: &Acks) -> Result<bool, BootError> {
+fn on_command(runtime: &mut UiHost, command: Command, acks: &Arc<Acks>) -> Result<bool, BootError> {
     runtime.busy.enter(crate::command::command_tag(&command));
+    if let Command::Deadline { ticket } = command {
+        let Some(present_retry) = runtime.wake.accept(ticket) else {
+            runtime.busy.leave();
+            return Ok(false);
+        };
+        if !present_retry
+            && let Some(generation) = runtime.compositor_generation
+            && let Some(session) = runtime.session.as_mut()
+        {
+            use engine::session::ScriptInvalidation;
+
+            let now = runtime.wake.runner.monotonic_ms();
+            match session.advance_script_deadline(crate::timing::ms_i64(now)) {
+                ScriptInvalidation::Unchanged => {
+                    refresh_wake(runtime);
+                    runtime.busy.leave();
+                    return Ok(false);
+                }
+                ScriptInvalidation::Content
+                    if runtime.compositor_mode.prepare_content(generation) =>
+                {
+                    let time = frame_cmds::wake_time(now, runtime.last_vsync);
+                    let result = on_frame(runtime, time, false, Some(generation), acks);
+                    runtime.busy.leave();
+                    return result;
+                }
+                _ => {}
+            }
+        }
+        runtime.busy.leave();
+        return on_command(runtime, Command::Wake, acks);
+    }
+    if matches!(&command, Command::Input(_) | Command::BackGesture(_))
+        || matches!(&command, Command::Pointer(event)
+            if matches!(event.phase, engine::input::Phase::Down | engine::input::Phase::Wheel | engine::input::Phase::Zoom))
+    {
+        static NEXT_INTERACTION: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_INTERACTION.fetch_add(1, Ordering::Relaxed);
+        runtime.interaction = Some(id);
+        tracing::event!(name: "interaction_received", target: "impasto::frame", tracing::Level::DEBUG,
+            trace_event = true, interaction = id, surface = runtime.active_surface.map(|surface| surface.0));
+    }
     let wake_command = matches!(command, Command::Wake);
-    let interrupted = if matches!(
-        command,
-        Command::Frame { .. } | Command::CommitCompositorState { .. }
-    ) {
+    let prefetch_image = match &command {
+        Command::ImageReady(ready) => compositor_animation::prefetch_image(runtime, ready.source()),
+        _ => false,
+    };
+    let interrupted = if prefetch_image
+        || matches!(
+            command,
+            Command::Frame { .. }
+                | Command::CommitCompositorState { .. }
+                | Command::PrefetchCompositorWindow { .. }
+        ) {
         false
     } else {
         runtime.compositor_epoch = runtime.compositor_epoch.wrapping_add(1);
@@ -1348,10 +1616,11 @@ fn on_command(runtime: &mut UiHost, command: Command, acks: &Acks) -> Result<boo
 fn dispatch_command(
     runtime: &mut UiHost,
     command: Command,
-    acks: &Acks,
+    acks: &Arc<Acks>,
 ) -> Result<bool, BootError> {
     match command {
         Command::Shutdown => Ok(true),
+        Command::Deadline { .. } => Ok(false),
         Command::UpdateSource { revision, source } => {
             update_source(runtime, &revision, &source);
             Ok(false)
@@ -1360,6 +1629,7 @@ fn dispatch_command(
         | Command::SurfaceReady(_)
         | Command::SurfaceChanged { .. }) => surface_cmds::handle(runtime, command, acks),
         command @ (Command::Pointer(_)
+        | Command::PointerMoves { .. }
         | Command::Input(_)
         | Command::BackGesture(_)
         | Command::ImeDismissed
@@ -1384,6 +1654,16 @@ fn dispatch_command(
         command @ (Command::Wake | Command::Frame { .. }) => {
             frame_cmds::handle(runtime, command, acks)
         }
+        Command::PrefetchCompositorWindow { generation, time } => {
+            if runtime.compositor_generation == Some(generation)
+                && runtime.compositor_mode.running()
+                && !runtime.input.is_paused()
+            {
+                on_frame(runtime, time, false, Some(generation), acks)
+            } else {
+                Ok(false)
+            }
+        }
         Command::CommitCompositorState {
             generation,
             snapshot,
@@ -1404,37 +1684,6 @@ fn dispatch_command(
             arm(runtime);
             Ok(false)
         }
-    }
-}
-
-fn fold_semantics(
-    snapshot: &mut Option<engine::semantics::SemanticsUpdate>,
-    patch: &engine::semantics::SemanticsPatch,
-) {
-    let update = snapshot.get_or_insert_with(|| engine::semantics::SemanticsUpdate {
-        root: patch.root,
-        nodes: Vec::new(),
-    });
-    update.root = patch.root;
-    for op in &patch.ops {
-        match op {
-            engine::semantics::SemanticsOp::Upsert(node) => {
-                if let Some(found) = update.nodes.iter_mut().find(|item| item.id == node.id) {
-                    *found = node.clone();
-                } else {
-                    update.nodes.push(node.clone());
-                }
-            }
-            engine::semantics::SemanticsOp::Remove(id) => {
-                update.nodes.retain(|node| node.id != *id)
-            }
-        }
-    }
-    if let Some(order) = &patch.order {
-        let ranks: HashMap<_, _> = order.iter().copied().zip(0..).collect();
-        update
-            .nodes
-            .sort_by_key(|node| ranks.get(&node.id).copied().unwrap_or(usize::MAX));
     }
 }
 
@@ -1471,545 +1720,18 @@ fn next_frame_number() -> u64 {
     NEXT_FRAME.fetch_add(1, Ordering::Relaxed)
 }
 
-fn on_frame(
-    runtime: &mut UiHost,
-    time: FrameTime,
-    from_vsync: bool,
-    acks: &Acks,
-) -> Result<bool, BootError> {
-    let frame_started = Instant::now();
-    let counters = runtime
-        .telemetry
-        .as_ref()
-        .is_some_and(|hub| hub.collects_frames());
-    let inspect = runtime.inspect.is_some() || runtime.inspect_dir.is_some();
-    let mut schedule = (counters || inspect).then(|| {
-        let ui_start_ns = mono_ns_at(frame_started);
-        // FrameTime::mono_ms was stamped when the callback posted to the
-        // inbox. Use that runner's elapsed time so custom epochs also work.
-        let vsync_ns = from_vsync.then(|| {
-            let queued_ms = (runtime.wake.runner.monotonic_ms() - time.mono_ms).max(0.0);
-            ui_start_ns.saturating_sub(ms_to_ns(queued_ms))
-        });
-        ScheduleTiming {
-            vsync_ns,
-            ui_start_ns,
-            topology: runtime.topology,
-            budget_ns: ms_to_ns(time.interval_ms),
-            ..ScheduleTiming::default()
-        }
-    });
-    let frame_depth = if cfg!(target_os = "android") && runtime.input.is_interacting() {
-        1
-    } else {
-        FramePipeline::DEPTH
-    };
-    if !runtime.frames.has_room(frame_depth) {
-        skipped_frame("queue_full");
-        return Ok(end_frame(runtime, false, false));
-    }
-    let attempt = if runtime.try_surface || matches!(runtime.graphics, RasterPort::Local(_)) {
-        let attempt = runtime
-            .graphics
-            .with(|graphics| graphics.surfaces.take_attempt())?;
-        runtime.try_surface = attempt.is_some();
-        attempt
-    } else {
-        None
-    };
-    if let Some((target, attempts)) = attempt {
-        match open_surface_target(runtime, target, attempts, OpenPlace::Frame)? {
-            OpenedSurface::Ready { replaced } => {
-                if let Some(old) = replaced {
-                    acks.signal(old);
-                }
-            }
-            OpenedSurface::Waiting => {
-                skipped_frame("surface_waiting");
-                return Ok(end_frame(runtime, false, false));
-            }
-        }
-    }
-    if runtime.active_surface.is_none() {
-        skipped_frame("no_surface");
-        return Ok(end_frame(runtime, false, false));
-    }
-    runtime.frame_number = next_frame_number();
-    let capture_frame = schedule.and_then(|schedule| {
-        runtime
-            .telemetry
-            .as_ref()?
-            .track_frame(schedule.ui_start_ns)
-    });
-    let frame_span = tracing::info_span!(
-        target: "impasto::frame",
-        "frame",
-        frame = runtime.frame_number,
-        queue = "ui",
-        topology = runtime.topology.name(),
-        vsync_ms = time.vsync_ms,
-        target_ms = time.target_ms
-    );
-    let entered = frame_span.enter();
-    if from_vsync {
-        let vsync_us = ms_to_ns(time.mono_ms) / 1_000;
-        tracing::debug!(target: "impasto::frame", id = runtime.frame_number, vsync_us, "Impasto frame");
-    } else {
-        tracing::debug!(target: "impasto::frame", id = runtime.frame_number, "Impasto frame");
-    }
-    let frame = runtime.input.begin_frame();
-    if let Some(metrics) = frame.metrics {
-        runtime.point_scale = metrics.device_pixel_ratio;
-        if let Some(session) = runtime.session.as_mut() {
-            session_call(|| session.metrics(&metrics));
-        }
-    }
-    let gesture_started = Instant::now();
-    let input_trace = tracing::debug_span!(target: "impasto::frame", "input").entered();
-    let mut leave = false;
-    if let Some(session) = runtime.session.as_mut() {
-        for event in frame.events {
-            match event {
-                FrameInput::Pointer(event) => {
-                    tracing::trace!(
-                        target: "impasto::shell",
-                        kind = phase_name(event.phase),
-                        x = event.x,
-                        y = event.y,
-                        "pointer"
-                    );
-                    session_call(|| session.pointer(event));
-                }
-                FrameInput::Session(event) => {
-                    tracing::trace!(target: "impasto::shell", kind = input_kind(&event), "input");
-                    session_call(|| session.input(event));
-                }
-                FrameInput::DismissIme => {
-                    tracing::trace!(target: "impasto::shell", "ime dismissed");
-                    session_call(|| session.ime_dismissed());
-                }
-            }
-        }
-    }
-    let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
-    drop(input_trace);
-    let session_started = Instant::now();
-    let mut again;
-    let mut reloads = Vec::new();
-    let mut census = None;
-    let mut layers_changed = false;
-    let mut placements_changed = false;
-    let mut phases = None;
-    let mut runtime_sample = None;
-    let mut layout_report = None;
-    let mut compositor_epoch = None;
-    if let Some(session) = runtime.session.as_mut() {
-        session.set_counters(counters);
-        let framed = {
-            let _trace = tracing::debug_span!(target: "impasto::frame", "session").entered();
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)))
-        };
-        match framed {
-            Ok(mut output) => {
-                #[cfg(any(debug_assertions, feature = "devtools-server"))]
-                if let Some(hub) = runtime.telemetry.as_ref() {
-                    hub.refresh_inspector(!output.again, || session.inspector_snapshot());
-                }
-                if counters && runtime.frame_number.is_multiple_of(30) {
-                    runtime_sample = session.runtime_sample();
-                }
-                again = output.again;
-                leave = output.exit;
-                let faults = session.take_faults();
-                let plan = fault_followup(runtime.diag_armed, &faults);
-                runtime.diag_armed = plan.diag_armed;
-                if plan.stop_again {
-                    again = false;
-                }
-                if let Some(hub) = runtime.hub.as_ref() {
-                    for fault in &faults {
-                        hub.error(
-                            fault.source,
-                            &fault.message,
-                            (!fault.stack.is_empty()).then_some(fault.stack.as_str()),
-                            Some(runtime.frame_number),
-                        );
-                    }
-                }
-                if let Some(tree) = output.layers.take() {
-                    if runtime.dump_list {
-                        tracing::debug!(
-                            target: "impasto::render",
-                            "{}",
-                            layer_tree_line(&tree)
-                        );
-                    }
-                    runtime.image_requirements = tree.image_requirements().into();
-                    runtime.animated_effects = tree.has_animated_effects();
-                    runtime.gpu_views = tree.has_gpu_views();
-                    runtime.latest = Some(tree);
-                    layers_changed = true;
-                }
-                if !frame.paused
-                    && !leave
-                    && faults.is_empty()
-                    && let Some(tree) = runtime.latest.as_ref()
-                    && (again || runtime.animated_effects || runtime.gpu_views)
-                {
-                    use engine::scene::CompositorBlockReason;
-                    let has_compositor_work =
-                        !tree.tracks.is_empty() || runtime.animated_effects || runtime.gpu_views;
-                    let eligible = session.compositor_eligibility(&tree.tracks).and({
-                        if !has_compositor_work || runtime.compositor_enabled {
-                            Ok(())
-                        } else if matches!(runtime.graphics, RasterPort::Local(_)) {
-                            Err(CompositorBlockReason::SharedTopology)
-                        } else {
-                            Err(CompositorBlockReason::Disabled)
-                        }
-                    });
-                    match eligible {
-                        Ok(()) if has_compositor_work => {
-                            compositor_epoch = Some(runtime.compositor_epoch);
-                        }
-                        Ok(()) => {}
-                        Err(reason) => {
-                            if let Some(schedule) = schedule.as_mut() {
-                                schedule.compositor_block = Some(reason);
-                            }
-                            tracing::event!(name: "compositor_deferred", target: "impasto::compositor",
-                                tracing::Level::DEBUG, trace_event = true, queue = "ui",
-                                status = reason.name(), node = reason.node(),
-                                active_tracks = tree.tracks.len());
-                        }
-                    }
-                }
-                if plan.arm_extra {
-                    arm(runtime);
-                }
-                if let Some(text) = output.clipboard.take()
-                    && let Err(message) = runtime.registry.call(
-                        "Clipboard",
-                        "setString",
-                        &[engine::session::PluginValue::Str(text)],
-                    )
-                {
-                    tracing::error!(target: "impasto::shell", "{message}");
-                }
-                if let Some(update) = output.ime.take() {
-                    crate::ime::publish_update(&update, &runtime.services);
-                }
-                if let Some(patch) = output.semantics.take() {
-                    let _trace =
-                        tracing::debug_span!(target: "impasto::frame", "accessibility").entered();
-                    fold_semantics(&mut runtime.semantics, &patch);
-                    if let Some(update) = runtime.semantics.as_ref() {
-                        let services = runtime.services.borrow();
-                        let projected = crate::semantics::project_with_platform_views(
-                            update,
-                            services.semantics_include_platform_views(),
-                        );
-                        services.semantics(&projected);
-                    }
-                }
-                if let Some(placements) = output.platform_views.take() {
-                    runtime.platform_views = placements;
-                    placements_changed = true;
-                }
-                reloads = std::mem::take(&mut output.reloads);
-                census = output.images.take();
-                phases = output.phases.take();
-                layout_report = output.layout_report.take();
-                if let Some(hub) = runtime.hub.as_ref()
-                    && let Some(report) = layout_report.as_deref()
-                {
-                    hub.set_layout_report(report);
-                }
-            }
-            Err(_) => {
-                tracing::error!(
-                    target: "impasto::script",
-                    "session call panicked"
-                );
-                again = false;
-            }
-        }
-    } else {
-        return Ok(end_frame(runtime, false, false));
-    }
-    if leave {
-        runtime.services.borrow().request_exit();
-    }
-    let mut submission = FrameSubmission {
-        capture_frame,
-        sample_gpu: runtime
-            .telemetry
-            .as_ref()
-            .is_some_and(|hub| hub.collects_gpu()),
-        revision: runtime.revision,
-        number: runtime.frame_number,
-        time,
-        frame_started,
-        schedule,
-        telemetry: runtime.telemetry.clone().filter(|_| counters),
-        runtime_sample,
-        session_ms: elapsed_ms(session_started),
-        gesture_ms,
-        phases: phases.unwrap_or_default(),
-        layout_report,
-        measure: runtime.shaper.borrow_mut().take_shape_stats(),
-        scale: runtime.point_scale,
-        paused: frame.paused,
-        again,
-        tree: runtime.latest.clone(),
-        requirements: Arc::clone(&runtime.image_requirements),
-        platform_views: Arc::clone(&runtime.platform_views),
-        placements_changed,
-        layers_changed,
-        reloads,
-        census,
-        hub: runtime.hub.clone(),
-        compositor_epoch,
-        compositor_frame: false,
-        animated_effects: runtime.animated_effects,
-        gpu_views: runtime.gpu_views,
-    };
-    drop(entered);
-    if let Some(schedule) = submission.schedule.as_mut() {
-        schedule.ui_done_ns = mono_ns();
-    }
-    match &mut runtime.graphics {
-        RasterPort::Local(graphics) => {
-            let completion = raster_frame(graphics, submission, false, || {
-                if let Some(token) = runtime.scheduler.prepare_next() {
-                    runtime.vsync.request_frame(token);
-                }
-            });
-            finish_raster_frame(runtime, completion, false)
-        }
-        RasterPort::Remote(slot) => {
-            let slot = Arc::clone(slot);
-            let inbox = Arc::clone(&runtime.inbox);
-            runtime.frames.submit();
-            let run = Arc::clone(slot.runner()).post(Box::new(move || {
-                let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    slot.with(|graphics| raster_frame(graphics, submission, true, || {}))
-                        .unwrap_or(Err(BootError::Panicked))
-                }))
-                .unwrap_or(Err(BootError::Panicked));
-                inbox.complete(Box::new(move |runtime| {
-                    finish_raster_frame(runtime, completion, true)
-                }));
-            }));
-            if !run {
-                skipped_frame("raster_closed");
-                return Err(BootError::Panicked);
-            }
-            Ok(end_frame(
-                runtime,
-                compositor_epoch.is_none() && again && runtime.frames.in_flight < frame_depth,
-                false,
-            ))
-        }
-    }
-}
-
-fn skipped_frame(status: &'static str) {
-    tracing::event!(name: "frame_skipped", target: "impasto::frame", tracing::Level::DEBUG,
-        trace_event = true, queue = "ui", status);
-}
-
-fn finish_raster_frame(
-    runtime: &mut UiHost,
-    completion: Result<RasterCompletion, BootError>,
-    split: bool,
-) -> Result<bool, BootError> {
-    let waiting = split && runtime.frames.complete();
-    let completion = completion?;
-    let activated = split && compositor_animation::activate(runtime, &completion);
-    let RasterCompletion {
-        submission,
-        output,
-        surface,
-        retry_at,
-    } = completion;
-    if !activated && output.gpu_pending {
-        schedule_gpu_poll(runtime);
-    }
-    if let Some(timing) = output.timing {
-        for listener in &mut runtime.listeners {
-            listener.on_frame(&timing, &submission.phases);
-        }
-        if runtime.inspect_dir.is_none()
-            && let Some(dir) = &runtime.inspect
-            && let Err(error) =
-                crate::timing::write_inspect(dir, &timing, submission.tree.as_deref())
-        {
-            tracing::warn!(target: "impasto::shell", %error, "inspect write failed");
-        }
-        if (submission.revision == runtime.revision || output.stop)
-            && output.shown
-            && let Some(tree) = submission.tree
-        {
-            write_inspect(
-                runtime,
-                &tree,
-                &timing,
-                &submission.phases,
-                issue_list(submission.layout_report.as_deref().unwrap_or("[]")),
-            );
-        }
-    }
-    if output.stop {
-        runtime.services.borrow().request_exit();
-        return Ok(end_frame(runtime, false, true));
-    }
-    if submission.revision != runtime.revision {
-        if waiting && !runtime.input.is_paused() {
-            arm(runtime);
-        }
-        return Ok(false);
-    }
-    runtime.active_surface = surface;
-    runtime.present_retry_at = retry_at;
-    if output.shown {
-        runtime.busy.arm();
-        if let Some(surface) = surface {
-            let views = submission.platform_views;
-            let changed =
-                runtime
-                    .published_views
-                    .as_ref()
-                    .map_or(!views.is_empty(), |(id, prior)| {
-                        (*id == surface && !Arc::ptr_eq(prior, &views))
-                            || (*id != surface && !views.is_empty())
-                    });
-            if changed {
-                runtime.services.borrow().platform_views(surface, &views);
-                runtime.published_views = Some((surface, views));
-            }
-        }
-    }
-    if activated {
-        return Ok(false);
-    }
-    let again = (waiting || output.again) && !runtime.input.is_paused();
-    if split {
-        refresh_wake(runtime);
-        if again {
-            arm(runtime);
-        }
-        return Ok(false);
-    }
-    Ok(end_frame(runtime, again, false))
-}
-
-enum OpenPlace {
-    Command,
-    Frame,
-}
-
-enum OpenedSurface {
-    Ready { replaced: Option<SurfaceId> },
-    Waiting,
-}
-
-fn open_surface_target(
-    runtime: &mut UiHost,
-    target: SurfaceTarget,
-    attempts: u32,
-    place: OpenPlace,
-) -> Result<OpenedSurface, BootError> {
-    note_scale(runtime, target.metrics.device_pixel_ratio);
-    let metrics = target.metrics;
-    let kept = SurfaceTarget {
-        id: target.id,
-        layer: target.layer,
-        metrics,
-        pixels: target.pixels,
-    };
-    let opened = runtime.graphics.with(move |graphics| {
-        let mut raster = graphics.raster.borrow_mut();
-        let opened = graphics
-            .surfaces
-            .ready(target, &mut raster, graphics.open_surface.as_mut());
-        if matches!(opened, Ready::Opened { .. }) {
-            for frame in graphics.external_gpu.values_mut() {
-                if frame.image.is_none() {
-                    frame.image = (frame.import)(&raster);
-                }
-            }
-            *lock(&graphics.upload) = raster.texture_factory();
-            graphics.needs_present = true;
-            graphics.installed = None;
-        }
-        opened
-    })?;
-    match opened {
-        Ready::Opened { replaced, .. } => {
-            runtime.services.borrow().surface_attached(kept.id);
-            runtime.active_surface = Some(kept.id);
-            runtime.try_surface = false;
-            runtime.revision = runtime.revision.wrapping_add(1);
-            if matches!(place, OpenPlace::Command) {
-                if runtime.input.set_metrics(metrics) {
-                    arm(runtime);
-                }
-                arm(runtime);
-            } else {
-                runtime.input.set_metrics(metrics);
-            }
-            tracing::info!(
-                target: "impasto::render::surface",
-                surface = kept.id.0,
-                "surface opened"
-            );
-            Ok(OpenedSurface::Ready { replaced })
-        }
-        Ready::Failed(
-            raster::Status::NotReady | raster::Status::SurfaceLost | raster::Status::AcquireMiss,
-        ) => {
-            let retry = runtime
-                .graphics
-                .with(move |graphics| graphics.surfaces.fail_attempt(kept, attempts))?;
-            runtime.try_surface = matches!(retry, OpenRetry::Again);
-            if matches!(retry, OpenRetry::GaveUp) {
-                tracing::error!(
-                    target: "impasto::render::surface",
-                    "surface open failed; stopping retry"
-                );
-            } else {
-                tracing::warn!(
-                    target: "impasto::render::surface",
-                    attempts,
-                    "surface open not ready"
-                );
-                arm(runtime);
-            }
-            Ok(OpenedSurface::Waiting)
-        }
-        Ready::Failed(status) => {
-            let error = BootError::Engine(status);
-            tracing::error!(target: "impasto::render::surface", %status, "surface open failed");
-            Err(error)
-        }
-    }
-}
-
 fn end_frame(runtime: &mut UiHost, again: bool, stop: bool) -> bool {
     if stop {
-        runtime.scheduler.cancel();
-        runtime.vsync.cancel();
-        note_wake(runtime, None);
+        runtime.cancel_vsync();
+        runtime.wake.set(None);
         return true;
     }
     refresh_wake(runtime);
+    let armed = runtime.scheduler.armed();
     if let Some(token) = runtime.scheduler.finish(again) {
         runtime.vsync.request_frame(token);
-    } else if runtime.scheduler.token_armed() {
-        // A posted vsync still owns this token. Cancelling it would freeze input.
-    } else {
-        runtime.vsync.cancel();
+    } else if let Some(token) = armed.filter(|_| !runtime.scheduler.token_armed()) {
+        runtime.vsync.cancel_if_token(token);
     }
     false
 }
@@ -2022,22 +1744,24 @@ fn refresh_wake(runtime: &mut UiHost) {
             session.next_wake_ms().map(crate::timing::ms_i64)
         }
     });
-    let deadline = if runtime.input.is_paused() {
-        session_deadline
-    } else {
-        match (session_deadline, runtime.present_retry_at) {
-            (Some(session_at), Some(retry_at)) => Some(session_at.min(retry_at)),
-            (None, Some(retry_at)) => Some(retry_at),
-            (session_at, None) => session_at,
-        }
+    let retry = runtime
+        .present_retry_at
+        .filter(|_| !runtime.input.is_paused());
+    let deadline = match (session_deadline, retry) {
+        (Some(session), Some(retry)) if session < retry => Some((session, false)),
+        (_, Some(retry)) => Some((retry, true)),
+        (session, None) => session.map(|at| (at, false)),
     };
-    note_wake(runtime, deadline);
+    runtime
+        .wake
+        .set(deadline.filter(|_| !runtime.frames.waiting));
 }
 
 struct WakeTimer {
     runner: Arc<dyn TaskRunner>,
     inbox: Arc<Inbox>,
-    pending: RefCell<Option<(i64, TaskHandle)>>,
+    pending: RefCell<Option<(i64, bool, u64, TaskHandle)>>,
+    next_ticket: std::cell::Cell<u64>,
 }
 
 impl WakeTimer {
@@ -2046,19 +1770,22 @@ impl WakeTimer {
             runner,
             inbox,
             pending: RefCell::default(),
+            next_ticket: std::cell::Cell::default(),
         }
     }
 
-    fn set(&self, next: Option<i64>) {
+    fn set(&self, next: Option<(i64, bool)>) {
         let mut pending = self.pending.borrow_mut();
-        if let Some((deadline, handle)) = pending.take() {
-            if next == Some(deadline) && handle.is_pending() {
-                *pending = Some((deadline, handle));
+        if let Some((deadline, retry, ticket, handle)) = pending.take() {
+            if next == Some((deadline, retry)) {
+                *pending = Some((deadline, retry, ticket, handle));
                 return;
             }
             handle.cancel();
         }
-        if let Some(deadline) = next {
+        if let Some((deadline, retry)) = next {
+            let ticket = self.next_ticket.get().wrapping_add(1);
+            self.next_ticket.set(ticket);
             let now = crate::timing::ms_i64(self.runner.monotonic_ms());
             let millis = u64::try_from(deadline.saturating_sub(now)).unwrap_or(0);
             let inbox = Arc::downgrade(&self.inbox);
@@ -2066,12 +1793,20 @@ impl WakeTimer {
                 Duration::from_millis(millis),
                 Box::new(move || {
                     if let Some(inbox) = inbox.upgrade() {
-                        inbox.post(Command::Wake);
+                        inbox.post(Command::Deadline { ticket });
                     }
                 }),
             );
-            *pending = Some((deadline, handle));
+            *pending = Some((deadline, retry, ticket, handle));
         }
+    }
+
+    fn accept(&self, ticket: u64) -> Option<bool> {
+        let mut pending = self.pending.borrow_mut();
+        if pending.as_ref()?.2 != ticket {
+            return None;
+        }
+        pending.take().map(|(_, retry, _, _)| retry)
     }
 }
 
@@ -2081,44 +1816,11 @@ impl Drop for WakeTimer {
     }
 }
 
-fn note_wake(runtime: &UiHost, deadline: Option<i64>) {
-    // A due timer cannot drive a third frame. The next raster completion
-    // releases the slot and reinstates the wake from the session deadline.
-    runtime
-        .wake
-        .set(deadline.filter(|_| !runtime.frames.waiting));
-}
-
 fn arm(runtime: &mut UiHost) {
-    if let Some(token) = runtime.scheduler.request() {
+    if runtime.compositor_generation.is_none()
+        && let Some(token) = runtime.scheduler.request()
+    {
         runtime.vsync.request_frame(token);
-    }
-}
-
-fn phase_name(phase: engine::input::Phase) -> &'static str {
-    match phase {
-        engine::input::Phase::Down => "down",
-        engine::input::Phase::Move => "move",
-        engine::input::Phase::Up => "up",
-        engine::input::Phase::Cancel => "cancel",
-        engine::input::Phase::Wheel => "wheel",
-        engine::input::Phase::Zoom => "zoom",
-    }
-}
-
-fn input_kind(event: &engine::session::InputEvent) -> &'static str {
-    match event {
-        engine::session::InputEvent::Key(_) | engine::session::InputEvent::Back => "key",
-        engine::session::InputEvent::Text(_) | engine::session::InputEvent::Paste { .. } => "text",
-        engine::session::InputEvent::Composing(_) | engine::session::InputEvent::DismissIme(_) => {
-            "ime"
-        }
-        engine::session::InputEvent::Copy
-        | engine::session::InputEvent::Cut
-        | engine::session::InputEvent::SelectAll
-        | engine::session::InputEvent::Edit(_)
-        | engine::session::InputEvent::Replace { .. }
-        | engine::session::InputEvent::ReplaceIme { .. } => "edit",
     }
 }
 
@@ -2176,7 +1878,7 @@ fn flush_gpu(runtime: &mut UiHost, reason: &'static str) {
         graphics.frame_retry_at = None;
     });
     runtime.present_retry_at = None;
-    note_wake(runtime, None);
+    runtime.wake.set(None);
 }
 
 fn note_scale(runtime: &mut UiHost, next: f32) {
@@ -2195,1007 +1897,4 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::mpsc;
-    use std::sync::{Arc, Mutex};
-
-    use engine::session::{FrameOutput, FrameTime, IoEvent, Metrics};
-
-    use super::{
-        Acks, DropWait, ExitGuard, FramePipeline, Inbox, Installed, RasterHost, RasterPort, UiHost,
-        WakeTimer, fault_followup, lock, on_command, on_frame, start_async,
-    };
-    use crate::command::{Command, FrameToken, SurfaceId, SurfaceTarget};
-    use crate::images::{ImageHandle, ImageReady};
-    use crate::scheduler::FrameScheduler;
-    use crate::scheduler::Gpu;
-    use crate::surface::{SURFACE_OPEN_ATTEMPTS, SurfaceHost};
-    use crate::{NativePtr, Presented, Surface, Vsync};
-
-    #[test]
-    fn a_rejected_font_is_logged_without_its_bytes() {
-        let secret = b"SECRET-FONT-BYTES-DO-NOT-LOG";
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let capture = Capture(Arc::clone(&lines));
-        tracing::subscriber::with_default(capture, || {
-            let mut shaper = raster::ParleyShaper::new(raster::FontLibrary::new());
-            assert!(!shaper.register("Custom", secret));
-        });
-        let lines = lines.lock().unwrap_or_else(|error| error.into_inner());
-        assert!(!lines.is_empty(), "a bad face must be reported");
-        let message = &lines[0];
-        assert!(message.contains("Custom"), "{message}");
-        assert!(message.contains("font"), "{message}");
-        assert!(!message.contains("SECRET-FONT-BYTES"), "{message}");
-    }
-
-    struct NullServices;
-
-    impl crate::Services for NullServices {
-        fn font(&self, _: &str) -> Option<&[u8]> {
-            None
-        }
-
-        fn apply_ime(&self, _: &engine::session::ImeUpdate) {}
-    }
-
-    struct NullSurface;
-
-    impl Surface for NullSurface {
-        fn present(
-            &mut self,
-            _: &mut raster::Rasterizer,
-            _: raster::PixelSize,
-        ) -> Result<Presented, raster::Status> {
-            Ok(Presented::Continue)
-        }
-    }
-
-    struct CountSurface {
-        presents: Arc<AtomicU32>,
-        pixels: Arc<Mutex<raster::PixelSize>>,
-    }
-
-    impl Surface for CountSurface {
-        fn present(
-            &mut self,
-            _: &mut raster::Rasterizer,
-            pixels: raster::PixelSize,
-        ) -> Result<Presented, raster::Status> {
-            self.presents.fetch_add(1, Ordering::Relaxed);
-            *lock(&self.pixels) = pixels;
-            Ok(Presented::Continue)
-        }
-    }
-
-    struct RecVsync {
-        tokens: Mutex<Vec<FrameToken>>,
-        cancels: Mutex<u32>,
-    }
-
-    impl RecVsync {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                tokens: Mutex::new(Vec::new()),
-                cancels: Mutex::new(0),
-            })
-        }
-
-        fn token_count(&self) -> usize {
-            lock(&self.tokens).len()
-        }
-
-        fn last_token(&self) -> Option<FrameToken> {
-            lock(&self.tokens).last().copied()
-        }
-
-        fn cancel_count(&self) -> u32 {
-            *lock(&self.cancels)
-        }
-    }
-
-    impl Vsync for RecVsync {
-        fn bind(&self, _: Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>) {}
-
-        fn request_frame(&self, token: FrameToken) {
-            lock(&self.tokens).push(token);
-        }
-
-        fn cancel(&self) {
-            *lock(&self.cancels) += 1;
-        }
-    }
-
-    struct SessionLog {
-        io: Vec<IoEvent>,
-        frames: Vec<FrameTime>,
-        wants: bool,
-        launch_urls: Vec<String>,
-        clipboard: Option<String>,
-    }
-
-    struct MockSession {
-        log: Rc<RefCell<SessionLog>>,
-    }
-
-    impl engine::session::Session for MockSession {
-        fn metrics(&mut self, _: &Metrics) {}
-
-        fn pointer(&mut self, _: engine::input::PointerEvent) {}
-
-        fn frame(&mut self, time: FrameTime) -> FrameOutput {
-            let mut log = self.log.borrow_mut();
-            log.frames.push(time);
-            let mut output = FrameOutput::unchanged();
-            output.clipboard = log.clipboard.take();
-            output
-        }
-
-        fn wants_frame(&mut self) -> bool {
-            self.log.borrow().wants
-        }
-
-        fn io_event(&mut self, event: IoEvent) {
-            self.log.borrow_mut().io.push(event);
-        }
-
-        fn set_launch_url(&mut self, url: &str) {
-            self.log.borrow_mut().launch_urls.push(url.to_owned());
-        }
-    }
-
-    struct TestHarness {
-        runtime: UiHost,
-        acks: Acks,
-        vsync: Arc<RecVsync>,
-        session: Rc<RefCell<SessionLog>>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let library = raster::FontLibrary::new();
-            let raster = Rc::new(RefCell::new(
-                raster::Rasterizer::create(raster::RasterOptions::default(), library.clone())
-                    .unwrap_or_else(|error| panic!("{error}")),
-            ));
-            let vsync = RecVsync::new();
-            let log = Rc::new(RefCell::new(SessionLog {
-                io: Vec::new(),
-                frames: Vec::new(),
-                wants: false,
-                launch_urls: Vec::new(),
-                clipboard: None,
-            }));
-            let shaper = Rc::new(RefCell::new(raster::ParleyShaper::new(library)));
-            let runtime = UiHost {
-                shaper,
-                graphics: RasterPort::Local(Box::new(RasterHost {
-                    raster,
-                    telemetry: None,
-                    gpu_poll_pending: false,
-                    load_image: Arc::new(|_| true),
-                    busy: Arc::new(crate::watchdog::Busy::new()),
-                    frame_retry_at: None,
-                    clock: Arc::new(crate::ManualTaskRunner::default()),
-                    external_textures: Default::default(),
-                    external_gpu: Default::default(),
-                    surfaces: SurfaceHost::new(),
-                    open_surface: Box::new(|_, _| Ok(Box::new(NullSurface))),
-                    installed: None,
-                    needs_present: false,
-                    images: crate::images::ImageCache::new(),
-                    upload: Arc::new(Mutex::new(None)),
-                    present_failures: 0,
-                    device_recoveries: 0,
-                    gpu: Gpu::Live,
-                    last_step: None,
-                })),
-                active_surface: None,
-                try_surface: false,
-                revision: 0,
-                frames: FramePipeline::default(),
-                inbox: Arc::new(Inbox::new()),
-                services: Rc::new(RefCell::new(Box::new(NullServices))),
-                session: Some(Box::new(MockSession {
-                    log: Rc::clone(&log),
-                })),
-                plugins: None,
-                registry: Arc::new(engine::session::ModuleRegistry::new(Vec::new())),
-                _window: Arc::new(super::Poster {
-                    inbox: Arc::new(Inbox::new()),
-                }),
-                latest: None,
-                image_requirements: Arc::default(),
-                input: crate::input::Input::new(),
-                scheduler: FrameScheduler::new(),
-                vsync: Arc::clone(&vsync) as Arc<dyn Vsync>,
-                last_vsync: None,
-                compositor_mode: Arc::default(),
-                compositor_enabled: false,
-                compositor_epoch: 0,
-                compositor_generation: None,
-                animated_effects: false,
-                gpu_views: false,
-                point_scale: 1.0,
-                frame_number: 0,
-                topology: crate::ThreadTopology::SharedRender,
-                telemetry: None,
-                #[cfg(any(debug_assertions, feature = "devtools-server"))]
-                _remote: None,
-                gpu_poll: false,
-                semantics: None,
-                semantics_enabled: true,
-                autofill_enabled: false,
-                platform_views: Arc::default(),
-                published_views: None,
-                wake: WakeTimer::new(
-                    Arc::new(crate::ManualTaskRunner::default()),
-                    Arc::new(Inbox::new()),
-                ),
-                dump_list: false,
-                present_retry_at: None,
-                listeners: Vec::new(),
-                inspect: None,
-                hub: None,
-                inspect_dir: None,
-                inspect_written: false,
-                busy: Arc::new(crate::watchdog::Busy::new()),
-                diag_armed: false,
-            };
-            Self {
-                runtime,
-                acks: Acks::new(),
-                vsync,
-                session: log,
-            }
-        }
-
-        fn command(&mut self, command: Command) -> bool {
-            on_command(&mut self.runtime, command, &self.acks)
-                .unwrap_or_else(|error| panic!("{error}"))
-        }
-
-        fn open_dummy(&mut self) -> SurfaceId {
-            let id = SurfaceId::fresh();
-            assert!(!self.command(Command::SurfaceReady(SurfaceTarget::new(
-                id,
-                NativePtr(std::ptr::null_mut()),
-                Metrics::new(360.0, 640.0, 2.0),
-            ))));
-            assert!(self.runtime.graphics.local().surfaces.is_open());
-            id
-        }
-
-        fn frame_count(&self) -> usize {
-            self.session.borrow().frames.len()
-        }
-    }
-
-    fn now() -> FrameTime {
-        FrameTime {
-            vsync_ms: 1.0,
-            target_ms: 1.0,
-            interval_ms: 16.0,
-            mono_ms: 1.0,
-        }
-    }
-
-    #[test]
-    fn a_full_frame_pipeline_defers_ui_work_until_raster_releases_capacity() {
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        assert!(harness.runtime.frames.has_room(FramePipeline::DEPTH));
-        harness.runtime.frames.submit();
-        assert!(harness.runtime.frames.has_room(FramePipeline::DEPTH));
-        harness.runtime.frames.submit();
-        let token = harness
-            .vsync
-            .last_token()
-            .expect("surface requests a frame");
-        assert!(!harness.command(Command::Frame { token, time: now() }));
-        assert_eq!(harness.frame_count(), 0);
-        assert!(harness.runtime.frames.complete());
-        assert!(harness.runtime.frames.has_room(FramePipeline::DEPTH));
-        assert!(!harness.runtime.frames.complete());
-    }
-
-    #[test]
-    fn launch_url_delivers_and_arms_an_idle_surface() {
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        harness.runtime.scheduler.cancel();
-        assert!(!harness.runtime.scheduler.token_armed());
-
-        assert!(!harness.command(Command::LaunchUrl("https://app.example/item".into())));
-        assert!(harness.runtime.scheduler.token_armed());
-        assert_eq!(
-            harness.session.borrow().launch_urls.as_slice(),
-            ["https://app.example/item"]
-        );
-    }
-
-    #[test]
-    fn empty_launch_url_does_not_reach_the_session() {
-        let mut harness = TestHarness::new();
-        assert!(!harness.command(Command::LaunchUrl(String::new())));
-        assert!(harness.session.borrow().launch_urls.is_empty());
-    }
-
-    #[test]
-    fn wake_while_paused_does_not_frame() {
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Paused)));
-        assert!(harness.runtime.input.is_paused());
-        assert!(!harness.command(Command::Wake));
-        assert_eq!(harness.frame_count(), 0);
-    }
-
-    #[test]
-    fn wake_does_not_cancel_an_armed_vsync() {
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        let token = harness
-            .vsync
-            .last_token()
-            .expect("SurfaceReady arms one vsync token");
-        let cancels_before = harness.vsync.cancel_count();
-        assert!(!harness.command(Command::Wake));
-        assert_eq!(harness.frame_count(), 0);
-        assert_eq!(harness.vsync.cancel_count(), cancels_before);
-        assert!(!harness.command(Command::Frame { token, time: now() }));
-        assert_eq!(harness.frame_count(), 1);
-    }
-
-    #[test]
-    fn wake_without_an_armed_token_runs_a_frame() {
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        let token = harness
-            .vsync
-            .last_token()
-            .expect("SurfaceReady arms one vsync token");
-        assert!(!harness.command(Command::Frame { token, time: now() }));
-        // SurfaceReady arms twice; the leftover pending token is not a timer wake.
-        harness.runtime.scheduler.cancel();
-        harness.runtime.vsync.cancel();
-        let frames_before = harness.frame_count();
-        assert!(!harness.command(Command::Wake));
-        assert!(
-            harness.frame_count() > frames_before,
-            "an idle surface must still run a timer wake"
-        );
-    }
-
-    #[test]
-    fn resumed_replaces_a_stuck_armed_token() {
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        let stuck = harness
-            .vsync
-            .last_token()
-            .expect("SurfaceReady arms one vsync token");
-        assert!(
-            harness.runtime.scheduler.request().is_none(),
-            "an armed token must block the next request"
-        );
-        let cancels_before = harness.vsync.cancel_count();
-        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Resumed)));
-        assert!(harness.vsync.cancel_count() > cancels_before);
-        let next = harness
-            .vsync
-            .last_token()
-            .expect("Resumed arms a replacement token");
-        assert_ne!(next, stuck);
-        assert!(harness.runtime.scheduler.accept(next));
-    }
-
-    #[test]
-    fn resumed_clears_present_backoff_and_rearms() {
-        let mut harness = TestHarness::new();
-        let target = SurfaceTarget::new(
-            SurfaceId::fresh(),
-            NativePtr(std::ptr::null_mut()),
-            Metrics::new(360.0, 640.0, 2.0),
-        );
-        harness
-            .runtime
-            .graphics
-            .local()
-            .surfaces
-            .fail_attempt(target, SURFACE_OPEN_ATTEMPTS - 1);
-        assert!(
-            harness
-                .runtime
-                .graphics
-                .local()
-                .surfaces
-                .take_attempt()
-                .is_none()
-        );
-        harness.runtime.graphics.local().needs_present = false;
-        harness.runtime.graphics.local().present_failures = 3;
-        harness.runtime.present_retry_at = Some(1);
-        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Resumed)));
-        assert!(harness.runtime.graphics.local().needs_present);
-        assert_eq!(harness.runtime.graphics.local().present_failures, 0);
-        assert!(harness.runtime.present_retry_at.is_none());
-        assert!(
-            harness
-                .runtime
-                .graphics
-                .local()
-                .surfaces
-                .take_attempt()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn visible_inactive_window_recovers_frames_after_being_hidden() {
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        let before = harness.vsync.last_token();
-        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Hidden)));
-        assert!(harness.runtime.input.is_paused());
-
-        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Inactive)));
-        assert!(!harness.runtime.input.is_paused());
-        let token = harness
-            .vsync
-            .last_token()
-            .expect("visible window arms vsync");
-        assert_ne!(Some(token), before);
-        assert!(!harness.command(Command::Frame { token, time: now() }));
-        assert_eq!(harness.frame_count(), 1);
-    }
-
-    #[test]
-    fn memory_warning_drops_installed_list_and_trims_images() {
-        let mut harness = TestHarness::new();
-        let request = harness
-            .runtime
-            .graphics
-            .local()
-            .images
-            .request("asset:logo", 1)
-            .expect("pending decode");
-        harness
-            .runtime
-            .graphics
-            .local()
-            .images
-            .apply(ImageReady::Decoded(ImageHandle {
-                source: Arc::from("asset:logo"),
-                generation: request.generation,
-                size: [1, 1],
-                pixels: Arc::from([0u8, 0, 0, 0]),
-                gpu: None,
-            }));
-        assert!(
-            harness
-                .runtime
-                .graphics
-                .local()
-                .images
-                .contains("asset:logo", 1)
-        );
-        harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
-        let tokens_before = harness.vsync.token_count();
-        assert!(!harness.command(Command::MemoryWarning));
-        assert!(harness.runtime.graphics.local().installed.is_none());
-        assert!(
-            !harness
-                .runtime
-                .graphics
-                .local()
-                .images
-                .contains("asset:logo", 1)
-        );
-        assert_eq!(harness.runtime.graphics.local().gpu, Gpu::Flush);
-        assert!(harness.vsync.token_count() > tokens_before);
-    }
-
-    #[test]
-    fn hidden_flushes_the_gpu_and_does_not_acquire() {
-        let presents = Arc::new(AtomicU32::new(0));
-        let mut harness = TestHarness::new();
-        let counted = Arc::clone(&presents);
-        harness.runtime.graphics.local().open_surface = Box::new(move |_, _| {
-            let presents = Arc::clone(&counted);
-            Ok(Box::new(CountSurface {
-                presents,
-                pixels: Arc::new(Mutex::new(raster::PixelSize::default())),
-            }))
-        });
-        harness.open_dummy();
-        harness.runtime.latest = Some(Arc::new(engine::scene::LayerTree::empty()));
-        harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
-        harness.runtime.graphics.local().needs_present = true;
-        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Hidden)));
-        assert_eq!(harness.runtime.graphics.local().gpu, Gpu::Flush);
-        assert!(harness.runtime.graphics.local().installed.is_none());
-        assert!(harness.runtime.input.is_paused());
-        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
-        assert_eq!(presents.load(Ordering::Relaxed), 0);
-        harness.runtime.graphics.local().gpu = Gpu::Dead;
-        harness.runtime.input.resume();
-        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
-        assert_eq!(presents.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn present_passes_the_pixels_the_host_posted() {
-        let seen = Arc::new(Mutex::new(raster::PixelSize::default()));
-        let mut harness = TestHarness::new();
-        let seen_open = Arc::clone(&seen);
-        harness.runtime.graphics.local().open_surface = Box::new(move |_, _| {
-            Ok(Box::new(CountSurface {
-                presents: Arc::new(AtomicU32::new(0)),
-                pixels: Arc::clone(&seen_open),
-            }))
-        });
-        harness.open_dummy();
-        harness.runtime.latest = Some(Arc::new(engine::scene::LayerTree::empty()));
-        harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
-        harness.runtime.point_scale = 2.0;
-        harness.runtime.graphics.local().needs_present = true;
-        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
-        assert_eq!(*lock(&seen), raster::PixelSize::new(720, 1280));
-    }
-
-    #[test]
-    fn device_loss_keeps_the_latest_layers_and_requests_a_fresh_submission() {
-        struct LostDevice(Arc<AtomicU32>);
-
-        impl Surface for LostDevice {
-            fn present(
-                &mut self,
-                _: &mut raster::Rasterizer,
-                _: raster::PixelSize,
-            ) -> Result<Presented, raster::Status> {
-                Err(raster::Status::DeviceLost)
-            }
-
-            fn recover_device(
-                &mut self,
-                _: &mut raster::Rasterizer,
-                _: raster::PixelSize,
-            ) -> Result<(), raster::Status> {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-        }
-
-        let recoveries = Arc::new(AtomicU32::new(0));
-        let counted = Arc::clone(&recoveries);
-        let mut harness = TestHarness::new();
-        harness.runtime.graphics.local().open_surface =
-            Box::new(move |_, _| Ok(Box::new(LostDevice(Arc::clone(&counted)))));
-        harness.open_dummy();
-        let latest = Arc::new(engine::scene::LayerTree::empty());
-        harness.runtime.latest = Some(Arc::clone(&latest));
-        harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
-        harness.runtime.point_scale = 2.0;
-        harness.runtime.graphics.local().needs_present = true;
-
-        let token = harness.vsync.last_token().expect("initial vsync");
-        assert!(!harness.command(Command::Frame { token, time: now() }));
-        assert_eq!(recoveries.load(Ordering::Relaxed), 1);
-        assert!(harness.runtime.graphics.local().installed.is_none());
-        assert_eq!(harness.runtime.graphics.local().gpu, Gpu::Flush);
-        assert!(
-            harness
-                .runtime
-                .latest
-                .as_ref()
-                .is_some_and(|tree| Arc::ptr_eq(tree, &latest))
-        );
-        assert_ne!(harness.vsync.last_token(), Some(token));
-    }
-
-    #[test]
-    fn io_event_arms_only_when_session_wants_frame() {
-        let mut harness = TestHarness::new();
-        let tokens_before = harness.vsync.token_count();
-        assert!(!harness.command(Command::Io(IoEvent::Plugin {
-            token: 7,
-            result: engine::session::PluginResult::Failed {
-                message: "offline".into(),
-            },
-        })));
-        assert!(
-            matches!(
-                harness.session.borrow().io.last(),
-                Some(IoEvent::Plugin { token: 7, .. })
-            ),
-            "plugin failure completion must reach the session"
-        );
-        assert_eq!(harness.vsync.token_count(), tokens_before);
-        harness.session.borrow_mut().wants = true;
-        assert!(!harness.command(Command::Io(IoEvent::Plugin {
-            token: 8,
-            result: engine::session::PluginResult::Done(engine::session::PluginValue::Null),
-        })));
-        assert!(
-            matches!(
-                harness.session.borrow().io.last(),
-                Some(IoEvent::Plugin { token: 8, .. })
-            ),
-            "plugin completion must reach the session"
-        );
-        assert!(harness.vsync.token_count() > tokens_before);
-    }
-
-    #[test]
-    fn faults_arm_one_extra_frame_then_stop_when_held() {
-        let listener = engine::session::ScriptFault {
-            source: "listener",
-            message: "boom".into(),
-            stack: "at f".into(),
-        };
-        let frame = engine::session::ScriptFault {
-            source: "frame",
-            message: "interrupted (frame)".into(),
-            stack: String::new(),
-        };
-        let first = fault_followup(false, std::slice::from_ref(&listener));
-        assert!(first.arm_extra);
-        assert!(!first.stop_again);
-        assert!(first.diag_armed);
-        let second = fault_followup(true, &[frame]);
-        assert!(!second.arm_extra);
-        assert!(second.stop_again);
-        let quiet = fault_followup(true, &[]);
-        assert!(!quiet.diag_armed);
-    }
-
-    #[test]
-    fn a_panicking_frame_stays_on_the_render_thread() {
-        struct PanicSession;
-        impl engine::session::Session for PanicSession {
-            fn metrics(&mut self, _: &Metrics) {}
-            fn pointer(&mut self, _: engine::input::PointerEvent) {}
-            fn frame(&mut self, _: FrameTime) -> FrameOutput {
-                panic!("js host");
-            }
-        }
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        harness.runtime.session = Some(Box::new(PanicSession));
-        let token = harness
-            .vsync
-            .last_token()
-            .expect("SurfaceReady arms one vsync token");
-        assert!(!harness.command(Command::Frame { token, time: now() }));
-    }
-
-    #[test]
-    fn stale_frame_token_is_dropped() {
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        let armed = harness
-            .vsync
-            .last_token()
-            .expect("SurfaceReady arms one vsync token");
-        assert!(!harness.command(Command::Frame {
-            token: FrameToken(armed.0.wrapping_add(1)),
-            time: now(),
-        }));
-        assert_eq!(harness.frame_count(), 0);
-    }
-
-    #[test]
-    fn dropped_surface_cancels_vsync_and_scheduler() {
-        let mut harness = TestHarness::new();
-        let id = harness.open_dummy();
-        assert!(harness.acks.arm(id));
-        assert!(!harness.acks.poll(id));
-        harness.runtime.graphics.local().installed = Some(Installed { scale: 1.0 });
-        let cancels_before = harness.vsync.cancel_count();
-        assert!(!harness.command(Command::SurfaceDestroyed { id }));
-        assert!(harness.runtime.graphics.local().installed.is_none());
-        assert!(!harness.runtime.graphics.local().surfaces.is_open());
-        assert!(harness.acks.poll(id));
-        assert!(harness.vsync.cancel_count() > cancels_before);
-        assert!(
-            harness.runtime.scheduler.request().is_some(),
-            "cancel must drop the armed token so the next request is accepted"
-        );
-    }
-
-    #[test]
-    fn renderer_exit_completes_existing_and_future_surface_teardown() {
-        let acks = Arc::new(Acks::new());
-        let pending = SurfaceId::fresh();
-        let late = SurfaceId::fresh();
-        assert!(acks.arm(pending));
-        assert!(!acks.poll(pending));
-        let (done, exited) = mpsc::channel();
-        ExitGuard {
-            done: Some(done),
-            acks: Arc::clone(&acks),
-            inbox: Arc::new(Inbox::new()),
-        }
-        .finish(Ok(()));
-
-        assert!(matches!(exited.try_recv(), Ok(Ok(()))));
-        assert!(!acks.arm(late));
-        assert!(acks.poll(pending));
-        assert!(acks.poll(late));
-        DropWait { acks }.wait(pending);
-    }
-
-    #[test]
-    fn closing_during_preparation_reports_cancelled_once() {
-        use crate::BootError;
-        use std::time::Duration;
-
-        let (entered, preparing) = mpsc::channel();
-        let (proceed, released) = mpsc::channel();
-        let (report, ready) = mpsc::channel();
-        let timeout = Duration::from_secs(5);
-        let link = start_async(
-            move || {
-                entered.send(()).unwrap();
-                released.recv_timeout(timeout).unwrap();
-                Err(BootError::Platform("injected preparation failure".into()))
-            },
-            move |status| report.send(status).unwrap(),
-        )
-        .expect("spawn render thread");
-
-        preparing
-            .recv_timeout(timeout)
-            .expect("preparation started");
-        assert!(matches!(ready.try_recv(), Err(mpsc::TryRecvError::Empty)));
-        link.request_shutdown();
-        proceed.send(()).unwrap();
-
-        assert!(matches!(
-            ready.recv_timeout(timeout),
-            Ok(Err(BootError::Cancelled))
-        ));
-        assert!(matches!(
-            link.shutdown_and_join(),
-            Err(BootError::Cancelled)
-        ));
-        assert!(matches!(
-            ready.recv_timeout(timeout),
-            Err(mpsc::RecvTimeoutError::Disconnected)
-        ));
-    }
-
-    #[test]
-    fn buffer_resize_repaints_even_when_logical_metrics_are_unchanged() {
-        let mut harness = TestHarness::new();
-        let id = harness.open_dummy();
-        // An idle frame has already delivered these logical metrics.
-        let metrics = Metrics::new(360.0, 640.0, 2.0);
-        assert_eq!(harness.runtime.input.begin_frame().metrics, Some(metrics));
-        harness.runtime.graphics.local().needs_present = false;
-        harness.runtime.scheduler.cancel();
-
-        assert!(!harness.command(Command::SurfaceChanged {
-            id,
-            metrics,
-            pixels: raster::PixelSize::new(800, 1280),
-        }));
-        assert!(harness.runtime.graphics.local().needs_present);
-        assert!(harness.runtime.scheduler.token_armed());
-        assert!(harness.runtime.input.begin_frame().metrics.is_none());
-    }
-
-    #[test]
-    fn remaining_command_arms_are_reachable() {
-        let mut harness = TestHarness::new();
-        harness.session.borrow_mut().wants = true;
-        let id = harness.open_dummy();
-        assert!(!harness.command(Command::SurfaceChanged {
-            id,
-            metrics: Metrics::new(400.0, 800.0, 2.0),
-            pixels: raster::PixelSize::new(800, 1600),
-        }));
-        assert!(
-            !harness.command(Command::Pointer(engine::input::PointerEvent::new(
-                engine::input::Phase::Move,
-                1.0,
-                1.0,
-                0.0,
-            )))
-        );
-        assert!(!harness.command(Command::Input(engine::session::InputEvent::Back)));
-        assert!(!harness.command(Command::ImeDismissed));
-        assert!(!harness.command(Command::Metrics(Metrics::new(360.0, 640.0, 3.0))));
-        assert!(!harness.command(Command::Invalidate));
-        assert!(harness.runtime.graphics.local().needs_present);
-        assert!(!harness.command(Command::Settings(
-            engine::session::PlatformSettings::default()
-        )));
-        assert!(!harness.command(Command::WindowFocus(true)));
-        assert!(!harness.command(Command::LaunchUrl("https://app.example/item".into())));
-        assert!(!harness.command(Command::SemanticsAction(
-            engine::semantics::SemanticsAction::Activate(engine::semantics::SemanticsId(1))
-        )));
-        assert!(!harness.command(Command::ReloadImage("asset:logo".into())));
-        assert!(!harness.command(Command::ImageReady(ImageReady::Missing {
-            source: Arc::from("asset:missing"),
-            generation: 1,
-        })));
-        assert!(!harness.command(Command::Io(IoEvent::Plugin {
-            token: 11,
-            result: engine::session::PluginResult::Failed {
-                message: "retry".into(),
-            },
-        })));
-        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Inactive)));
-        let replaced = SurfaceId::fresh();
-        assert!(!harness.command(Command::SurfaceReady(SurfaceTarget::new(
-            replaced,
-            NativePtr(std::ptr::null_mut()),
-            Metrics::new(360.0, 640.0, 2.0),
-        ))));
-        let frames_before = harness.frame_count();
-        assert!(!harness.command(Command::Wake));
-        assert_eq!(
-            harness.frame_count(),
-            frames_before,
-            "Wake must not steal the vsync token SurfaceReady just armed"
-        );
-        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Hidden)));
-        assert!(harness.runtime.input.is_paused());
-        assert!(harness.command(Command::Shutdown));
-    }
-
-    #[test]
-    fn accepted_frame_token_runs_the_session() {
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        let token = match harness.vsync.last_token() {
-            Some(token) => token,
-            None => panic!("SurfaceReady arms one vsync token"),
-        };
-        assert!(!harness.command(Command::Frame { token, time: now() }));
-        assert_eq!(harness.frame_count(), 1);
-    }
-
-    #[test]
-    fn editor_copy_calls_clipboard_set_string() {
-        let mut registrar = impasto::PluginRegistrar::default();
-        impasto_clipboard::register(&mut registrar);
-        let modules = registrar.build(&impasto::PluginContext::default());
-        let Ok(modules) = modules else {
-            panic!("build clipboard modules");
-        };
-        let mut harness = TestHarness::new();
-        harness.runtime.registry = Arc::new(engine::session::ModuleRegistry::new(modules));
-        harness.open_dummy();
-        harness.session.borrow_mut().clipboard = Some("copied".into());
-        let token = match harness.vsync.last_token() {
-            Some(token) => token,
-            None => panic!("SurfaceReady arms one vsync token"),
-        };
-        assert!(!harness.command(Command::Frame { token, time: now() }));
-        match harness.runtime.registry.call("Clipboard", "getString", &[]) {
-            Ok(engine::session::PluginValue::Str(text)) => assert_eq!(text, "copied"),
-            other => panic!("unexpected clipboard contents {other:?}"),
-        }
-    }
-
-    struct Capture(Arc<Mutex<Vec<String>>>);
-
-    struct MessageVisit<'a>(&'a mut String);
-
-    impl tracing::field::Visit for MessageVisit<'_> {
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            if field.name() == "message" {
-                *self.0 = value.to_owned();
-            } else {
-                self.0.push(' ');
-                self.0.push_str(field.name());
-                self.0.push('=');
-                self.0.push_str(value);
-            }
-        }
-
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                *self.0 = format!("{value:?}");
-            } else {
-                self.0.push(' ');
-                self.0.push_str(field.name());
-                self.0.push('=');
-                self.0.push_str(&format!("{value:?}"));
-            }
-        }
-    }
-
-    impl tracing::Subscriber for Capture {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut message = String::new();
-            event.record(&mut MessageVisit(&mut message));
-            self.0
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(message);
-        }
-
-        fn enter(&self, _: &tracing::span::Id) {}
-
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    #[test]
-    fn editor_copy_without_clipboard_logs_not_linked() {
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let mut harness = TestHarness::new();
-        harness.open_dummy();
-        harness.session.borrow_mut().clipboard = Some("copied".into());
-        let token = match harness.vsync.last_token() {
-            Some(token) => token,
-            None => panic!("SurfaceReady arms one vsync token"),
-        };
-        let capture = Capture(Arc::clone(&lines));
-        tracing::subscriber::with_default(capture, || {
-            assert!(!harness.command(Command::Frame { token, time: now() }));
-        });
-        let lines = lines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert!(
-            lines.iter().any(|message| message.contains("not linked")),
-            "{lines:?}"
-        );
-    }
-
-    #[test]
-    fn not_ready_surface_waits_and_a_gave_up_change_rearms() {
-        let mut harness = TestHarness::new();
-        harness.runtime.graphics.local().open_surface =
-            Box::new(|_, _| Err(raster::Status::NotReady));
-        let id = SurfaceId::fresh();
-        assert!(!harness.command(Command::SurfaceReady(SurfaceTarget::new(
-            id,
-            NativePtr(std::ptr::null_mut()),
-            Metrics::new(360.0, 640.0, 2.0),
-        ))));
-        assert!(!harness.runtime.graphics.local().surfaces.is_open());
-        harness.runtime.graphics.local().surfaces.fail_attempt(
-            SurfaceTarget::new(
-                id,
-                NativePtr(std::ptr::null_mut()),
-                Metrics::new(360.0, 640.0, 2.0),
-            ),
-            SURFACE_OPEN_ATTEMPTS - 1,
-        );
-        assert!(!harness.command(Command::SurfaceChanged {
-            id,
-            metrics: Metrics::new(400.0, 800.0, 2.0),
-            pixels: raster::PixelSize::new(800, 1600),
-        }));
-        assert!(
-            harness
-                .runtime
-                .graphics
-                .local()
-                .surfaces
-                .take_attempt()
-                .is_some()
-        );
-    }
-}
+mod tests;

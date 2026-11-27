@@ -349,7 +349,14 @@ pub(crate) fn script_only(app: &App, previous: &Snapshot, current: &Snapshot) ->
             .filter(|(file, _)| is_native(file))
             .eq(current.iter().filter(|(file, _)| is_native(file)))
     });
+    let assets_unchanged = previous
+        .iter()
+        .filter(|(file, _)| file.starts_with(app.assets()))
+        .eq(current
+            .iter()
+            .filter(|(file, _)| file.starts_with(app.assets())));
     native_unchanged
+        && assets_unchanged
         && [
             "assets",
             "app.toml",
@@ -517,8 +524,9 @@ pub(crate) fn files(app: &App) -> Result<Snapshot> {
     for path in crate::plugins::watched_paths(app) {
         snapshot_path(&path, &mut out)?;
     }
-    if app.gallery {
-        snapshot_path(&toolchain::framework()?.join("packages"), &mut out)?;
+    snapshot_path(app.assets(), &mut out)?;
+    for path in app.sources.values() {
+        snapshot_path(path, &mut out)?;
     }
     Ok(out)
 }

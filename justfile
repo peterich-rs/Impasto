@@ -16,7 +16,10 @@ check: style-check boundaries clippy test solid standard-check
 bench:
     cargo test --locked --manifest-path "{{root}}/Cargo.toml" -p raster --lib --release -- bench_ --ignored --nocapture --test-threads=1
 
-test: gallery-dist
+bench-wave:
+    cargo test --locked --manifest-path "{{root}}/Cargo.toml" -p raster --lib --release -- tests::p0::wave::bench_ --ignored --nocapture --test-threads=1
+
+test:
     cargo test --manifest-path "{{root}}/Cargo.toml" --workspace
 
 # CRAP and duplicate-form reports for the native product crates, then a
@@ -48,19 +51,23 @@ standard-check:
     cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- analyze --standard
 
 solid-app: gallery-dist
-    cd "{{root}}" && cargo run --locked -p cli -- test
+    cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- --project "{{root}}/examples/gallery-solid" test
 
-# Build the untracked Gallery ESM before running Rust engine tests.
+gallery-tests: gallery-dist
+    cargo test --locked --manifest-path "{{root}}/Cargo.toml" -p engine --features gallery-tests js::tests::gallery_tests
+    cargo test --locked --manifest-path "{{root}}/Cargo.toml" -p cli --bin impasto gallery_patch -- --ignored
+
+# Build the standalone Gallery ESM for the example workflow.
 gallery-dist:
     cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- pack "{{root}}/examples/gallery-solid/src/quotes.tsx" "{{root}}/examples/gallery-solid/dist/quotes.js"
 
 host: gallery-dist
-    cargo run --manifest-path "{{root}}/Cargo.toml" -p embedder-macos -- --js "{{root}}/examples/gallery-solid/dist/quotes.js" "{{logo}}"
+    cargo run --manifest-path "{{root}}/Cargo.toml" -p embedder-macos -- --title "Impasto Gallery" --js "{{root}}/examples/gallery-solid/dist/quotes.js" "{{logo}}"
 
 host-js: host
 
 ios-build-check:
-    cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- build ios --ios-simulator --debug
+    cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- --project "{{root}}/examples/gallery-solid" build ios --ios-simulator --debug
 
 [positional-arguments]
 ios-sim-test *args:
@@ -72,15 +79,15 @@ ios-composition-test udid *args:
 
 # Debug APK. Gradle runs cargo build without --release.
 # Needs the Android NDK and both Android Rust targets.
-android: gallery-dist
+android:
     "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" :app:assembleDebug
 
-android-build-check: gallery-dist
+android-build-check:
     "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" :app:assembleDebug :app:lintDebug
-    python3 "{{root}}/tools/check-android-package.py" "{{root}}/crates/embedder/android/apk/app/build/outputs/apk/debug/app-debug.apk"
+    ABI_LIST="${ORG_GRADLE_PROJECT_impastoAbis:-}" python3 "{{root}}/tools/check-android-package.py" "{{root}}/crates/embedder/android/apk/app/build/outputs/apk/debug/app-debug.apk"
 
 # Local verification on one Android device or emulator with test package cleanup.
-android-device-test: gallery-dist
+android-device-test:
     #!/usr/bin/env bash
     set -euo pipefail
     serial="$(adb get-serialno)"
@@ -107,7 +114,7 @@ android-device-test: gallery-dist
         :app:connectedDebugAndroidTest
 
 # Release APK. Gradle runs cargo build --release. Signed with the debug keystore.
-android-release: gallery-dist
+android-release:
     "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" -PimpastoLocalSigning=true :app:assembleRelease
 
 # Relocatable CLI, framework sources and pinned native TypeScript.

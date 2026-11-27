@@ -8,7 +8,7 @@ use super::node::Kind;
 use super::{FocusDirection, Gesture, NodeId, Tree};
 use crate::{
     Error,
-    input::{Button, Phase, PointerEvent, PointerId},
+    input::{Button, Phase, PointerEvent, PointerId, PointerKind, PointerSample, drag_slop},
 };
 
 /// Routes captured at pointer down. Not a gesture contest: one pointer has one route.
@@ -44,11 +44,20 @@ pub(super) struct PendingTap {
     x: f32,
     y: f32,
     time_ms: f64,
+    kind: PointerKind,
     /// `Some` schedules [`Gesture::Click`] when [`Tree::tick`] passes this time.
     deadline_ms: Option<f64>,
     focus: Option<NodeId>,
     window_ms: f64,
     slop: f32,
+}
+
+impl PendingTap {
+    fn matches(&self, event: &PointerEvent) -> bool {
+        event.kind == self.kind
+            && (0.0..=self.window_ms).contains(&(event.time_ms - self.time_ms))
+            && !beyond(self.x, self.y, event.x, event.y, self.slop)
+    }
 }
 
 impl PointerTable {
@@ -84,17 +93,6 @@ impl PointerTable {
     }
 }
 
-/// Distance from the pointer-down point that a move must exceed before a scroll
-/// wins the gesture. Kept at 8; Flutter's current `kTouchSlop` is 18.
-const DRAG_SLOP: f32 = crate::input::DRAG_SLOP;
-
-#[derive(Clone, Copy)]
-pub(super) struct Sample {
-    pub(super) x: f32,
-    pub(super) y: f32,
-    pub(super) time_ms: f64,
-}
-
 pub(super) struct DragState {
     /// Deepest node under the pointer at press time.
     pub(super) hit: Option<NodeId>,
@@ -102,7 +100,6 @@ pub(super) struct DragState {
     pub(super) scroll: Option<NodeId>,
     pub(super) locked: bool,
     /// The long-press watch already won. Lift releases without a click.
-    pub(super) long_press: bool,
     /// Unclamped content position for a locked scroll. Later samples continue from here.
     pub(super) desired_x: f32,
     pub(super) desired_y: f32,
@@ -110,8 +107,6 @@ pub(super) struct DragState {
     pub(super) origin_y: f32,
     pub(super) last_x: f32,
     pub(super) last_y: f32,
-    pub(super) previous_move: Option<Sample>,
-    pub(super) latest_move: Option<Sample>,
     pub(super) velocity: crate::input::VelocityRing,
     /// One "scroll not claimed" note per press. Later moves stay quiet.
     miss_noted: bool,
@@ -127,25 +122,39 @@ pub(super) struct PointerRoute {
     pub(super) drag: Option<DragState>,
     /// Still-finger long press. Cleared when the drag locks or the finger leaves the slop.
     pub(super) long_press: Option<LongPressWatch>,
-    /// The down that produced [`Gesture::DoubleTap`] must not also click.
-    pub(super) consumed_double: bool,
+    /// Release time of the first tap, if this press can complete a double tap.
+    pub(super) first_tap_ms: Option<f64>,
 }
 
 /// Time and slop for one long press. The duration is [`crate::input::LONG_PRESS_MS`].
 pub(super) struct LongPressWatch {
     pub(super) target: NodeId,
     pub(super) down_ms: f64,
+    origin_x: f32,
+    origin_y: f32,
     pub(super) cancelled: bool,
     pub(super) fired: bool,
 }
 
+impl LongPressWatch {
+    fn past_slop(&self, x: f32, y: f32, kind: PointerKind) -> bool {
+        beyond(self.origin_x, self.origin_y, x, y, drag_slop(kind))
+    }
+}
+
 impl PointerRoute {
+    fn long_press_deadline(&self) -> Option<f64> {
+        let watch = self.long_press.as_ref()?;
+        (!watch.cancelled && !watch.fired && !self.drag.as_ref().is_some_and(|drag| drag.locked))
+            .then_some(watch.down_ms + crate::input::LONG_PRESS_MS)
+            .filter(|deadline| deadline.is_finite())
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.pressed.is_none()
             && self.secondary.is_none()
             && self.drag.is_none()
             && self.long_press.is_none()
-            && !self.consumed_double
     }
 }
 
@@ -197,7 +206,7 @@ impl Tree {
     /// Hit-tests the previous layout and updates the press, drag, and focus gestures.
     ///
     /// A hit on the way down is [`Gesture::Press`]. A move that stays within
-    /// `DRAG_SLOP` keeps that press. Past the slop, a region that
+    /// the pointer’s slop keeps that press. Past the slop, a region that
     /// [`Tree::set_drag_claim`]s the dominant axis locks as a selection drag.
     /// Otherwise the scroll chain does: a scroll at its edge yields to an
     /// ancestor that can still move on that axis. One scroll keeps one locked
@@ -205,6 +214,14 @@ impl Tree {
     /// [`Gesture::Release`] then [`Gesture::Click`], and that click is what moves
     /// focus. A locked drag does not. Does not lay out.
     pub fn pointer(&mut self, event: PointerEvent) -> Vec<Gesture> {
+        self.pointer_with_history(event, &[])
+    }
+
+    pub fn pointer_with_history(
+        &mut self,
+        event: PointerEvent,
+        history: &[PointerSample],
+    ) -> Vec<Gesture> {
         self.arena.pointer_at = (event.x, event.y);
         let mut gestures = self.drain_pending();
         if self.debug.pointer_trace {
@@ -214,6 +231,22 @@ impl Tree {
             return self.finish_pointer(gestures);
         }
         let mut route = self.arena.routes.remove(&event.pointer).unwrap_or_default();
+        let pressed = route.pressed;
+        let hovered = self.arena.hovered;
+        if event.phase == Phase::Move {
+            for sample in history {
+                if sample.time_ms <= event.time_ms {
+                    if let Some(drag) = route.drag.as_mut() {
+                        drag.velocity.push(sample.x, sample.y, sample.time_ms);
+                    }
+                    if let Some(watch) = route.long_press.as_mut()
+                        && watch.past_slop(sample.x, sample.y, event.kind)
+                    {
+                        watch.cancelled = true;
+                    }
+                }
+            }
+        }
         let produced = match event.phase {
             Phase::Wheel => self.pointer_wheel(event),
             Phase::Zoom => self.pointer_zoom(event),
@@ -229,11 +262,16 @@ impl Tree {
             Phase::Move => self.pointer_move(&mut route, event),
             Phase::Up => self.pointer_up(&mut route, event),
         };
+        if pressed != route.pressed {
+            self.invalidate_style_deps(crate::style::DepMask::ACTIVE);
+        }
+        if hovered != self.arena.hovered {
+            self.invalidate_style_deps(crate::style::DepMask::HOVER);
+        }
         if !route.is_empty() {
             self.arena.routes.insert(event.pointer, route);
         }
         gestures.extend(produced);
-        self.invalidate_style_deps(crate::style::DepMask::HOVER | crate::style::DepMask::ACTIVE);
         self.finish_pointer(gestures)
     }
 
@@ -256,27 +294,26 @@ impl Tree {
         route.drag = None;
         route.pressed = None;
         route.long_press = None;
-        route.consumed_double = false;
-        let mut early = self.take_second_tap(&event);
+        route.first_tap_ms = None;
         let hit = self.hit_root(event.x, event.y);
         let pressed = hit.and_then(|id| self.region_of(id));
+        let mut early = self.check_second_tap(route, &event, pressed);
         let scroll = hit.and_then(|id| self.drag_of(id));
         route.pressed = pressed;
         if pressed.is_some() || scroll.is_some() {
+            let mut velocity = crate::input::VelocityRing::new();
+            velocity.push(event.x, event.y, event.time_ms);
             route.drag = Some(DragState {
                 hit,
                 scroll,
                 locked: false,
-                long_press: false,
                 desired_x: 0.0,
                 desired_y: 0.0,
                 origin_x: event.x,
                 origin_y: event.y,
                 last_x: event.x,
                 last_y: event.y,
-                previous_move: None,
-                latest_move: None,
-                velocity: crate::input::VelocityRing::new(),
+                velocity,
                 miss_noted: false,
                 noted_ms: f64::NEG_INFINITY,
             });
@@ -298,31 +335,26 @@ impl Tree {
             );
         }
         route.long_press = self.long_press_watch(hit, &event);
-        if early
-            .iter()
-            .any(|gesture| matches!(gesture, Gesture::DoubleTap(_)))
-        {
-            route.consumed_double = true;
-        }
         early.extend(pressed.into_iter().map(Gesture::Press));
         early
     }
 
-    /// Second down inside the window and slop. The first up did not accept tap.
-    fn take_second_tap(&mut self, event: &PointerEvent) -> Vec<Gesture> {
+    fn check_second_tap(
+        &mut self,
+        route: &mut PointerRoute,
+        event: &PointerEvent,
+        target: Option<NodeId>,
+    ) -> Vec<Gesture> {
         let Some(pending) = self.arena.pending_tap.take() else {
             return Vec::new();
         };
-        let hit = self.hit_root(event.x, event.y);
-        let target = hit
-            .and_then(|id| self.region_of(id))
-            .unwrap_or(pending.node);
-        let inside = event.time_ms >= pending.time_ms
-            && event.time_ms - pending.time_ms <= pending.window_ms
-            && !beyond(pending.x, pending.y, event.x, event.y, pending.slop)
-            && target == pending.node;
-        if inside {
-            return vec![Gesture::DoubleTap(pending.node)];
+        if target == Some(pending.node) && pending.matches(event) {
+            route.first_tap_ms = Some(pending.time_ms);
+            self.arena.pending_tap = Some(pending);
+            return Vec::new();
+        }
+        if pending.deadline_ms.is_some() {
+            return self.finish_tap(pending);
         }
         Vec::new()
     }
@@ -337,8 +369,7 @@ impl Tree {
             .deadline_ms
             .is_some_and(|deadline| now_ms >= deadline)
         {
-            gestures.push(Gesture::Click(pending.node));
-            gestures.extend(self.move_focus(pending.focus));
+            gestures.extend(self.finish_tap(pending));
             return gestures;
         }
         if pending.deadline_ms.is_none() && now_ms - pending.time_ms > pending.window_ms {
@@ -348,22 +379,33 @@ impl Tree {
         gestures
     }
 
-    /// True while a finger is waiting out [`crate::input::LONG_PRESS_MS`]. The session asks for another frame.
-    pub fn pending_long_press(&self) -> bool {
-        self.arena.routes.values().any(|route| {
-            route.long_press.as_ref().is_some_and(|watch| {
-                !watch.cancelled
-                    && !watch.fired
-                    && !route.drag.as_ref().is_some_and(|drag| drag.locked)
-            })
-        })
+    fn finish_tap(&mut self, pending: PendingTap) -> Vec<Gesture> {
+        let mut gestures = vec![Gesture::Click(pending.node)];
+        gestures.extend(self.move_focus(pending.focus));
+        gestures
+    }
+
+    /// Earliest gesture expiration on the pointer/display clock.
+    pub fn next_gesture_deadline_ms(&self) -> Option<f64> {
+        self.arena
+            .routes
+            .values()
+            .filter_map(PointerRoute::long_press_deadline)
+            .chain(
+                self.arena
+                    .pending_tap
+                    .as_ref()
+                    .and_then(|tap| tap.deadline_ms),
+            )
+            .filter(|deadline| deadline.is_finite())
+            .min_by(f64::total_cmp)
     }
 
     fn pointer_zoom(&mut self, event: PointerEvent) -> Vec<Gesture> {
         let Some(hit) = self.hit_root(event.x, event.y) else {
             return Vec::new();
         };
-        let Some(id) = self.nearest_transform(hit) else {
+        let Some(id) = self.zoom_target(hit) else {
             return Vec::new();
         };
         vec![Gesture::Zoom {
@@ -372,16 +414,23 @@ impl Tree {
         }]
     }
 
-    fn nearest_transform(&self, mut id: NodeId) -> Option<NodeId> {
-        loop {
-            if self
-                .get(id)
-                .is_some_and(|node| node.role.contains(super::node::Role::TRANSFORM))
-            {
+    fn zoom_target(&self, mut id: NodeId) -> Option<NodeId> {
+        use super::node::Role;
+
+        let mut transform = None;
+        while let Some(node) = self.get(id) {
+            if node.role.contains(Role::ZOOM) {
                 return Some(id);
             }
-            id = self.get(id)?.parent?;
+            if transform.is_none() && node.role.contains(Role::TRANSFORM) {
+                transform = Some(id);
+            }
+            let Some(parent) = node.parent else {
+                break;
+            };
+            id = parent;
         }
+        transform
     }
 
     fn long_press_watch(
@@ -396,6 +445,8 @@ impl Tree {
                 return Some(LongPressWatch {
                     target: id,
                     down_ms: event.time_ms,
+                    origin_x: event.x,
+                    origin_y: event.y,
                     cancelled: false,
                     fired: false,
                 });
@@ -405,39 +456,22 @@ impl Tree {
     }
 
     fn tick_long_press(&mut self, now_ms: f64) -> Vec<Gesture> {
-        let pointers: Vec<_> = self.arena.routes.keys().copied().collect();
-        let mut gestures = Vec::new();
-        for pointer in pointers {
-            let Some(route) = self.arena.routes.get_mut(&pointer) else {
-                continue;
-            };
-            if route
-                .drag
-                .as_ref()
-                .is_some_and(|drag| drag.locked || drag.long_press)
-            {
-                if let Some(watch) = route.long_press.as_mut() {
-                    watch.cancelled = true;
-                }
-                continue;
-            }
-            let Some(watch) = route.long_press.as_mut() else {
-                continue;
-            };
-            if watch.cancelled || watch.fired {
-                continue;
-            }
-            if !now_ms.is_finite() || now_ms - watch.down_ms < crate::input::LONG_PRESS_MS {
-                continue;
-            }
-            watch.fired = true;
-            let target = watch.target;
-            if let Some(drag) = route.drag.as_mut() {
-                drag.long_press = true;
-            }
-            gestures.push(Gesture::LongPress(target));
+        self.arena
+            .routes
+            .values_mut()
+            .filter_map(|route| fire_long_press(route, now_ms).map(Gesture::LongPress))
+            .collect()
+    }
+
+    fn check_long_press_position(&self, route: &mut PointerRoute, event: PointerEvent) {
+        if let Some(watch) = route.long_press.as_mut()
+            && !watch.fired
+            && !watch.cancelled
+            && (watch.past_slop(event.x, event.y, event.kind)
+                || !self.point_hits_node(watch.target, event.x, event.y))
+        {
+            watch.cancelled = true;
         }
-        gestures
     }
 
     pub fn set_recognizers(
@@ -457,22 +491,25 @@ impl Tree {
         if route.drag.as_ref().is_some_and(|drag| drag.locked) {
             return self.drag_by(route, event);
         }
+        if route.long_press.as_ref().is_some_and(|watch| watch.fired) {
+            return Vec::new();
+        }
+        self.check_long_press_position(route, event);
+        if let Some(target) = fire_long_press(route, event.time_ms) {
+            return vec![Gesture::LongPress(target)];
+        }
         let Some((origin_x, origin_y, hit)) = route
             .drag
             .as_ref()
             .map(|drag| (drag.origin_x, drag.origin_y, drag.hit))
         else {
-            return self.update_hover(event.x, event.y);
+            return if event.kind == PointerKind::Touch {
+                Vec::new()
+            } else {
+                self.update_hover(event.x, event.y)
+            };
         };
-        let past = past_slop(origin_x, origin_y, event.x, event.y);
-        if past {
-            if let Some(watch) = route.long_press.as_mut() {
-                watch.cancelled = true;
-            }
-        } else if let Some(target) = fire_long_press(route, event.time_ms) {
-            return vec![Gesture::LongPress(target)];
-        }
-        if !past {
+        if !beyond(origin_x, origin_y, event.x, event.y, drag_slop(event.kind)) {
             return self.move_pressed(route, event);
         }
         let dx = event.x - origin_x;
@@ -570,7 +607,8 @@ impl Tree {
         let Some(drag) = route.drag.as_mut() else {
             return Vec::new();
         };
-        let (dx, dy) = note_move(drag, event);
+        note_move(drag, event);
+        let (dx, dy) = drag_after_slop(drag, event);
         drag.locked = true;
         drag.scroll = Some(scroll);
         if let Some(watch) = route.long_press.as_mut() {
@@ -620,7 +658,8 @@ impl Tree {
         let Some(drag) = route.drag.as_mut() else {
             return Vec::new();
         };
-        let (dx, dy) = note_move(drag, event);
+        note_move(drag, event);
+        let (dx, dy) = drag_after_slop(drag, event);
         drag.locked = true;
         drag.scroll = Some(target);
         if let Some(watch) = route.long_press.as_mut() {
@@ -661,7 +700,7 @@ impl Tree {
                 .and_then(|id| self.scroll_phase(id).ok())
                 .map(|phase| phase.name())
                 .unwrap_or("none");
-            let reason = if dist < DRAG_SLOP {
+            let reason = if dist < drag_slop(event.kind) {
                 "left-before-slop"
             } else {
                 "left-after-miss"
@@ -706,23 +745,33 @@ impl Tree {
         route: &mut PointerRoute,
         event: PointerEvent,
     ) -> Vec<Gesture> {
-        if let Some(target) = fire_long_press(route, event.time_ms) {
-            route.drag = None;
-            route.pressed = None;
-            route.long_press = None;
-            return vec![Gesture::LongPress(target), Gesture::Release(target)];
-        }
-        if route.drag.as_ref().is_some_and(|drag| drag.long_press) {
-            let target = route.pressed.take();
+        let first_tap_ms = route.first_tap_ms.take();
+        self.check_long_press_position(route, event);
+        let long_press = fire_long_press(route, event.time_ms);
+        if route.long_press.as_ref().is_some_and(|watch| watch.fired) {
+            let release = route.pressed.take().map(Gesture::Release);
             route.drag = None;
             route.long_press = None;
-            return target.map(Gesture::Release).into_iter().collect();
+            return long_press
+                .map(Gesture::LongPress)
+                .into_iter()
+                .chain(release)
+                .collect();
         }
         if route.drag.as_ref().is_some_and(|drag| drag.locked) {
             let scroll = route.drag.as_ref().and_then(|drag| drag.scroll);
-            let speed = route.drag.as_ref().map(drag_velocity).unwrap_or((0.0, 0.0));
+            let speed = route
+                .drag
+                .as_ref()
+                .map(|drag| drag.velocity.velocity_at(event.time_ms))
+                .unwrap_or((0.0, 0.0));
+            let mut gestures: Vec<_> = route
+                .pressed
+                .take()
+                .map(Gesture::Release)
+                .into_iter()
+                .collect();
             route.drag = None;
-            route.pressed = None;
             route.long_press = None;
             self.unlock_pointer(event.pointer);
             if let Some(id) = scroll {
@@ -737,17 +786,16 @@ impl Tree {
                     "pointer up"
                 );
             }
-            return scroll
-                .map(|id| {
-                    if self.get(id).is_some_and(|node| node.kind == Kind::Scroll) {
-                        self.commit_edge_pull(id);
-                        let _ = self.arm_fling(id, speed.0, speed.1);
-                        self.arm_overscroll_spring(id, speed.0, speed.1);
-                        self.sync_scroll_phase(id);
-                    }
-                    vec![Gesture::DragEnd(id, speed.0, speed.1)]
-                })
-                .unwrap_or_default();
+            if let Some(id) = scroll {
+                if self.get(id).is_some_and(|node| node.kind == Kind::Scroll) {
+                    self.commit_edge_pull(id);
+                    let _ = self.arm_fling(id, speed.0, speed.1);
+                    self.arm_overscroll_spring(id, speed.0, speed.1);
+                    self.sync_scroll_phase(id);
+                }
+                gestures.push(Gesture::DragEnd(id, speed.0, speed.1));
+            }
+            return gestures;
         }
         let hit = route.drag.as_ref().and_then(|drag| drag.hit);
         route.drag = None;
@@ -759,10 +807,25 @@ impl Tree {
         if !inside {
             return vec![Gesture::Release(target)];
         }
-        if route.consumed_double {
-            return vec![Gesture::Release(target)];
+        let mut gestures = vec![Gesture::Release(target)];
+        let config = self.double_tap_config(target);
+        if let Some(pending) = self.arena.pending_tap.take() {
+            if first_tap_ms == Some(pending.time_ms)
+                && target == pending.node
+                && pending.matches(&event)
+            {
+                gestures.push(Gesture::DoubleTap(target));
+                return gestures;
+            }
+            if config.is_some() {
+                if pending.deadline_ms.is_some() {
+                    gestures.extend(self.finish_tap(pending));
+                }
+            } else {
+                self.arena.pending_tap = Some(pending);
+            }
         }
-        if let Some(config) = self.double_tap_config(target) {
+        if let Some(config) = config {
             let waits = self
                 .get(target)
                 .is_some_and(|node| node.recognizers.tap || node.is_pointer());
@@ -771,14 +834,15 @@ impl Tree {
                 x: event.x,
                 y: event.y,
                 time_ms: event.time_ms,
+                kind: event.kind,
                 deadline_ms: waits.then_some(event.time_ms + config.window_ms),
                 focus: self.focusable_of(target),
                 window_ms: config.window_ms,
                 slop: config.slop,
             });
-            return vec![Gesture::Release(target)];
+            return gestures;
         }
-        let mut gestures = vec![Gesture::Release(target), Gesture::Click(target)];
+        gestures.push(Gesture::Click(target));
         if let Some(id) = hit
             && let Some(link) = self.link_at(id, event.x, event.y)
         {
@@ -822,7 +886,13 @@ impl Tree {
             Phase::Move => {
                 if let Some(press) = route.secondary.as_mut()
                     && !press.cancelled
-                    && past_slop(press.origin_x, press.origin_y, event.x, event.y)
+                    && beyond(
+                        press.origin_x,
+                        press.origin_y,
+                        event.x,
+                        event.y,
+                        drag_slop(event.kind),
+                    )
                 {
                     press.cancelled = true;
                 }
@@ -860,6 +930,8 @@ impl Tree {
             );
         }
         route.secondary = None;
+        route.first_tap_ms = None;
+        self.unlock_pointer(pointer);
         let mut gestures = Vec::new();
         if let Some(target) = route.pressed.take() {
             gestures.push(Gesture::Release(target));
@@ -869,10 +941,10 @@ impl Tree {
         {
             gestures.push(Gesture::DragEnd(scroll, 0.0, 0.0));
             self.arm_overscroll_spring(scroll, 0.0, 0.0);
+            self.sync_scroll_phase(scroll);
         }
         route.drag = None;
         route.long_press = None;
-        self.unlock_pointer(pointer);
         gestures
     }
 
@@ -933,52 +1005,80 @@ impl Tree {
     /// Removing that scroll does. Removing the pressed row only cancels the
     /// click; the drag stays if the scroll is still in the tree.
     pub(super) fn drop_routes_in(&mut self, root: NodeId) {
-        let pointers: Vec<_> = self.arena.routes.keys().copied().collect();
-        for pointer in pointers {
-            let Some(route) = self.arena.routes.get(&pointer) else {
-                continue;
-            };
-            let pressed = route.pressed;
-            let secondary = route.secondary.as_ref().map(|press| press.target);
-            let drag_scroll = route.drag.as_ref().and_then(|drag| drag.scroll);
-            let drag_locked = route.drag.as_ref().is_some_and(|drag| drag.locked);
-            let drop_press = pressed.is_some_and(|id| self.contains(root, id));
-            let drop_secondary = secondary.is_some_and(|id| self.contains(root, id));
-            let drop_drag = drag_scroll.is_some_and(|id| self.contains(root, id));
-            if drop_drag && route.drag.is_some() {
-                tracing::warn!(
-                    target: "impasto::gesture",
-                    reason = "row-detached",
-                    pointer = pointer.0,
-                    pressed = pressed.map(NodeId::to_raw).unwrap_or(0),
-                    scroll = drag_scroll.map(NodeId::to_raw).unwrap_or(0),
-                    locked = drag_locked,
-                    "gesture dropped"
-                );
-            }
-            let Some(route) = self.arena.routes.get_mut(&pointer) else {
-                continue;
-            };
-            if drop_press {
+        let gestures = self.cancel_routes_in(root);
+        self.arena.pending.extend(gestures);
+    }
+
+    fn cancel_routes_in(&mut self, root: NodeId) -> Vec<Gesture> {
+        let mut gestures = Vec::new();
+        if let Some(hovered) = self.arena.hovered
+            && self.contains(root, hovered)
+        {
+            self.arena.hovered = None;
+            self.invalidate_style_deps(crate::style::DepMask::HOVER);
+            gestures.push(Gesture::Leave(hovered));
+        }
+        if self
+            .arena
+            .pending_tap
+            .as_ref()
+            .is_some_and(|tap| self.contains(root, tap.node))
+        {
+            self.arena.pending_tap = None;
+        }
+
+        let mut routes = std::mem::take(&mut self.arena.routes);
+        let mut released = false;
+        routes.retain(|&pointer, route| {
+            let drag_target = route
+                .drag
+                .as_ref()
+                .and_then(|drag| drag.scroll.or(drag.hit));
+            let drop_drag = drag_target.is_some_and(|id| self.contains(root, id));
+            if let Some(pressed) = route.pressed
+                && (drop_drag || self.contains(root, pressed))
+            {
                 route.pressed = None;
+                route.first_tap_ms = None;
+                released = true;
+                gestures.push(Gesture::Release(pressed));
             }
-            if drop_secondary {
+            if route
+                .secondary
+                .as_ref()
+                .is_some_and(|press| self.contains(root, press.target))
+            {
                 route.secondary = None;
             }
+            if drop_drag
+                || route
+                    .long_press
+                    .as_ref()
+                    .is_some_and(|watch| self.contains(root, watch.target))
+            {
+                route.long_press = None;
+            }
             if drop_drag {
-                route.drag = None;
-                route.pressed = None;
+                self.unlock_pointer(pointer);
+                if let Some(drag) = route.drag.take()
+                    && drag.locked
+                    && let Some(scroll) = drag.scroll
+                {
+                    gestures.push(Gesture::DragEnd(scroll, 0.0, 0.0));
+                    self.sync_scroll_phase(scroll);
+                }
+            } else if let Some(drag) = route.drag.as_mut()
+                && drag.hit.is_some_and(|hit| self.contains(root, hit))
+            {
+                drag.hit = None;
             }
-            if route.is_empty() {
-                self.arena.routes.remove(&pointer);
-            }
+            !route.is_empty()
+        });
+        self.arena.routes = routes;
+        if released {
+            self.invalidate_style_deps(crate::style::DepMask::ACTIVE);
         }
-        let locked: Vec<_> = self.arena.scroll_locks.keys().copied().collect();
-        for id in locked {
-            if self.contains(root, id) {
-                self.arena.scroll_locks.remove(&id);
-            }
-        }
+        gestures
     }
 
     pub(super) fn update_hover(&mut self, x: f32, y: f32) -> Vec<Gesture> {
@@ -1213,45 +1313,9 @@ impl Tree {
 
     /// Drop press, drag, hover, and focus inside a `display: none` subtree.
     pub(super) fn conceal(&mut self, id: NodeId) -> Vec<Gesture> {
-        let mut out = self.blur_contained(id);
-        if let Some(hovered) = self.arena.hovered
-            && self.is_under(hovered, id).unwrap_or(false)
-        {
-            self.arena.hovered = None;
-            out.push(Gesture::Leave(hovered));
-        }
-        let pointers: Vec<_> = self.arena.routes.keys().copied().collect();
-        for pointer in pointers {
-            let pressed = self
-                .arena
-                .routes
-                .get(&pointer)
-                .and_then(|route| route.pressed);
-            if let Some(pressed) = pressed
-                && self.is_under(pressed, id).unwrap_or(false)
-            {
-                if let Some(route) = self.arena.routes.get_mut(&pointer) {
-                    route.pressed = None;
-                    route.long_press = None;
-                }
-                out.push(Gesture::Release(pressed));
-            }
-            let drag = self.arena.routes.get(&pointer).and_then(|route| {
-                route
-                    .drag
-                    .as_ref()
-                    .and_then(|drag| drag.scroll.or(drag.hit))
-            });
-            if let Some(target) = drag
-                && self.is_under(target, id).unwrap_or(false)
-            {
-                if let Some(route) = self.arena.routes.get_mut(&pointer) {
-                    route.drag = None;
-                }
-                out.push(Gesture::DragEnd(target, 0.0, 0.0));
-            }
-        }
-        out
+        let mut gestures = self.blur_contained(id);
+        gestures.extend(self.cancel_routes_in(id));
+        gestures
     }
 
     pub(super) fn blur_contained(&mut self, root: NodeId) -> Vec<Gesture> {
@@ -1292,66 +1356,30 @@ fn beyond(x0: f32, y0: f32, x1: f32, y1: f32, slop: f32) -> bool {
     dx * dx + dy * dy > slop * slop
 }
 
-fn past_slop(origin_x: f32, origin_y: f32, x: f32, y: f32) -> bool {
-    let dx = x - origin_x;
-    let dy = y - origin_y;
-    dx * dx + dy * dy > DRAG_SLOP * DRAG_SLOP
-}
-
-/// Same predicate as the old long-press recognizer: 500ms, still inside the slop, not locked.
 fn fire_long_press(route: &mut PointerRoute, now_ms: f64) -> Option<NodeId> {
-    if route
-        .drag
-        .as_ref()
-        .is_some_and(|drag| drag.locked || drag.long_press)
-    {
+    if !now_ms.is_finite() || now_ms < route.long_press_deadline()? {
         return None;
     }
     let watch = route.long_press.as_mut()?;
-    if watch.cancelled || watch.fired {
-        return None;
-    }
-    if !now_ms.is_finite() || now_ms - watch.down_ms < crate::input::LONG_PRESS_MS {
-        return None;
-    }
     watch.fired = true;
-    if let Some(drag) = route.drag.as_mut() {
-        drag.long_press = true;
-    }
     Some(watch.target)
 }
 
 fn note_move(drag: &mut DragState, event: PointerEvent) -> (f32, f32) {
     let dx = event.x - drag.last_x;
     let dy = event.y - drag.last_y;
-    drag.previous_move = drag.latest_move;
-    drag.latest_move = Some(Sample {
-        x: event.x,
-        y: event.y,
-        time_ms: event.time_ms,
-    });
     drag.velocity.push(event.x, event.y, event.time_ms);
     drag.last_x = event.x;
     drag.last_y = event.y;
     (dx, dy)
 }
 
-fn drag_velocity(drag: &DragState) -> (f32, f32) {
-    let from_ring = drag.velocity.velocity();
-    if from_ring != (0.0, 0.0) {
-        return from_ring;
-    }
-    let (Some(previous), Some(latest)) = (drag.previous_move, drag.latest_move) else {
-        return (0.0, 0.0);
-    };
-    let dt = latest.time_ms - previous.time_ms;
-    if !dt.is_finite() || dt <= 0.0 {
-        return (0.0, 0.0);
-    }
-    (
-        crate::cast::f32_from_f64(f64::from(latest.x - previous.x) / dt),
-        crate::cast::f32_from_f64(f64::from(latest.y - previous.y) / dt),
-    )
+fn drag_after_slop(drag: &DragState, event: PointerEvent) -> (f32, f32) {
+    let x = event.x - drag.origin_x;
+    let y = event.y - drag.origin_y;
+    let distance = x.hypot(y);
+    let remaining = (distance - drag_slop(event.kind)).max(0.0);
+    (x / distance * remaining, y / distance * remaining)
 }
 
 /// Debug label for [`crate::input::PointerEvent::phase`].

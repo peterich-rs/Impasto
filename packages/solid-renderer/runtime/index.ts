@@ -1,6 +1,6 @@
 import type { Node } from "../src/tree.ts";
 import { scene } from "./scene.ts";
-import { createRoot, onCleanup, untrack } from "solid-js";
+import { createContext, createRoot, onCleanup, untrack, type Accessor } from "solid-js";
 import { mapFor } from "@impasto/reactive";
 import { bindText } from "./text.ts";
 import { bindImage } from "./image.ts";
@@ -13,6 +13,24 @@ import {
 import { bindSlot } from "./slot.ts";
 import { deliverScrollState } from "./scroll-state.ts";
 import { deliverDriver } from "./driver.ts";
+
+/** Visibility inherited by content whose host nodes move into an external overlay. */
+export const SubtreeVisibleContext = createContext<Accessor<boolean>>(() => true);
+
+const memoryPressureListeners = new Set<() => void>();
+let observingMemoryPressure = false;
+
+/** Registers cache cleanup for the host's memory pressure callback. */
+export function onMemoryPressure(listener: () => void): () => void {
+  if (!observingMemoryPressure) {
+    scene.onMemoryPressure?.(() => {
+      for (const notify of [...memoryPressureListeners]) notify();
+    });
+    observingMemoryPressure = true;
+  }
+  memoryPressureListeners.add(listener);
+  return () => { memoryPressureListeners.delete(listener); };
+}
 
 const options = {
   styles: scene,

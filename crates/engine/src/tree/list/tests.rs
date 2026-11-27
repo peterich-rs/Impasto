@@ -397,3 +397,48 @@ fn paints_group(tree: &mut Tree) -> bool {
         })
     })
 }
+
+#[test]
+fn list_keeps_the_visible_key_and_offset_across_reorder_and_removal() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let scroll = tree.scroll()?;
+    tree.set_size(scroll, 120.0, 40.0)?;
+    let content = tree.column(0.0)?;
+    tree.add_child(scroll, content)?;
+    tree.layout()?;
+    tree.set_content_min(scroll, 120.0)?;
+    let mut drivers = DriverSet::new();
+    let id = drivers.list_create(1, 20.0);
+    assert!(drivers.list_bind(
+        id,
+        ListNodes {
+            viewport: Some(scroll),
+            content: Some(content),
+            ..ListNodes::default()
+        }
+    ));
+    let submit = |drivers: &mut DriverSet, keys: &[&str]| {
+        assert!(drivers.list_begin(id));
+        for key in keys {
+            assert!(drivers.list_item(
+                id,
+                ListItem {
+                    key: (*key).to_owned(),
+                    ty: "row".to_owned(),
+                    sticky: false
+                }
+            ));
+        }
+        assert!(drivers.list_end(id));
+    };
+    submit(&mut drivers, &["a", "b", "c", "d", "e", "f"]);
+    tree.set_scroll_offset(scroll, 0.0, 24.0)?;
+    drivers.tick(&mut tree);
+    submit(&mut drivers, &["x", "a", "b", "b", "c", "d", "e", "f"]);
+    drivers.tick(&mut tree);
+    assert!(close(tree.scroll_offset(scroll)?.1, 44.0));
+    submit(&mut drivers, &["x", "a", "d", "e", "c", "f"]);
+    drivers.tick(&mut tree);
+    assert!(close(tree.scroll_offset(scroll)?.1, 80.0));
+    Ok(())
+}

@@ -61,6 +61,10 @@ impl Sampler {
         }
     }
 
+    pub(super) fn reset_interval(&self) {
+        self.last.set(None);
+    }
+
     pub fn take(&self) -> Vec<StackSample> {
         std::mem::take(&mut *self.pending.borrow_mut())
     }

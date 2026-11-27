@@ -74,7 +74,7 @@ impasto test --watch -k "payment"   # 监听相关文件并按用例名过滤
 
 应用源码放在 `src/`，应用内 Rust crate 放在 `rust/`。用 Android Studio 打开 `android/`，用 Xcode 打开 `ios/Runner.xcodeproj` 或 `macos/Runner.xcodeproj`。CLI 将插件聚合代码、类型和平台链接配置写入 `.impasto/`。新应用在 `app.toml` 的 `[dependencies]` 中声明依赖。使用 `impasto add @impasto/http` 添加内置插件，也可使用本地 `path` 或 HTTPS Git 标签。Git 依赖的提交记录在 `impasto.lock`。 [Rust 业务与原生插件](docs/rust-plugins-and-native-modules.md)
 
-在仓库根目录直接执行 `cargo run -p cli -- run` 会启动内置的 Gallery 示例。
+从仓库根目录运行 Gallery 时，执行 `cargo run -p cli -- --project examples/gallery-solid run`。在应用目录中可直接执行 `impasto run`。
 
 应用的 TSX 由 Oxc 降级并由 Rolldown 链接。显式导入 PascalCase JSX 组件，例如 `import { View } from "@impasto/solid-ui"`。Release 构建生成 `app.bin` 和 `app.sym`。字面量 `import()` 对应的字节码按需从 `app.bin` 加载。路由可用 `lazy: () => import("./settings.tsx")` 加载默认导出的组件。用 `impasto symbolicate <app.sym> --stack <堆栈>` 解析带模块名的 QuickJS 调用栈。`--analyze-size` 生成 `bundle-size.json`，列出实际分包大小、按模块分摊的字节码大小与共享样式池归因。用 `--size-json <路径>` 指定报告位置。
 

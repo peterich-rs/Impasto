@@ -104,16 +104,23 @@ export function buildChartGeometry(input: {
   const first = intraday ? 0 : Math.max(0, end - count);
   const visible = bars.slice(first, end);
   const span = Math.max(60 * minute, (bars.at(-1)!.t - bars[0]!.t) * 1.06);
-  const xs = visible.map((_, index) => intraday
-    ? (visible[index]!.t - bars[0]!.t) / span * plot
+  const xs = visible.map((bar, index) => intraday
+    ? (bar.t - bars[0]!.t) / span * plot
     : (index + 0.5) * plot / visible.length);
-  const values = visible.map((bar) => bar.c);
-  const low = intraday
-    ? Math.min(previous, ...values, ...visible.map((bar) => (bar as MinuteBar).avg))
-    : Math.min(...visible.map((bar) => bar.l));
-  const high = intraday
-    ? Math.max(previous, ...values, ...visible.map((bar) => (bar as MinuteBar).avg))
-    : Math.max(...visible.map((bar) => bar.h));
+  let low = intraday ? previous : Infinity;
+  let high = intraday ? previous : -Infinity;
+  let volumeScale = 1;
+  for (const bar of visible) {
+    if (intraday) {
+      const average = (bar as MinuteBar).avg;
+      low = Math.min(low, bar.c, average);
+      high = Math.max(high, bar.c, average);
+    } else {
+      low = Math.min(low, bar.l);
+      high = Math.max(high, bar.h);
+    }
+    volumeScale = Math.max(volumeScale, bar.v);
+  }
   const margin = Math.max(previous * 0.0005, (high - low) * 0.08, 0.01);
   const range = high - low + 2 * margin;
   const yAt = (price: number) => top + (high + margin - price) / range * (bottom - top);
@@ -127,7 +134,10 @@ export function buildChartGeometry(input: {
   };
   const last = visible.at(-1)!;
   const lastIndex = visible.length - 1;
-  const lastTone = tone(last.c - previous);
+  const up = tone(1);
+  const down = tone(-1);
+  const colorFor = (change: number) => change === 0 ? colors.dim : change > 0 ? up : down;
+  const lastTone = colorFor(last.c - previous);
   const grid = [0, 1, 2, 3, 4].map((line) => {
     const axisY = top + line * (bottom - top) / 4;
     const price = high + margin - line * range / 4;
@@ -137,11 +147,13 @@ export function buildChartGeometry(input: {
   const averageLine = intraday ? visible.map((bar, index) => ({ x: xs[index]!, y: yAt((bar as MinuteBar).avg) })) : [];
   const body = Math.max(1, plot / visible.length * 0.63);
   const candles = intraday ? [] : visible.map((bar, index) => {
-    const bodyY = Math.min(yAt(bar.o), yAt(bar.c));
-    const bodyHeight = Math.max(1, Math.abs(yAt(bar.o) - yAt(bar.c)));
+    const openY = yAt(bar.o);
+    const closeY = yAt(bar.c);
+    const bodyY = Math.min(openY, closeY);
+    const bodyHeight = Math.max(1, Math.abs(openY - closeY));
     return {
       x: xs[index]!,
-      color: tone(bar.c - bar.o),
+      color: colorFor(bar.c - bar.o),
       high: yAt(bar.h),
       low: yAt(bar.l),
       body,
@@ -161,7 +173,6 @@ export function buildChartGeometry(input: {
     }
     return [{ color: averageColors[slotIndex]!, points }];
   });
-  const volumeScale = Math.max(1, ...visible.map((bar) => bar.v));
   const volumeWidth = Math.max(1, plot / (intraday ? span / minute : visible.length) * 0.73);
   const volumes = visible.map((bar, index) => {
     const barHeight = bar.v / volumeScale * (volumeBottom - volumeTop);
@@ -170,7 +181,7 @@ export function buildChartGeometry(input: {
       y: volumeBottom - barHeight,
       w: volumeWidth,
       h: barHeight,
-      color: `${tone(bar.c - (index > 0 ? visible[index - 1]!.c : bar.o))}88`,
+      color: `${colorFor(bar.c - (index > 0 ? visible[index - 1]!.c : bar.o))}88`,
     };
   });
   const axisTimes = intraday

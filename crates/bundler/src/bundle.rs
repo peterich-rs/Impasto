@@ -303,9 +303,6 @@ impl Linker {
                 }
                 .to_owned()
             });
-        defines
-            .entry("__STOCK_REPLAY_FREEZE__".to_owned())
-            .or_insert_with(|| "\"\"".to_owned());
         let native_exports: BTreeMap<_, _> = options
             .plugins
             .iter()

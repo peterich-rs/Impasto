@@ -1,7 +1,7 @@
 struct View {
     transform: mat4x4<f32>,
     info: vec4<f32>,
-    target_info: vec4<f32>,
+    target_info: vec4<f32>, // target origin in pixels, local AA width, reserved
     mask_rect: vec4<f32>,
     clip_boxes: array<vec4<f32>, 4>,
     clip_radii: array<vec4<f32>, 4>,
@@ -16,12 +16,6 @@ fn to_srgb(value: vec3<f32>) -> vec3<f32> {
 
 fn to_linear(value: vec3<f32>) -> vec3<f32> {
     return select(value / 12.92, pow((value + 0.055) / 1.055, vec3(2.4)), value > vec3(0.04045));
-}
-
-fn dither_srgb(pixel: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
-    let noise = fract(52.9829189 * fract(dot(floor(position), vec2(0.06711056, 0.00583715)))) - 0.5;
-    let rgb = clamp(to_srgb(pixel.rgb) + vec3(noise / 255.0), vec3(0.0), to_srgb(vec3(pixel.a)));
-    return vec4(rgb, pixel.a);
 }
 
 fn dither_linear(rgb: vec3<f32>, position: vec2<f32>) -> vec3<f32> {

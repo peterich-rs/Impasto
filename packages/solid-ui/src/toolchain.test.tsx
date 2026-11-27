@@ -3,7 +3,7 @@ import { createSignal, For } from "solid-js";
 import { scene } from "@impasto/solid-renderer";
 import {
   Button, Column, Field, Grid, Image, RepaintBoundary, Role, Row, Stack, Tabs, Text,
-  View, VirtualList, setDensity, useTheme,
+  View, VirtualList, setDensity, useTheme, type FieldController,
 } from "@impasto/solid-ui";
 
 test("native theme length tokens update static nodes in place", async () => {
@@ -148,6 +148,25 @@ test("a mixed shorthand restores the base value when a longhand becomes absent",
   setLeft(undefined);
   await advanceFrames(1);
   assert.equal(screen.rect(label).x - screen.rect(container).x, 10);
+});
+
+test("field uses the current validator when editing", async () => {
+  const [validating, setValidating] = createSignal(false);
+  let field: FieldController | undefined;
+  await screen.mount(() => (
+    <Field
+      controller={(controller) => { field = controller; }}
+      validate={validating() ? () => "Invalid name" : undefined}
+    />
+  ));
+  assert.ok(field);
+  setValidating(true);
+  field.insert("First edit");
+  assert.equal(field.error(), "Invalid name");
+
+  setValidating(false);
+  field.insert("Second edit");
+  assert.equal(field.error(), "");
 });
 
 const budgets = [

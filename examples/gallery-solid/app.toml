@@ -1,6 +1,10 @@
 name = "gallery"
 version = "0.1.0"
 targets = ["macos", "android", "ios"]
+assets = "../../crates/embedder/macos/assets"
+
+[android]
+application_id = "dev.impasto.gallery"
 
 [dependencies]
 "@impasto/async-storage" = "builtin"

@@ -1,5 +1,5 @@
 import { View as HostView, Scroll as HostScroll } from "@impasto/solid-renderer/host";
-import { createTrackedEffect, onCleanup } from "solid-js";
+import { createTrackedEffect, onCleanup, untrack } from "solid-js";
 import {
   bindNodeRef,
   bindStyle,
@@ -92,7 +92,7 @@ function acceptCode(accept: ScrollPhysics["accept"]): number {
  * controller. After release, `core` coasts on the declared axis.
  */
 export function ScrollArea(props: ScrollAreaProps): NodeHandle {
-  const ctrl = props.controller ?? createScrollController();
+  const ctrl = untrack(() => props.controller) ?? createScrollController();
   let viewport = 0;
   let content = 0;
   let minSource = 0;

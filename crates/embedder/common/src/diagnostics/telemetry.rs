@@ -3,8 +3,6 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use crate::ThreadTopology;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TelemetryProfile {
     #[default]
@@ -40,7 +38,7 @@ pub struct ScheduleTiming {
     /// Raster received the display-link callback directly from the platform.
     pub compositor_only: bool,
     pub compositor_block: Option<engine::scene::CompositorBlockReason>,
-    pub topology: ThreadTopology,
+    pub topology: Option<&'static str>,
 }
 
 impl ScheduleTiming {

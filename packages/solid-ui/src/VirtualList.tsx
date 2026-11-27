@@ -1,5 +1,5 @@
 import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
-import { Show, createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
+import { Show, createMemo, createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
 import {
   Text,
   bindListRenderer,
@@ -38,15 +38,23 @@ type Pin = {
  * live on `ListDriver`. This component is the template and the render callback.
  */
 export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
+  const items = createMemo(() => {
+    const seen = new Set<string>();
+    return props.items.filter(item => {
+      const key = String(props.itemKey(item));
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  });
   const theme = useTheme();
-  const scroll = props.controller ?? createScrollController();
-  const native = scene.listDriver?.(props.overscan ?? 4, props.estimatedHeight);
+  const scroll = untrack(() => props.controller) ?? createScrollController();
+  const native = untrack(() => scene.listDriver?.(props.overscan ?? 4, props.estimatedHeight));
   if (native === undefined) {
     throw new Error("listDriver is not linked");
   }
-  const initial = props.restoreKey
-    ? restoredOffsets.get(props.restoreKey)
-    : undefined;
+  const restoreKey = untrack(() => props.restoreKey);
+  const initial = restoreKey ? restoredOffsets.get(restoreKey) : undefined;
   const [extent, setExtent] = createSignal(0);
   const [thumbOn, setThumbOn] = createSignal(false);
   const [thumbH, setThumbH] = createSignal(24);
@@ -80,7 +88,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
     );
   }
   createTrackedEffect(() => {
-    const items = props.items;
+    const rows = items();
     native.configure(
       props.estimatedHeight,
       props.overscan ?? 4,
@@ -92,7 +100,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
       scroll.setPull(2, 64);
     }
     native.setItems(
-      items.map((item, index) => ({
+      rows.map((item, index) => ({
         key: String(props.itemKey(item)),
         type: props.recycle ? props.recycle.typeOf(item) : "item",
         sticky: props.sticky?.(item, index) === true,
@@ -103,7 +111,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
     bindListRenderer(native, {
       parent: () => rows,
       poolSize: () => (props.recycle ? (props.recycle.poolSize ?? 8) : 0),
-      itemAt: (index) => props.items[index] as T,
+      itemAt: (index) => items()[index] as T,
       render: (item, index) => {
         if (props.recycle) {
           return props.recycle.render(item, index);
@@ -141,15 +149,14 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
 
     }),
   );
-  onCleanup(
-    props.refresh
-      ? () => {}
-      : refreshListener(scroll, () => props.onRefresh?.()),
-  );
+  createTrackedEffect(() => {
+    if (!props.refresh) {
+      onCleanup(refreshListener(scroll, () => props.onRefresh?.()));
+    }
+  });
   onCleanup(() => {
-    const key = props.restoreKey;
-    if (key) {
-      restoredOffsets.set(key, scroll.offset());
+    if (restoreKey) {
+      restoredOffsets.set(restoreKey, scroll.offset());
     }
     native.release();
   });
@@ -159,14 +166,14 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
       return props.endReachedDistance ?? (props.overscan ?? 4) * props.estimatedHeight;
     },
     get enabled() {
-      return props.onEndReached !== undefined && props.items.length > 0 && !props.error;
+      return props.onEndReached !== undefined && items().length > 0 && !props.error;
     },
   });
   let endLength = 0;
   createTrackedEffect(() => {
     if (!nearEnd()) return;
     untrack(() => {
-      const length = props.items.length;
+      const length = items().length;
       if (length === endLength) return;
       endLength = length;
       props.onEndReached?.();
@@ -178,7 +185,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
     if (box === null) {
       return null;
     }
-    return props.items[box.index] === undefined ? null : box;
+    return items()[box.index] === undefined ? null : box;
   };
   return (
     <Show
@@ -205,7 +212,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
       }
     >
       <Show
-        when={props.items.length > 0}
+        when={items().length > 0}
         fallback={
           props.skeleton ? (
             <HostView>{props.skeleton()}</HostView>
@@ -342,10 +349,10 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
               >
                 {props.recycle
                   ? props.recycle.render(
-                      () => props.items[box.index] as T,
+                      () => items()[box.index] as T,
                       () => box.index,
                     )
-                  : props.children?.(props.items[box.index] as T, box.index)}
+                  : props.children?.(items()[box.index] as T, box.index)}
               </HostView>
             )}
           </Show>

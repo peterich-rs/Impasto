@@ -68,7 +68,7 @@ pub fn build(
                     .join(profile(&options));
             }
             let manifest = native.as_ref().map(NativeBuild::linker_manifest);
-            let linked = link_source(&app.root, &app.entry, &options, manifest.clone(), None)?;
+            let linked = link_source(&app.root, &app.entry, &options, manifest.clone())?;
             if let Some(installed) = installed_manifest {
                 native
                     .as_ref()
@@ -153,7 +153,6 @@ pub(crate) fn bundle_update(
         &app.entry,
         options,
         Some(native.linker_manifest()),
-        None,
     )?;
     native.validate_update(installed, &linked)?;
     Ok(linked.code)
@@ -187,7 +186,6 @@ pub(crate) fn bundle_for_host(
         &app.entry,
         options,
         Some(native.linker_manifest()),
-        None,
     )?;
     if !options.debug {
         native.prune(app, &linked)?;
@@ -299,9 +297,15 @@ pub(crate) fn link_source(
     entry: &Path,
     options: &BuildOptions,
     plugins: Option<bundler::PluginManifest>,
-    freeze_stock: Option<&str>,
 ) -> Result<bundler::Bundle> {
-    link_source_mode(root, entry, options, plugins, freeze_stock, !options.debug)
+    link_source_mode(
+        root,
+        entry,
+        options,
+        plugins,
+        Default::default(),
+        !options.debug,
+    )
 }
 
 fn link_source_mode(
@@ -309,17 +313,10 @@ fn link_source_mode(
     entry: &Path,
     options: &BuildOptions,
     plugins: Option<bundler::PluginManifest>,
-    freeze_stock: Option<&str>,
+    defines: std::collections::BTreeMap<String, String>,
     split: bool,
 ) -> Result<bundler::Bundle> {
     let framework = toolchain::framework()?;
-    let mut defines = std::collections::BTreeMap::new();
-    if let Some(mode) = freeze_stock {
-        defines.insert(
-            "__STOCK_REPLAY_FREEZE__".to_owned(),
-            serde_json::to_string(mode)?,
-        );
-    }
     if options.verbose {
         eprintln!("impasto: Oxc + Rolldown {}", entry.display());
     }
@@ -344,15 +341,41 @@ fn link_source_mode(
     Ok(linked)
 }
 
+fn pack_defines(overrides: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut defines = std::collections::BTreeMap::new();
+    for define in overrides {
+        let (key, expression) = define
+            .split_once('=')
+            .context("--define 需要 KEY=JS_EXPR")?;
+        let mut chars = key.bytes();
+        if !chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, b'$' | b'_'))
+            || !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, b'$' | b'_'))
+            || expression.trim().is_empty()
+        {
+            bail!("无效的 --define {}", key);
+        }
+        if defines
+            .insert(key.to_owned(), expression.to_owned())
+            .is_some()
+        {
+            bail!("重复的 --define {}", key);
+        }
+    }
+    Ok(defines)
+}
+
 pub(crate) fn pack(
     entry: &Path,
     output: &Path,
     options: &BuildOptions,
-    freeze_stock: Option<&str>,
+    overrides: &[String],
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let entry = cwd.join(entry);
-    let linked = link_source_mode(&cwd, &entry, options, None, freeze_stock, false)?;
+    let defines = pack_defines(overrides)?;
+    let linked = link_source_mode(&cwd, &entry, options, None, defines, false)?;
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -685,7 +708,7 @@ pub(crate) fn stage_assets(
         "assets"
     };
     fs::create_dir(stage.join(asset_directory))?;
-    copy_tree(&app.assets(), &stage.join(asset_directory), &[])?;
+    copy_tree(app.assets(), &stage.join(asset_directory), &[])?;
     for notice in ["LICENSE", "NOTICE"] {
         fs::copy(framework.join(notice), stage.join(notice))?;
     }

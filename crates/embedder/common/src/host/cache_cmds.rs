@@ -29,6 +29,10 @@ fn invalidate(runtime: &mut UiHost) {
 }
 
 fn memory_warning(runtime: &mut UiHost) {
+    runtime.shaper.borrow_mut().trim();
+    if let Some(session) = runtime.session.as_mut() {
+        super::session_call(|| session.memory_pressure());
+    }
     flush_gpu(runtime, "memory");
     runtime.graphics.post(|graphics| graphics.images.trim());
     if !runtime.input.is_paused() {
@@ -37,8 +41,8 @@ fn memory_warning(runtime: &mut UiHost) {
 }
 
 fn image_ready(runtime: &mut UiHost, ready: ImageReady) {
-    let decoded =
-        matches!(&ready, ImageReady::Decoded(handle) if uses_texture(runtime, &handle.source));
+    let decoded = !super::compositor_animation::prefetch_image(runtime, ready.source())
+        && matches!(&ready, ImageReady::Decoded(handle) if uses_texture(runtime, &handle.source));
     runtime.graphics.post(move |graphics| {
         let request_id = match &ready {
             ImageReady::Decoded(handle) => handle.generation,

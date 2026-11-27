@@ -139,20 +139,23 @@ impl Tree {
 
     pub(super) fn mark_layout(&mut self) {
         self.needs_layout = true;
-        self.needs_paint = true;
+        self.mark_paint();
     }
 
     pub(super) fn mark_paint(&mut self) {
+        self.invalidate_layer_delta();
         self.needs_paint = true;
     }
 
     /// Diries the picture that owns `id`. A layer also dirties its parent picture.
     pub(super) fn mark_repaint(&mut self, id: NodeId) {
-        self.dirty_picture(id);
-        if self.renders_layer_node(id)
-            && let Some(parent) = self.get(id).and_then(|node| node.parent)
-        {
-            self.dirty_picture(parent);
+        let owner = self.dirty_picture(id);
+        if self.renders_layer_node(id) {
+            if let Some(parent) = self.get(id).and_then(|node| node.parent) {
+                self.dirty_picture(parent);
+            }
+        } else if owner.is_some_and(|owner| self.queue_picture_patch(owner)) {
+            return;
         }
         self.layer_epoch = self.layer_epoch.wrapping_add(1);
         self.mark_paint();
@@ -180,21 +183,14 @@ impl Tree {
         self.mark_paint();
     }
 
-    pub(super) fn dirty_picture(&mut self, mut id: NodeId) {
+    pub(super) fn dirty_picture(&mut self, mut id: NodeId) -> Option<NodeId> {
         loop {
-            let parent = match self.node(id) {
-                Ok(node) => node.parent,
-                Err(_) => return,
-            };
-            let stop = parent.is_none() || self.renders_layer_node(id) || self.is_picture_owner(id);
-            if stop {
+            let parent = self.node(id).ok()?.parent;
+            if parent.is_none() || self.renders_layer_node(id) || self.is_picture_owner(id) {
                 self.mark_picture_dirty(id);
-                return;
+                return Some(id);
             }
-            let Some(parent) = parent else {
-                return;
-            };
-            id = parent;
+            id = parent?;
         }
     }
 
@@ -311,9 +307,10 @@ impl Tree {
             .is_some_and(|value| value.requires_clip_layer());
         self.get(id).is_some_and(|node| {
             node.renders_layers(subtree) || node.flags.contains(NodeFlags::PICTURE_FROM_BOUNDARY)
-        }) || self.motion_layers.get(&id).is_some_and(|layers| {
-            layers.linked_transform || layers.transition_opacity || layers.linked_effect
-        })
+        }) || self.uses_paint_slot(id)
+            || self.motion_layers.get(&id).is_some_and(|layers| {
+                layers.linked_transform || layers.transition_opacity || layers.linked_effect
+            })
     }
 
     pub(super) fn is_repaint_dirty(&self, id: NodeId) -> bool {
@@ -392,10 +389,15 @@ impl Tree {
             self.mark_repaint(id);
             return Ok(());
         }
-        if self.node(id)?.fill().is_some() {
+        if let Some(previous) = self.node(id)?.fill() {
+            if previous == color {
+                return Ok(());
+            }
             self.node_mut(id)?
                 .write_paint(|paint| paint.fill = Some(color));
-            self.mark_repaint(id);
+            if !self.update_rect_slot(id) {
+                self.mark_repaint(id);
+            }
             return Ok(());
         }
         Err(Error::WrongKind)
@@ -633,7 +635,9 @@ impl Tree {
         }
         node.write_paint(|paint| paint.corner_radius = radius);
         let _ = node;
-        self.mark_repaint(id);
+        if !self.update_rect_slot(id) && !self.update_clip_radius(id) {
+            self.mark_repaint(id);
+        }
         Ok(())
     }
 
@@ -669,7 +673,9 @@ impl Tree {
             .write_paint(|paint| paint.alpha = Some(alpha));
         let next = alpha_bucket(self.node(id)?.alpha());
         if previous == next {
-            self.paint_layer_value();
+            if !self.update_opacity_slot(id, alpha) {
+                self.paint_layer_value();
+            }
         } else {
             self.repaint_ancestors(id);
         }
@@ -1225,7 +1231,9 @@ impl Tree {
         }
         let is_identity = self.node(id)?.transform().is_identity();
         if was_identity == is_identity {
-            self.paint_layer_value();
+            if !self.update_transform_slot(id) {
+                self.paint_layer_value();
+            }
         } else {
             self.repaint_ancestors(id);
         }
@@ -1307,7 +1315,7 @@ impl Tree {
             self.canvas_geometry_changed();
         }
         self.needs_layout = false;
-        self.needs_paint = true;
+        self.mark_paint();
         self.laid_out = true;
         self.pending_layout_cause = LayoutCause::None;
         {

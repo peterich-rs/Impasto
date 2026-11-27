@@ -2,7 +2,7 @@ import { createMemo, createSignal, For, Show } from "solid-js";
 import type { NodeHandle } from "@impasto/solid-renderer";
 import { Column, Row, View, Pressable, Role, Dialog, ScrollArea } from "@impasto/solid-ui";
 import type { QuoteEngine } from "../engine/engine.ts";
-import type { Router } from "@impasto/solid-router";
+import { usePageActive, type Router } from "@impasto/solid-router";
 import { loc } from "../copy.ts";
 import { fmtPrice, fmtQty } from "../format.ts";
 import type { Position, Order } from "../engine/types.ts";
@@ -32,10 +32,12 @@ type Row = {
 export function AccountPage(props: { router: Router }): NodeHandle {
   const { engine } = useQuotes();
   const account = accountRef();
+  const active = usePageActive();
   const [book, setBook] = createSignal<Book>("positions");
   const [closing, setClosing] = createSignal<string | null>(null);
 
-  const rows = createMemo<Row[]>(() => {
+  const rows = createMemo<Row[]>((previous = []) => {
+    if (!active()) return previous;
     marketPulse();
     const positions = account.positions();
     let marketValue = 0;
@@ -98,7 +100,11 @@ export function AccountPage(props: { router: Router }): NodeHandle {
       }} onSelect={setBook} />
     </Section>
     <Show when={book() === "positions"} fallback={<Orders book={book() === "fills" ? "fills" : "open"} orders={account.orders()} engine={engine} onCancel={(id) => { account.cancel(id); showToast(loc("已撤单", "Cancelled")); }} onOpen={(symbol) => props.router.push(`/stock/${symbol}`)} />}>
-      <Show when={rows().length === 0} fallback={<For each={rows()}>{(row) => <PositionRow row={row} name={(symbol) => engine.ins(symbol).name} onClick={() => props.router.push(`/stock/${row.position.symbol}`)} />}</For>}>
+      <Show when={rows().length === 0} fallback={
+        <For each={rows()} keyed={(row) => row.position.symbol}>
+          {(row) => <PositionRow row={row()} name={(symbol) => engine.ins(symbol).name} onClick={() => props.router.push(`/stock/${row().position.symbol}`)} />}
+        </For>
+      }>
         <Column style={{ padding: 24, gap: 12, alignItems: "center" }}>
           <Label color={colors.dim}>{loc("暂无持仓，去自选页买入", "No positions yet. Buy from the watchlist")}</Label>
           <Action label={loc("去自选", "Watchlist")} onClick={() => props.router.reset("/watchlist")} primary />

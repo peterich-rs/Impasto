@@ -180,9 +180,9 @@ impl FrameScheduler {
         }
     }
 
-    pub fn cancel(&mut self) {
-        self.armed = None;
+    pub fn cancel(&mut self) -> Option<FrameToken> {
         self.pending = false;
+        self.armed.take()
     }
 
     pub(crate) fn busy(&self) -> bool {
@@ -192,6 +192,10 @@ impl FrameScheduler {
     /// A platform vsync is already carrying a token. Wake must not steal it.
     pub(crate) fn token_armed(&self) -> bool {
         self.armed.is_some()
+    }
+
+    pub(crate) fn armed(&self) -> Option<FrameToken> {
+        self.armed
     }
 }
 

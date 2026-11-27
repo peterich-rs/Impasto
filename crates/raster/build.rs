@@ -18,10 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut declarations = String::new();
     for (name, variants) in [
         ("UI", 4),
-        ("TEXT", 8),
+        ("TEXT", 4),
         ("IMAGE", 2),
-        ("IMAGE_ARRAY", 2),
-        ("SMALL_IMAGES", 2),
         ("EXTERNAL_IMAGE", 2),
         ("BLUR", 4),
         ("INLINE_IMAGE", 1),
@@ -66,48 +64,10 @@ fn assemble(name: &str, variant: usize) -> String {
     } else {
         "alias ReducedColor = vec4<f32>;\nalias ReducedScalar = f32;"
     };
-    let mut enable = "";
-    let mut suffix = "";
     let source = match name {
         "UI" => include_str!("src/pipelines/ui.wgsl").to_owned(),
-        "TEXT" => {
-            if variant & 4 != 0 {
-                enable = "enable dual_source_blending;";
-                suffix = include_str!("src/pipelines/text_lcd.wgsl");
-            }
-            TEXT.to_owned()
-        }
+        "TEXT" => TEXT.to_owned(),
         "IMAGE" => IMAGE.to_owned(),
-        "IMAGE_ARRAY" => {
-            enable = "enable wgpu_binding_array;";
-            IMAGE
-                .replace(
-                    "var image_tex: texture_2d<f32>;",
-                    "var image_textures: binding_array<texture_2d<f32>, 32>;",
-                )
-                .replace(
-                    "textureSampleLevel(image_tex,",
-                    "textureSampleLevel(image_textures[u32(data.info.y)],",
-                )
-                .replace(
-                    "textureSampleGrad(image_tex,",
-                    "textureSampleGrad(image_textures[u32(data.info.y)],",
-                )
-        }
-        "SMALL_IMAGES" => {
-            let vertex = IMAGE
-                .split_once("@fragment")
-                .map_or(IMAGE, |(vertex, _)| vertex);
-            let vertex = vertex.replace("texture_2d<f32>;", "texture_2d_array<f32>;");
-            let vertex = vertex.replace(
-                "var clip_mask_tex: texture_2d_array<f32>;",
-                "var clip_mask_tex: texture_2d<f32>;",
-            );
-            format!(
-                "{vertex}{}",
-                include_str!("src/pipelines/small_images.wgsl")
-            )
-        }
         "EXTERNAL_IMAGE" => {
             let vertex = IMAGE
                 .split_once("@fragment")
@@ -133,7 +93,5 @@ fn assemble(name: &str, variant: usize) -> String {
     } else {
         ("", "")
     };
-    format!(
-        "{enable}\n{reduced}\n{COLOR}\n{VIEW}\n{source}\n{clip}\n{gradient}\n{paints}\n{suffix}"
-    )
+    format!("{reduced}\n{COLOR}\n{VIEW}\n{source}\n{clip}\n{gradient}\n{paints}")
 }

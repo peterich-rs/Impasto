@@ -17,6 +17,41 @@ pub struct PictureId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LayerId(pub u32);
 
+/// Changed layer addresses in the old and new snapshots of one scene.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneDelta {
+    pub base_epoch: u64,
+    pub removed_or_changed: Arc<[LayerId]>,
+    pub inserted_or_changed: Arc<[LayerId]>,
+    pub changes: SceneChanges,
+}
+
+/// Work required to install the new checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SceneChanges {
+    LayerValues,
+    Pictures(Arc<[PictureUpdate]>),
+    Topology,
+}
+
+/// A replacement in the checkpoint's picture array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PictureUpdate {
+    pub index: usize,
+    pub id: PictureId,
+}
+
+/// A rectangle whose presentation can change independently of its picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintSlot {
+    pub bounds: [f32; 4],
+    pub radius: f32,
+    pub corners: Option<super::CornerShape>,
+    pub color: [u8; 4],
+    pub stroke_width: f32,
+    pub stroke_color: [u8; 4],
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayerTree {
     pub layers: Vec<Layer>,
@@ -184,6 +219,7 @@ pub struct Layer {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LayerKind {
+    Paint(PaintSlot),
     /// A solid background with a premultiplied linear color.
     Fill {
         bounds: [f32; 4],

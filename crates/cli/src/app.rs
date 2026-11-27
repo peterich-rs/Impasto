@@ -10,6 +10,7 @@ struct Manifest {
     name: String,
     version: String,
     targets: Vec<String>,
+    assets: Option<PathBuf>,
     #[serde(default)]
     android: AndroidConfig,
     #[serde(default)]
@@ -141,7 +142,7 @@ pub struct App {
     pub version: String,
     pub targets: Vec<String>,
     pub entry: PathBuf,
-    pub gallery: bool,
+    assets: PathBuf,
     pub android: AndroidConfig,
     pub ios: IosConfig,
     pub macos: MacConfig,
@@ -155,12 +156,7 @@ impl App {
         if cwd.join("app.toml").is_file() {
             return Self::load(&cwd);
         }
-        if let Some(framework) = crate::framework_root().filter(|root| root == &cwd) {
-            let mut app = Self::load(&framework.join(crate::GALLERY_DIR))?;
-            app.gallery = true;
-            return Ok(app);
-        }
-        bail!("当前目录没有 app.toml");
+        bail!("当前目录没有 app.toml。请进入应用目录或指定 --project <目录>");
     }
     pub(crate) fn for_plugin(root: PathBuf) -> Result<Self> {
         let root = root.canonicalize()?;
@@ -170,12 +166,12 @@ impl App {
             serde_json::from_slice(&std::fs::read(root.join("package.json"))?)?;
         let entry = root.join(package["exports"]["."].as_str().context("插件缺少主导出")?);
         Ok(Self {
+            assets: root.join("assets"),
             root,
             name: String::new(),
             version: impasto::VERSION.to_owned(),
             targets,
             entry,
-            gallery: false,
             android: AndroidConfig::default(),
             ios: IosConfig::default(),
             macos: MacConfig::default(),
@@ -224,12 +220,12 @@ impl App {
                 path: "rust".into(),
             });
         Ok(Self {
+            assets: root.join(manifest.assets.unwrap_or_else(|| PathBuf::from("assets"))),
             root,
             name: manifest.name,
             version: manifest.version,
             targets: manifest.targets,
             entry,
-            gallery: false,
             android: manifest.android,
             ios: manifest.ios,
             macos: manifest.macos,
@@ -265,15 +261,8 @@ impl App {
         Ok(modules.join(","))
     }
 
-    pub fn assets(&self) -> PathBuf {
-        if self.gallery {
-            crate::framework_root().map_or_else(
-                || self.root.join("assets"),
-                |r| r.join("crates/embedder/macos/assets"),
-            )
-        } else {
-            self.root.join("assets")
-        }
+    pub fn assets(&self) -> &Path {
+        &self.assets
     }
 }
 pub fn validate_name(name: &str) -> Result<()> {

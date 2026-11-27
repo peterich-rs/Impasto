@@ -225,24 +225,3 @@ fn fs_backdrop_material(in: VertexOut) -> @location(0) vec4<f32> {
     let filtered = vec4(dither_linear(treated, in.position.xy) * pixel.a, pixel.a);
     return mix(dst, filtered, coverage(in.position.xy));
 }
-
-
-fn dithered_output(in: VertexOut) -> vec4<f32> {
-    let pixel = read_source(source_uv(in.position.xy));
-    if params.values.w != 0.0 {
-        let straight = surface_alpha(pixel);
-        return vec4(dither_srgb(vec4(straight.rgb, 1.0), in.position.xy).rgb, pixel.a);
-    }
-    return dither_srgb(pixel, in.position.xy);
-}
-
-@fragment
-fn fs_dither(in: VertexOut) -> @location(0) vec4<f32> {
-    let pixel = dithered_output(in);
-    return vec4(to_linear(pixel.rgb), pixel.a);
-}
-
-@fragment
-fn fs_dither_srgb(in: VertexOut) -> @location(0) vec4<f32> {
-    return dithered_output(in);
-}

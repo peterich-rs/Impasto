@@ -169,7 +169,7 @@ if [[ -z "$app" ]]; then
     root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     (
         cd "$root"
-        cargo run --quiet --locked -p cli -- build ios --ios-simulator "--$mode"
+        cargo run --quiet --locked --manifest-path "$root/Cargo.toml" -p cli -- --project "$root/examples/gallery-solid" build ios --ios-simulator "--$mode"
     ) | tee "$scratch/build.log"
     app="$(tail -1 "$scratch/build.log")"
 fi

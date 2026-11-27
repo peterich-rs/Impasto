@@ -5,6 +5,7 @@ mod android_vulkan;
 mod arena;
 mod atlas;
 mod batch;
+mod cache;
 mod color;
 mod compiler;
 mod compositor;
@@ -12,23 +13,23 @@ mod compositor_tracks;
 mod compute_blur;
 mod damage;
 mod fonts;
+mod fringe;
 mod gpu;
 mod gpu_view;
-mod gradient_lut;
 mod image_upload;
 mod inline_image;
-mod outline;
 mod pipeline_disk_cache;
 mod pipelines;
 mod prepare;
 mod profiler;
-mod resident;
 mod runtime_effect;
 mod shaper;
 mod status;
+mod submission;
 mod text_index;
 mod textures;
 
+pub use compositor::RenderStats;
 pub use damage::DamageRect;
 pub use fonts::{FontLibrary, ShapeStats};
 pub use gpu_view::{GpuContext, GpuViewError, GpuViewFormat, GpuViewId, GpuViewProducer};
@@ -71,7 +72,6 @@ mod metal;
 mod surface;
 
 pub use atlas::AtlasStats;
-pub use compositor::{RenderStats, SubtreeCacheStats};
 #[cfg(target_os = "ios")]
 pub use metal::MetalSliceBatch;
 pub use surface::{RawSurfaceHandle, WgpuSurface};
@@ -82,9 +82,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use engine::scene::{LayerId, LayerKind, LayerTree, PictureId};
+use engine::scene::{LayerId, LayerTree, PictureId};
 
-use compiler::{Affine, CompileContext, CompiledPicture, IDENTITY, compose, layer_transform};
+use compiler::CompiledPicture;
 use compositor::{Compositor, Scene};
 use gpu::Gpu;
 use profiler::{Capture, GpuProfiler};
@@ -101,6 +101,7 @@ pub struct SubmitStats {
     pub damage: DamageRect,
     pub layer_count: u32,
     pub picture_prepare: Duration,
+    pub glyph_prepare: Duration,
     pub compose: Duration,
     pub encode: Duration,
     pub flush: Duration,
@@ -132,6 +133,9 @@ pub struct Rasterizer {
     stats: SubmitStats,
     reuse_pictures: bool,
     parallel_prepare: bool,
+    resources_ready: Option<Arc<dyn Fn() + Send + Sync>>,
+    resource_prepare_deadline: Option<Instant>,
+    late_acquire: bool,
     pipeline_cache_dir: Option<std::path::PathBuf>,
     prepared_buffers: u32,
     prepared_mesh_bytes: u64,
@@ -149,20 +153,35 @@ struct DeviceState {
     textures: TextureStore,
 }
 
+#[derive(Default)]
+struct FrameWork {
+    capture: Option<Capture>,
+    producers: Vec<wgpu::CommandBuffer>,
+    encode_elapsed: Duration,
+    prepare_elapsed: Duration,
+}
+
+struct PreparedSurfaceFrame {
+    work: FrameWork,
+    output: compositor::PreparedOutput,
+}
+
 struct Frame {
     tree: Arc<LayerTree>,
     order: Vec<LayerId>,
+    sampled_layers: HashMap<LayerId, engine::scene::Layer>,
     scale: f32,
     pictures: HashMap<PictureId, Arc<CompiledPicture>>,
     views: Arc<[u64]>,
     gpu_view_requests: gpu_view::Requests,
     shader_uniforms: runtime_effect::ShaderUniformOverrides,
-    prepare_glyphs: bool,
     damage: DamageRect,
+    complex_damage: bool,
+    pending_images: bool,
+    has_images: bool,
     has_glyphs: bool,
     revision: u64,
     previous_revision: u64,
-    scene_revision: u64,
     #[cfg(target_os = "ios")]
     slices: Vec<HashSet<LayerId>>,
 }
@@ -181,6 +200,9 @@ impl Rasterizer {
             stats: SubmitStats::default(),
             reuse_pictures: false,
             parallel_prepare: std::env::var("IMPASTO_PARALLEL_PREPARE").as_deref() != Ok("0"),
+            resources_ready: None,
+            resource_prepare_deadline: None,
+            late_acquire: std::env::var("IMPASTO_LATE_ACQUIRE").as_deref() != Ok("0"),
             pipeline_cache_dir: None,
             prepared_buffers: 0,
             prepared_mesh_bytes: 0,
@@ -412,6 +434,7 @@ impl Rasterizer {
     pub fn forget_texture(&mut self, source: &str) {
         if let Some(device) = self.device.as_mut() {
             device.textures.forget(source);
+            device.compositor.evict_images(device.textures.evictions());
         }
     }
 
@@ -420,6 +443,7 @@ impl Rasterizer {
     pub fn invalidate_textures(&mut self) {
         if let Some(device) = self.device.as_mut() {
             device.textures.clear();
+            device.compositor.evict_images(device.textures.evictions());
         }
     }
 
@@ -428,10 +452,44 @@ impl Rasterizer {
         self.reuse_pictures = false;
     }
 
+    /// Installs a thread-safe wake callback for completed CPU resource jobs.
+    pub fn set_resource_wake(&mut self, notify: impl Fn() + Send + Sync + 'static) {
+        self.resources_ready = Some(Arc::new(notify));
+    }
+
+    /// Limits synchronous resource preparation before encoding and submission.
+    pub fn set_resource_prepare_deadline(&mut self, deadline: Option<Instant>) {
+        self.resource_prepare_deadline = deadline;
+    }
+
+    /// Supplies the current target size. Clearing it cancels scene preparation.
+    pub fn set_resource_viewport(&mut self, pixels: Option<PixelSize>) {
+        if let Some(device) = self.device.as_mut() {
+            device.compositor.note_viewport(
+                pixels
+                    .filter(PixelSize::is_usable)
+                    .map(|size| [size.width, size.height]),
+            );
+        }
+    }
+
+    /// Takes completed work belonging to the current drawable and scene.
+    pub fn collect_resources(&mut self) -> bool {
+        let (Some(device), Some(frame)) = (self.device.as_mut(), self.frame.as_mut()) else {
+            return false;
+        };
+        if device.gpu.is_lost() || !device.compositor.collect_resources() {
+            return false;
+        }
+        frame.damage = DamageRect::Full;
+        true
+    }
+
     pub fn trim(&mut self) {
         self.invalidate_pictures();
         if let Some(device) = self.device.as_mut() {
             device.textures.clear();
+            drop(device.textures.evictions());
             device.compositor.trim();
         }
         self.fonts.sweep();
@@ -445,222 +503,6 @@ impl Rasterizer {
         self.frame.as_ref().map_or(&[], |frame| &frame.views)
     }
 
-    /// Validates and installs a complete scene. On failure the previous frame stays intact.
-    pub fn submit_layers<'pixels>(
-        &mut self,
-        tree: &LayerTree,
-        point_scale: f32,
-        resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
-    ) -> Result<SubmitInfo, Status> {
-        self.submit_shared_layers(Arc::new(tree.clone()), point_scale, resolve)
-    }
-
-    /// Installs a scene already shared by the UI and raster queues.
-    pub fn submit_shared_layers<'pixels>(
-        &mut self,
-        tree: Arc<LayerTree>,
-        point_scale: f32,
-        mut resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
-    ) -> Result<SubmitInfo, Status> {
-        if !point_scale.is_finite() || point_scale <= 0.0 {
-            return Err(Status::BadScene);
-        }
-        let started = Instant::now();
-        let _prepare_span =
-            tracing::debug_span!(target: "impasto::render", "prepare_pictures").entered();
-        let order = paint_order(&tree)?;
-        let scales = picture_scales(&tree, &order, point_scale)?;
-        let device = self.device.as_mut().ok_or(Status::NotReady)?;
-        if device.gpu.is_lost() {
-            return Err(Status::DeviceLost);
-        }
-        let mut textures = device.textures.begin_frame();
-        let previous = self.frame.as_ref().filter(|_| self.reuse_pictures);
-        let previous_revision = self.frame.as_ref().map_or(0, |frame| frame.revision);
-        let compile_scale = |picture| scales.get(&picture).copied().unwrap_or(point_scale);
-        let (pool, mut prepared) = if self.parallel_prepare {
-            prepare::pictures(
-                tree.pictures.iter().filter_map(|picture| {
-                    let scale = compile_scale(picture.id);
-                    let cached = previous
-                        .and_then(|frame| frame.pictures.get(&picture.id))
-                        .is_some_and(|old| {
-                            old.device == device.generation
-                                && old.generation == picture.generation
-                                && old.scale == scale
-                                && old.origin == picture.origin
-                                && old
-                                    .images
-                                    .iter()
-                                    .all(|(source, _)| textures.same_geometry(source))
-                                && old.waiting.is_empty()
-                        });
-                    (!cached).then_some((picture.as_ref(), scale))
-                }),
-                |source| {
-                    textures
-                        .get(source)
-                        .map(|image| (image.width(), image.height()))
-                },
-            )
-        } else {
-            (None, HashMap::new())
-        };
-        let mut stats = SubmitStats {
-            picture_workers: pool.map_or(0, |pool| {
-                u32::try_from(pool.current_num_threads()).unwrap_or(u32::MAX)
-            }),
-            ..SubmitStats::default()
-        };
-        let mut pictures = HashMap::with_capacity(tree.pictures.len());
-        let mut has_glyphs = false;
-        let mut rebuilt_glyphs = false;
-        for picture in &tree.pictures {
-            let compile_scale = compile_scale(picture.id);
-            let cached = previous
-                .and_then(|frame| frame.pictures.get(&picture.id))
-                .filter(|cached| {
-                    cached.device == device.generation
-                        && cached.generation == picture.generation
-                        && cached.scale == compile_scale
-                        && cached.origin == picture.origin
-                        && cached
-                            .images
-                            .iter()
-                            .all(|(source, _)| textures.same_geometry(source))
-                        && cached.waiting.iter().all(|source| {
-                            textures.get(source).is_none() && resolve(source).is_none()
-                        })
-                });
-            let compiled = if let Some(cached) = cached {
-                for (source, _) in &cached.images {
-                    textures.touch(source);
-                }
-                stats.picture_reused = stats.picture_reused.saturating_add(1);
-                Arc::clone(cached)
-            } else {
-                let _compile_span = tracing::trace_span!(
-                    target: "impasto::render",
-                    "compile_picture",
-                    id = picture.id.0
-                )
-                .entered();
-                let stream_mesh = previous
-                    .and_then(|frame| frame.pictures.get(&picture.id))
-                    .is_some_and(|old| old.generation != picture.generation);
-                let mut context = CompileContext {
-                    gpu: &device.gpu,
-                    device_generation: device.generation,
-                    textures: &mut textures,
-                    resolve: &mut resolve,
-                    point_scale: compile_scale,
-                    stream_mesh,
-                };
-                let result = if let Some(prepared) = prepared.remove(&picture.id) {
-                    let compiled = prepared?.install(
-                        context.gpu,
-                        context.device_generation,
-                        context.stream_mesh,
-                    )?;
-                    for (source, _) in picture.images() {
-                        context.textures.touch(source);
-                    }
-                    compiled
-                } else {
-                    compiler::compile(picture, &mut context, pool)?
-                };
-                stats.picture_rebuilt = stats.picture_rebuilt.saturating_add(1);
-                rebuilt_glyphs |= result.has_glyphs;
-                if let Some(mesh) = result
-                    .mesh_buffer
-                    .get()
-                    .and_then(batch::MeshBuffer::resident)
-                {
-                    stats.render.buffers_created += 2;
-                    stats.render.mesh_upload_bytes += mesh.vertices.size() + mesh.indices.size();
-                }
-                Arc::new(result)
-            };
-            has_glyphs |= compiled.has_glyphs;
-            if pictures.insert(picture.id, compiled).is_some() {
-                return Err(Status::BadScene);
-            }
-        }
-        let mut views = Vec::new();
-        #[cfg(target_os = "ios")]
-        let mut slices = vec![HashSet::new()];
-        for &id in &order {
-            let layer = &tree.layers[id.0 as usize];
-            match layer.kind {
-                LayerKind::PlatformView { node } => {
-                    views.push(node);
-                    #[cfg(target_os = "ios")]
-                    slices.push(HashSet::new());
-                }
-                LayerKind::Picture { picture } if !pictures.contains_key(&picture) => {
-                    return Err(Status::BadScene);
-                }
-                #[cfg(target_os = "ios")]
-                LayerKind::Picture { .. } | LayerKind::Fill { .. } => {
-                    if let Some(slice) = slices.last_mut() {
-                        let mut ancestor = Some(id);
-                        while let Some(parent) = ancestor {
-                            if !slice.insert(parent) {
-                                break;
-                            }
-                            ancestor = tree.layers[parent.0 as usize].parent;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if device.gpu.is_lost() {
-            return Err(Status::DeviceLost);
-        }
-        let platform_views: Arc<[u64]> = views.into();
-        let gpu_view_requests = self.gpu_views.requests(&tree, &scales, point_scale);
-        let mut frame = Frame {
-            shader_uniforms: tree.shader_uniforms.clone(),
-            tree,
-            order,
-            scale: point_scale,
-            pictures,
-            views: Arc::clone(&platform_views),
-            gpu_view_requests,
-            prepare_glyphs: self.parallel_prepare && rebuilt_glyphs,
-            damage: DamageRect::Full,
-            has_glyphs,
-            revision: previous_revision.wrapping_add(1),
-            previous_revision,
-            scene_revision: previous_revision.wrapping_add(1),
-            #[cfg(target_os = "ios")]
-            slices,
-        };
-        frame.damage = damage::between(previous, &frame, &textures);
-        stats.damage = frame.damage;
-        stats.image_upload = textures.commit(&device.gpu)?;
-        device.compositor.prune_subtrees(&frame.pictures);
-        stats.picture_prepare = started.elapsed();
-        stats.layer_count = u32::try_from(frame.tree.layers.len()).unwrap_or(u32::MAX);
-        stats.pictures = u32::try_from(frame.pictures.len()).unwrap_or(u32::MAX);
-        stats.textures = u32::try_from(device.textures.len()).unwrap_or(u32::MAX);
-        self.frame = Some(frame);
-        self.reuse_pictures = true;
-        #[cfg(target_os = "ios")]
-        {
-            self.frame_number = self.frame_number.wrapping_add(1);
-        }
-        self.prepared_buffers = stats.render.buffers_created;
-        self.prepared_mesh_bytes = stats.render.mesh_upload_bytes;
-        self.stats = stats;
-        self.fonts.sweep();
-        Ok(SubmitInfo {
-            stats,
-            platform_views,
-        })
-    }
-
     fn encode_and_submit(
         &mut self,
         target: &wgpu::TextureView,
@@ -669,64 +511,150 @@ impl Rasterizer {
     ) -> Result<(), Status> {
         let mut capture = self.begin_gpu_capture();
         let producers = self.render_gpu_views(capture.as_mut())?;
+        let work = FrameWork {
+            capture,
+            producers,
+            ..FrameWork::default()
+        };
+        let wake = self
+            .parallel_prepare
+            .then(|| self.resources_ready.clone())
+            .flatten();
+        let deadline = self.resource_prepare_deadline;
+        self.submit_frame(work, |compositor, gpu, scene, capture| {
+            surface::check_size(gpu, pixels)?;
+            compositor.begin_frame(wake.as_ref(), deadline);
+            compositor.encode(
+                gpu,
+                scene,
+                target,
+                format,
+                [pixels.width, pixels.height],
+                capture.map(|capture| (capture, None)),
+            )
+        })
+    }
+
+    fn prepare_surface_frame(
+        &mut self,
+        format: compositor::OutputFormat,
+        pixels: PixelSize,
+    ) -> Result<PreparedSurfaceFrame, Status> {
+        let mut capture = self.begin_gpu_capture();
+        let producers = self.render_gpu_views(capture.as_mut())?;
+        let started = Instant::now();
         let device = self.device.as_mut().ok_or(Status::NotReady)?;
         let frame = self.frame.as_ref().ok_or(Status::NotReady)?;
         surface::check_size(&device.gpu, pixels)?;
-        let started = Instant::now();
-        let _compose_span = tracing::debug_span!(target: "impasto::render", "compose").entered();
-        let gpu = &device.gpu;
-        let compositor = &mut device.compositor;
-        compositor.begin_frame();
-        let (atlas, encode, flush, submitted) = gpu.hot_validation(|| {
-            let stage = Instant::now();
-            let command = {
-                let _encode_span =
-                    tracing::debug_span!(target: "impasto::render", "encode").entered();
-                let mut command = compositor.encode(
-                    gpu,
+        device.compositor.begin_frame(
+            self.resources_ready
+                .as_ref()
+                .filter(|_| self.parallel_prepare),
+            self.resource_prepare_deadline,
+        );
+        let encode_started = Instant::now();
+        let _span = tracing::debug_span!(target: "impasto::render", "encode").entered();
+        let output = device
+            .gpu
+            .hot_validation(|| {
+                device.compositor.prepare_surface(
+                    &device.gpu,
                     frame.scene(&self.fonts, &device.textures, None),
-                    target,
                     format,
                     [pixels.width, pixels.height],
-                    capture.as_mut().map(|capture| (capture, None)),
-                )?;
-                if gpu.backend != RasterBackend::Metal
-                    && let Some(capture) = &capture
+                    capture.as_mut(),
+                )
+            })
+            .inspect_err(|_| device.compositor.discard_frame())?;
+        let encode_elapsed = encode_started.elapsed();
+        self.stats.encode = encode_elapsed;
+        Ok(PreparedSurfaceFrame {
+            output,
+            work: FrameWork {
+                capture,
+                producers,
+                encode_elapsed,
+                prepare_elapsed: started.elapsed(),
+            },
+        })
+    }
+
+    fn submit_surface_frame(
+        &mut self,
+        target: &wgpu::TextureView,
+        prepared: PreparedSurfaceFrame,
+    ) -> Result<(), Status> {
+        self.submit_frame(prepared.work, |compositor, _, _, _| {
+            Ok(prepared.output.finish(target, compositor))
+        })
+    }
+
+    fn submit_frame(
+        &mut self,
+        work: FrameWork,
+        encode: impl FnOnce(
+            &mut Compositor,
+            &Gpu,
+            Scene<'_>,
+            Option<&mut Capture>,
+        ) -> Result<wgpu::CommandEncoder, Status>,
+    ) -> Result<(), Status> {
+        let FrameWork {
+            mut capture,
+            producers,
+            prepare_elapsed,
+            encode_elapsed,
+        } = work;
+        let started = Instant::now();
+        let _compose = tracing::debug_span!(target: "impasto::render", "compose").entered();
+        let device = self.device.as_mut().ok_or(Status::NotReady)?;
+        let gpu = &device.gpu;
+        let compositor = &mut device.compositor;
+        let (atlas, encode, flush, submit_done, queue_submit) = gpu
+            .hot_validation(|| {
+                let stage = Instant::now();
+                let command = {
+                    let _span = tracing::debug_span!(target: "impasto::render", "encode").entered();
+                    let frame = self.frame.as_ref().ok_or(Status::NotReady)?;
+                    let scene = frame.scene(&self.fonts, &device.textures, None);
+                    let mut tail = encode(compositor, gpu, scene, capture.as_mut())?;
+                    if gpu.backend != RasterBackend::Metal
+                        && let Some(capture) = &capture
+                    {
+                        capture.resolve(&mut tail);
+                    }
+                    tail.finish()
+                };
+                let encode = encode_elapsed + stage.elapsed();
+                let stage = Instant::now();
+                let (atlas, prelude) = {
+                    let _span =
+                        tracing::debug_span!(target: "impasto::render", "flush_arena").entered();
+                    compositor.flush(gpu)?
+                };
+                let flush = stage.elapsed();
+                let stage = Instant::now();
                 {
-                    capture.resolve(&mut command);
+                    let _span =
+                        tracing::debug_span!(target: "impasto::render", "queue_submit").entered();
+                    gpu.submit(producers.into_iter().chain(prelude).chain([command]));
+                    compositor.submitted(gpu);
                 }
-                command.finish()
-            };
-            let encode = stage.elapsed();
-            let stage = Instant::now();
-            let (atlas, prelude) = {
-                let _flush_span =
-                    tracing::debug_span!(target: "impasto::render", "flush_arena").entered();
-                compositor.flush(gpu)?
-            };
-            let flush = stage.elapsed();
-            let stage = Instant::now();
-            {
-                let _submit_span =
-                    tracing::debug_span!(target: "impasto::render", "queue_submit").entered();
-                gpu.submit(producers.into_iter().chain(prelude).chain([command]));
-                compositor.submitted(gpu);
-            }
-            let done = Instant::now();
-            Ok((atlas, encode, flush, (done, done.duration_since(stage))))
-        })?;
-        let (submit_done, submit_elapsed) = submitted;
+                let done = Instant::now();
+                Ok((atlas, encode, flush, done, done.duration_since(stage)))
+            })
+            .inspect_err(|_| compositor.discard_frame())?;
         if let (Some(profiler), Some(capture)) = (&mut device.profiler, capture) {
             self.gpu_sample = profiler.submitted(gpu, capture);
         }
         self.stats.atlas = atlas;
         self.stats.encode = encode;
         self.stats.flush = flush;
-        self.stats.queue_submit = submit_elapsed;
+        self.stats.queue_submit = queue_submit;
         self.stats.submit_done = Some(submit_done);
         let render = compositor.render_stats();
         self.finish_render_stats(render);
-        self.stats.compose = started.elapsed();
+        self.stats.compose = prepare_elapsed + started.elapsed();
         Ok(())
     }
 }
@@ -740,88 +668,15 @@ impl Frame {
     ) -> Scene<'a> {
         Scene {
             tree: &self.tree,
+            sampled_layers: &self.sampled_layers,
             pictures: &self.pictures,
             fonts,
             textures,
             shader_uniforms: &self.shader_uniforms,
             scale: self.scale,
             slice,
-            prepare_glyphs: self.prepare_glyphs,
-            damage: self.damage,
-            has_glyphs: self.has_glyphs,
-            revision: self.revision,
-            scene_revision: self.scene_revision,
-            previous_revision: self.previous_revision,
         }
     }
-}
-
-fn picture_scales(
-    tree: &LayerTree,
-    order: &[LayerId],
-    scale: f32,
-) -> Result<HashMap<PictureId, f32>, Status> {
-    let mut transforms: Vec<Affine> = vec![IDENTITY; tree.layers.len()];
-    let mut pictures = HashMap::<PictureId, f32>::new();
-    for id in order {
-        let index = id.0 as usize;
-        let layer = &tree.layers[index];
-        let parent = layer
-            .parent
-            .map_or(IDENTITY, |parent| transforms[parent.0 as usize]);
-        let transform = compose(parent, layer_transform(&layer.kind));
-        if !transform.iter().all(|value| value.is_finite()) {
-            return Err(Status::BadScene);
-        }
-        transforms[index] = transform;
-        if let LayerKind::Picture { picture } = layer.kind {
-            let [a, b, c, d, ..] = transform;
-            // Half-octave buckets keep scrolling and small transform updates
-            // from rebuilding tessellation while bounding pixel error.
-            let magnitude = (scale * a.hypot(b).max(c.hypot(d))).clamp(0.25, 128.0);
-            let bucket = (magnitude.log2() * 2.0).ceil() * 0.5;
-            let scale = bucket.exp2();
-            pictures
-                .entry(picture)
-                .and_modify(|previous| *previous = previous.max(scale))
-                .or_insert(scale);
-        }
-    }
-    Ok(pictures)
-}
-
-fn paint_order(tree: &LayerTree) -> Result<Vec<LayerId>, Status> {
-    if tree.layers.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut pending = vec![(tree.root, None, 0)];
-    let mut seen = vec![false; tree.layers.len()];
-    let mut ordered = Vec::with_capacity(tree.layers.len());
-    while let Some((id, parent, depth)) = pending.pop() {
-        let index = id.0 as usize;
-        let layer = tree.layers.get(index).ok_or(Status::BadScene)?;
-        if seen[index] || layer.parent != parent || depth > 256 {
-            return Err(Status::BadScene);
-        }
-        seen[index] = true;
-        ordered.push(id);
-        if let Some(next) = layer.next {
-            pending.push((next, parent, depth));
-        }
-        if let Some(child) = layer.first_child {
-            if matches!(
-                layer.kind,
-                LayerKind::Picture { .. } | LayerKind::PlatformView { .. } | LayerKind::Fill { .. }
-            ) {
-                return Err(Status::BadScene);
-            }
-            pending.push((child, Some(id), depth + 1));
-        }
-    }
-    if ordered.len() != tree.layers.len() {
-        return Err(Status::BadScene);
-    }
-    Ok(ordered)
 }
 
 #[cfg(test)]

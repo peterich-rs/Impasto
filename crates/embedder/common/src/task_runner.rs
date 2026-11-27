@@ -59,6 +59,7 @@ impl TaskHandle {
 }
 
 pub trait TaskRunner: Send + Sync + 'static {
+    /// Enqueues work for a later turn and never invokes it inline.
     /// Returns false when the queue has shut down.
     fn post(&self, task: Task) -> bool;
     fn post_delayed(&self, delay: Duration, task: Task) -> TaskHandle;
@@ -414,6 +415,159 @@ impl TaskRunner for ManualTaskRunner {
     }
 }
 
+/// A serial queue with a stable identity during a one-way executor handoff.
+pub struct SwitchableTaskRunner {
+    id: TaskQueueId,
+    state: Arc<Mutex<SwitchState>>,
+}
+
+struct SwitchState {
+    target: Option<Arc<dyn TaskRunner>>,
+    generation: u64,
+    ready: VecDeque<Task>,
+    delayed: BTreeMap<u64, (Instant, TaskHandle, Task)>,
+    next: u64,
+}
+
+impl SwitchableTaskRunner {
+    pub fn new(target: Arc<dyn TaskRunner>) -> Self {
+        Self {
+            id: TaskQueueId::new(),
+            state: Arc::new(Mutex::new(SwitchState {
+                target: Some(target),
+                generation: 0,
+                ready: VecDeque::new(),
+                delayed: BTreeMap::new(),
+                next: 0,
+            })),
+        }
+    }
+
+    /// Pauses dispatch at the current task boundary on the source queue.
+    pub(crate) fn begin_migration(&self) -> Option<Arc<dyn TaskRunner>> {
+        let mut state = runner_lock(&self.state);
+        let target = state.target.as_ref()?;
+        assert!(
+            target.runs_on_current_thread(),
+            "handoff must begin on its source queue"
+        );
+        state.generation = state.generation.wrapping_add(1);
+        state.target.take()
+    }
+
+    /// Resumes dispatch on the destination after its thread-local state is installed.
+    pub(crate) fn complete_migration(&self, target: Arc<dyn TaskRunner>) {
+        assert!(
+            target.runs_on_current_thread(),
+            "handoff must complete on its destination queue"
+        );
+        let mut state = runner_lock(&self.state);
+        assert!(state.target.is_none(), "handoff is already complete");
+        let generation = state.generation;
+        let pending = state.ready.len();
+        for _ in 0..pending {
+            if !self.post_ready(target.as_ref(), generation) {
+                state.ready.clear();
+                break;
+            }
+        }
+        state.delayed.retain(|id, (when, handle, _)| {
+            if !handle.is_pending() {
+                return false;
+            }
+            self.post_timer(target.as_ref(), generation, *id, *when);
+            true
+        });
+        state.target = Some(target);
+    }
+
+    fn post_ready(&self, target: &dyn TaskRunner, generation: u64) -> bool {
+        let state = Arc::downgrade(&self.state);
+        target.post(Box::new(move || {
+            let Some(state) = state.upgrade() else { return };
+            let task = {
+                let mut state = runner_lock(&state);
+                if generation != state.generation {
+                    return;
+                }
+                state.ready.pop_front()
+            };
+            if let Some(task) = task {
+                task();
+            }
+        }))
+    }
+
+    fn post_timer(&self, target: &dyn TaskRunner, generation: u64, id: u64, when: Instant) {
+        let state = Arc::downgrade(&self.state);
+        target.post_delayed(
+            when.saturating_duration_since(Instant::now()),
+            Box::new(move || {
+                let Some(state) = state.upgrade() else { return };
+                let delayed = {
+                    let mut state = runner_lock(&state);
+                    if generation != state.generation {
+                        return;
+                    }
+                    state.delayed.remove(&id)
+                };
+                if let Some((_, handle, task)) = delayed {
+                    handle.run(task);
+                }
+            }),
+        );
+    }
+}
+
+impl TaskRunner for SwitchableTaskRunner {
+    fn post(&self, task: Task) -> bool {
+        let mut state = runner_lock(&self.state);
+        // TaskRunner::post queues work. The target cannot run this task inline
+        // and any waiting callback observes the FIFO after the lock is released.
+        if let Some(target) = &state.target
+            && !self.post_ready(target.as_ref(), state.generation)
+        {
+            return false;
+        }
+        state.ready.push_back(task);
+        true
+    }
+
+    fn post_delayed(&self, delay: Duration, task: Task) -> TaskHandle {
+        let handle = TaskHandle::new();
+        let Some(when) = Instant::now().checked_add(delay) else {
+            handle.cancel();
+            return handle;
+        };
+        let mut state = runner_lock(&self.state);
+        state
+            .delayed
+            .retain(|_, (_, handle, _)| handle.is_pending());
+        let id = state.next;
+        state.next = state.next.wrapping_add(1);
+        if let Some(target) = &state.target {
+            self.post_timer(target.as_ref(), state.generation, id, when);
+        }
+        state.delayed.insert(id, (when, handle.clone(), task));
+        handle
+    }
+
+    fn runs_on_current_thread(&self) -> bool {
+        runner_lock(&self.state)
+            .target
+            .as_ref()
+            .is_some_and(|target| target.runs_on_current_thread())
+    }
+
+    fn queue_id(&self) -> TaskQueueId {
+        self.id
+    }
+}
+
+fn runner_lock<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    state.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// The queue carries only an identifier. The state and all its borrows stay
 /// on the owner thread, including construction and destruction.
 pub(crate) struct RunnerSlot<T: 'static> {
@@ -442,7 +596,31 @@ impl<T> RunnerSlot<T> {
     }
 
     pub(crate) fn install(&self, value: T) {
-        assert!(self.runner.runs_on_current_thread());
+        self.install_migrated(self.runner.as_ref(), value);
+    }
+
+    /// Removes the uniquely owned value on its source queue.
+    pub(crate) fn extract(&self, source: &dyn TaskRunner) -> Option<T> {
+        assert!(
+            source.runs_on_current_thread(),
+            "slot extraction must run on the source queue"
+        );
+        SLOTS.with_borrow_mut(|slots| {
+            let value = slots.get(&self.id)?.downcast_ref::<Rc<RefCell<T>>>()?;
+            if Rc::strong_count(value) != 1 {
+                return None;
+            }
+            let value = slots.remove(&self.id)?.downcast::<Rc<RefCell<T>>>().ok()?;
+            Rc::try_unwrap(*value).ok().map(RefCell::into_inner)
+        })
+    }
+
+    /// Installs a value on the destination before logical dispatch resumes.
+    pub(crate) fn install_migrated(&self, target: &dyn TaskRunner, value: T) {
+        assert!(
+            target.runs_on_current_thread(),
+            "slot installation must run on the destination queue"
+        );
         let previous = SLOTS
             .with_borrow_mut(|slots| slots.insert(self.id, Box::new(Rc::new(RefCell::new(value)))));
         assert!(previous.is_none(), "runner slot was already installed");
@@ -513,6 +691,71 @@ mod tests {
         assert!(runner.run_next());
         assert!(!task.is_pending());
         assert_eq!(recv.try_recv().unwrap(), "later");
+    }
+
+    #[test]
+    fn handoff_preserves_ready_work_and_timer_handles() {
+        let source = ThreadTaskRunner::start("test-ui-boot").unwrap();
+        let platform = Arc::new(ManualTaskRunner::default());
+        let queue = Arc::new(SwitchableTaskRunner::new(source));
+        let slot = Arc::new(RunnerSlot::new(Arc::clone(&queue) as Arc<dyn TaskRunner>));
+        let id = queue.queue_id();
+        let timeout = Duration::from_secs(5);
+        let long_delay = Duration::from_secs(30);
+        let (entered, boot_started) = mpsc::channel();
+        let (proceed, resume) = mpsc::channel();
+        let (result, extracted) = mpsc::channel();
+        let (installed, log) = mpsc::channel();
+        let boot_slot = Arc::clone(&slot);
+        let boot_queue = Arc::clone(&queue);
+        assert!(queue.post(Box::new(move || {
+            boot_slot.install(Vec::new());
+            entered.send(()).unwrap();
+            resume.recv_timeout(timeout).unwrap();
+            let old = boot_queue.begin_migration().unwrap();
+            let value = boot_slot.extract(old.as_ref()).unwrap();
+            result.send(value).unwrap();
+        })));
+        boot_started.recv_timeout(timeout).unwrap();
+
+        let push = |n| -> Task {
+            let slot = Arc::clone(&slot);
+            Box::new(move || slot.with(|values: &mut Vec<_>| values.push(n)).unwrap())
+        };
+        assert!(queue.post(push(0)));
+        let before = queue.post_delayed(long_delay, push(1025));
+        let cancelled = queue.post_delayed(long_delay, push(2000));
+        proceed.send(()).unwrap();
+        let value = extracted.recv_timeout(timeout).unwrap();
+        assert_eq!(queue.queue_id(), id);
+        assert!(!queue.runs_on_current_thread());
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                for n in 1..=1024 {
+                    assert!(queue.post(push(n)));
+                }
+            });
+        });
+        let during = queue.post_delayed(long_delay * 2, push(1026));
+        cancelled.cancel();
+        slot.install_migrated(platform.as_ref(), value);
+        queue.complete_migration(Arc::clone(&platform) as Arc<dyn TaskRunner>);
+        assert_eq!(queue.queue_id(), id);
+        assert!(queue.runs_on_current_thread());
+
+        while platform.run_next() {}
+        assert!(before.is_pending() && during.is_pending());
+        assert_eq!(slot.with(|values| values.len()), Some(1025));
+        platform.advance(long_delay * 2);
+        assert!(queue.post(Box::new(move || {
+            installed.send(slot.with(std::mem::take).unwrap()).unwrap();
+        })));
+        while platform.run_next() {}
+        assert_eq!(
+            log.recv_timeout(timeout).unwrap(),
+            (0..=1026).collect::<Vec<_>>()
+        );
+        assert!(!before.is_pending() && !during.is_pending());
     }
 
     #[test]

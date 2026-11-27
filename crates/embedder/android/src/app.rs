@@ -27,7 +27,6 @@ use crate::vsync::FrameClock;
 
 const FONT_FAMILY: &str = "Sans";
 const FONT_PATH: &CStr = c"fonts/Sans.ttf";
-const SCRIPT_NAME: &str = "quotes.js";
 const IME_SHOW: i32 = 1;
 const IME_UPDATE: i32 = 2;
 const IME_HIDE: i32 = 3;
@@ -42,6 +41,7 @@ struct Bridge {
     document_dir: Option<String>,
     font: OnceLock<Vec<u8>>,
     semantics: Mutex<Vec<embedder::ProjectedNode>>,
+    semantics_revision: AtomicI64,
     native_channel: impasto::os::NativeChannel,
     restoration: embedder::Restoration,
     window_session: embedder::WindowSession,
@@ -79,7 +79,8 @@ impl Bridge {
         }
     }
 
-    fn schedule_frame(&self, token: embedder::FrameToken, hint: FrameRateHint) {
+    fn schedule_frame(&self, order: u64, request: Option<(embedder::FrameToken, FrameRateHint)>) {
+        let (token, hint) = request.unwrap_or((embedder::FrameToken(0), FrameRateHint::Display));
         let preferred_rate = match hint {
             FrameRateHint::Display => 0,
             FrameRateHint::Hz60 => 60,
@@ -89,8 +90,9 @@ impl Bridge {
             env.call_method(
                 view,
                 jni::jni_str!("scheduleFrame"),
-                jni::jni_sig!("(JI)V"),
+                jni::jni_sig!("(JJI)V"),
                 &[
+                    jni::objects::JValue::Long(order as jlong),
                     jni::objects::JValue::Long(token.0 as jlong),
                     jni::objects::JValue::Int(preferred_rate),
                 ],
@@ -224,7 +226,11 @@ impl Bridge {
         });
     }
 
-    fn publish_semantics(&self, nodes: &[embedder::ProjectedNode]) {
+    fn publish_semantics(&self, nodes: &[embedder::ProjectedNode], reset: bool) {
+        let revision = self.semantics_revision.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::trace!(target: "impasto::semantics", nodes = nodes.len(), revision, reset,
+            strings = nodes.len() * 3 + nodes.iter().filter(|node| node.autofill.is_some()).count() * 2,
+            "publishing Android semantics");
         let projected = nodes;
         let nodes = crate::a11y::bridge_nodes(projected);
         self.call(|env, view| {
@@ -297,9 +303,11 @@ impl Bridge {
                 view,
                 jni::jni_str!("publishSemantics"),
                 jni::jni_sig!(
-                    "([J[I[Ljava/lang/String;[Ljava/lang/String;[I[I[I[F[Ljava/lang/String;[J[F[Ljava/lang/String;[Ljava/lang/String;)V"
+                    "(JZ[J[I[Ljava/lang/String;[Ljava/lang/String;[I[I[I[F[Ljava/lang/String;[J[F[Ljava/lang/String;[Ljava/lang/String;)V"
                 ),
                 &[
+                    jni::objects::JValue::Long(revision),
+                    jni::objects::JValue::Bool(reset),
                     jni::objects::JValue::Object(ids.as_ref()),
                     jni::objects::JValue::Object(roles.as_ref()),
                     jni::objects::JValue::Object(labels.as_ref()),
@@ -446,12 +454,44 @@ impl Services for Shared {
     }
 
     fn semantics(&self, update: &[embedder::ProjectedNode]) {
-        *self
+        let (reset, changed) = {
+            let mut previous = self
+                .0
+                .semantics
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if previous.as_slice() == update {
+                return;
+            }
+            let reset = previous.len() != update.len()
+                || previous
+                    .iter()
+                    .zip(update)
+                    .any(|(old, node)| old.id != node.id || old.parent != node.parent);
+            let changed = if reset {
+                update.to_vec()
+            } else {
+                previous
+                    .iter()
+                    .zip(update)
+                    .filter(|(old, node)| old != node)
+                    .map(|(_, node)| node.clone())
+                    .collect()
+            };
+            update.clone_into(&mut previous);
+            (reset, changed)
+        };
+        self.0.publish_semantics(&changed, reset);
+    }
+
+    fn surface_attached(&self, _id: SurfaceId) {
+        let nodes = self
             .0
             .semantics
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = update.to_vec();
-        self.0.publish_semantics(update);
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        self.0.publish_semantics(&nodes, true);
     }
 
     fn source_updated(&self, revision: &str, result: Result<(), &str>) {
@@ -737,6 +777,7 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
         document_dir: (!document_dir.is_empty()).then_some(document_dir),
         font: OnceLock::new(),
         semantics: Mutex::new(Vec::new()),
+        semantics_revision: AtomicI64::new(0),
         native_channel: impasto::os::NativeChannel::new({
             let bridge = bridge.clone();
             move |id, operation, payload| {
@@ -772,8 +813,8 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
         back_enabled: AtomicBool::new(false),
     });
     let bridge_for_clock = Arc::clone(&bridge);
-    let clock = FrameClock::new(Arc::new(move |token, hint| {
-        bridge_for_clock.schedule_frame(token, hint)
+    let clock = FrameClock::new(Arc::new(move |order, request| {
+        bridge_for_clock.schedule_frame(order, request)
     }));
     let platform_runner = crate::main_runner::main_runner()?;
     let settings = request.settings;
@@ -828,10 +869,6 @@ fn android_boot(
         .map(std::path::Path::to_owned);
     let script_assets = Arc::clone(&bridge.assets);
     let launch_url = engine::session::shared(initial_url);
-    let thread_topology = match decode::read_bytes(&script_assets, c"app.thread_topology") {
-        Some(bytes) => String::from_utf8_lossy(&bytes).trim().parse()?,
-        None => embedder::ThreadTopology::configured()?,
-    };
     let (name, script) = load_script(&script_assets, requested.as_deref())?;
     let modules = decode::read_bytes(&script_assets, c"app.modules")
         .map(|bytes| String::from_utf8(bytes).map_err(|_| SessionError::Runtime))
@@ -848,39 +885,40 @@ fn android_boot(
     let trace = decode::read_bytes(&script_assets, c"app.trace").is_some();
     let ui_vm = bridge.vm.clone();
     let raster_vm = bridge.vm.clone();
+    let factory: embedder::SessionFactory = Box::new(move |open, host| {
+        set_display_priority(&ui_vm, jni::jni_str!("ui-boot"));
+        // ActivityHost publishes the first focused resume after the view is attached.
+        let host = if let Some(modules) = modules {
+            host.restrict(&modules)
+        } else {
+            host
+        };
+        let mut session = if name.ends_with(".bin") {
+            // SAFETY: `script` is an asset named `*.bin`. The host packages
+            // that file from `impasto build`, which writes this toolchain's
+            // `compile` output. It is not network input. The envelope does
+            // not prove the payload is valid bytecode.
+            unsafe {
+                engine::js::open_trusted_bytecode(&script, &name, open.shaper, open.log, host)
+            }
+        } else {
+            engine::js::open_program(&script, &name, open.shaper, open.log, host)
+        }
+        .map_err(|error| match error {
+            engine::js::Error::Runtime => SessionError::Runtime,
+            engine::js::Error::Script(text) => {
+                tracing::error!(target: "impasto::script", "{text}");
+                SessionError::Script(text)
+            }
+        })?;
+        session.set_trace(trace);
+        Ok(session)
+    });
+    // SAFETY: The factory keeps the shaper, VM and log callback in the JS session.
+    let launch = unsafe { Launch::migrating(factory) };
     Ok(Boot {
         font_family: FONT_FAMILY.to_string(),
-        launch: Launch::Session(Box::new(move |open, host| {
-            if thread_topology == embedder::ThreadTopology::Split {
-                set_display_priority(&ui_vm, jni::jni_str!("ui"));
-            }
-            // ActivityHost publishes the first focused resume after the view is attached.
-            let host = if let Some(modules) = modules {
-                host.restrict(&modules)
-            } else {
-                host
-            };
-            let mut session = if name.ends_with(".bin") {
-                // SAFETY: `script` is an asset named `*.bin`. The host packages
-                // that file from `impasto build`, which writes this toolchain's
-                // `compile` output. It is not network input. The envelope does
-                // not prove the payload is valid bytecode.
-                unsafe {
-                    engine::js::open_trusted_bytecode(&script, &name, open.shaper, open.log, host)
-                }
-            } else {
-                engine::js::open_program(&script, &name, open.shaper, open.log, host)
-            }
-            .map_err(|error| match error {
-                engine::js::Error::Runtime => SessionError::Runtime,
-                engine::js::Error::Script(text) => {
-                    tracing::error!(target: "impasto::script", "{text}");
-                    SessionError::Script(text)
-                }
-            })?;
-            session.set_trace(trace);
-            Ok(session)
-        })),
+        launch,
         services: Box::new(Shared(Arc::clone(&bridge))),
         vsync: clock as Arc<dyn Vsync>,
         decoder: Arc::new(AssetDecoder {
@@ -901,15 +939,9 @@ fn android_boot(
             ),
         },
         platform_runner: Some(platform_runner),
-        thread_topology,
         launch_url: Arc::clone(&launch_url),
         open_raster: Box::new(move |fonts| {
-            let name = if thread_topology == embedder::ThreadTopology::SharedRender {
-                jni::jni_str!("render")
-            } else {
-                jni::jni_str!("raster")
-            };
-            set_display_priority(&raster_vm, name);
+            set_display_priority(&raster_vm, jni::jni_str!("raster"));
             let mut raster = renderer.create_raster(fonts)?;
             if let Some(directory) = &pipeline_cache {
                 // SAFETY: cache_log_dir derives this directory from Context.getCacheDir().
@@ -1133,7 +1165,6 @@ fn load_script(
     }
     names.push("app.bin".to_string());
     names.push("app.js".to_string());
-    names.push(SCRIPT_NAME.to_string());
     for name in names {
         let Ok(path) = CString::new(name.clone()) else {
             continue;

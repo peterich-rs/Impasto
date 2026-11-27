@@ -34,16 +34,6 @@ impl DamageRect {
         }
     }
 
-    pub(crate) fn pixels(self, size: [u32; 2]) -> Option<[u32; 4]> {
-        let Self::Rect([x0, y0, x1, y1]) = self else {
-            return None;
-        };
-        let coordinate = |value, max| u32::try_from(value).unwrap_or(0).min(max);
-        let [x0, x1] = [coordinate(x0, size[0]), coordinate(x1, size[0])];
-        let [y0, y1] = [coordinate(y0, size[1]), coordinate(y1, size[1])];
-        (x0 < x1 && y0 < y1).then(|| [x0, y0, x1 - x0, y1 - y0])
-    }
-
     #[expect(
         clippy::cast_possible_truncation,
         reason = "damage coordinates are rounded outwards and checked before conversion"
@@ -190,7 +180,10 @@ impl SceneDamage {
         let mut states = vec![PaintState::default(); frame.tree.layers.len()];
         for &id in &frame.order {
             let index = id.0 as usize;
-            let layer = &frame.tree.layers[index];
+            let layer = frame
+                .sampled_layers
+                .get(&id)
+                .unwrap_or(&frame.tree.layers[index]);
             let parent = layer
                 .parent
                 .map_or_else(PaintState::default, |id| states[id.0 as usize]);
@@ -218,6 +211,11 @@ impl SceneDamage {
                             .expand(state.blur),
                     );
                     damage.fills.push((id, bounds, state.affected));
+                }
+                LayerKind::Paint(slot) => {
+                    damage
+                        .fills
+                        .push((id, slot_bounds(slot, state, frame.scale), state.affected));
                 }
                 LayerKind::PlatformView { .. } => damage.dynamic = true,
                 _ => {}
@@ -292,6 +290,96 @@ fn resolve(
     DamageRect::from_bounds(bounds, scale)
 }
 
+fn slot_bounds(slot: engine::scene::PaintSlot, state: PaintState, scale: f32) -> PictureBounds {
+    state.clipped(
+        PictureBounds::rect(slot.bounds)
+            .expand(slot.stroke_width * 0.5 + 2.0 / scale)
+            .transform(state.transform)
+            .expand(state.blur),
+    )
+}
+
+/// Damage for a retained scene update. Visit the changed subtrees and their
+/// ancestors only. Destination-dependent effects require full replay.
+pub(crate) fn changed_layers<'next>(
+    old: &Frame,
+    next: &LayerTree,
+    next_picture: impl Fn(PictureId) -> Option<&'next crate::CompiledPicture>,
+    complex_damage: bool,
+    delta: &engine::scene::SceneDelta,
+) -> DamageRect {
+    if old.complex_damage || complex_damage {
+        return DamageRect::Full;
+    }
+    let before = changed_bounds(
+        &old.tree,
+        |id| old.pictures.get(&id).map(std::sync::Arc::as_ref),
+        &delta.removed_or_changed,
+        old.scale,
+    );
+    let after = changed_bounds(next, next_picture, &delta.inserted_or_changed, old.scale);
+    DamageRect::from_bounds(before.union(after), old.scale)
+}
+
+fn changed_bounds<'picture>(
+    tree: &LayerTree,
+    picture: impl Fn(PictureId) -> Option<&'picture crate::CompiledPicture>,
+    layers: &[LayerId],
+    scale: f32,
+) -> PictureBounds {
+    let mut bounds = PictureBounds::Empty;
+    let mut ancestors = Vec::new();
+    let mut pending = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    for &id in layers {
+        if visited.contains(&id) {
+            continue;
+        }
+        let Some(layer) = tree.layers.get(id.0 as usize) else {
+            return PictureBounds::Unbounded;
+        };
+        let mut parent = layer.parent;
+        while let Some(id) = parent {
+            let layer = &tree.layers[id.0 as usize];
+            ancestors.push(&layer.kind);
+            parent = layer.parent;
+        }
+        let state = ancestors
+            .drain(..)
+            .rev()
+            .fold(PaintState::default(), |state, kind| {
+                state.child(kind, false)
+            });
+        pending.push((id, state));
+        while let Some((id, state)) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let layer = &tree.layers[id.0 as usize];
+            let state = state.child(&layer.kind, false);
+            bounds = bounds.union(match layer.kind {
+                LayerKind::Paint(slot) => slot_bounds(slot, state, scale),
+                LayerKind::Fill { bounds, .. } => state.clipped(
+                    PictureBounds::rect(bounds)
+                        .transform(state.transform)
+                        .expand(state.blur),
+                ),
+                LayerKind::Picture { picture: id } => picture(id)
+                    .map_or(PictureBounds::Unbounded, |picture| {
+                        state.bounds(picture, scale)
+                    }),
+                _ => PictureBounds::Empty,
+            });
+            let mut child = layer.first_child;
+            while let Some(id) = child {
+                pending.push((id, state));
+                child = tree.layers[id.0 as usize].next;
+            }
+        }
+    }
+    bounds
+}
+
 pub(crate) fn between(
     old: Option<&Frame>,
     new: &Frame,
@@ -342,6 +430,9 @@ pub(crate) fn between(
         let changed = picture.resident_id != old_picture.resident_id
             || new.shader_uniforms.get(&draw.layer) != old.shader_uniforms.get(&past.layer)
             || draw.readbacks_before != past.readbacks_before
+            || draw.state.transform != past.state.transform
+            || draw.state.clip != past.state.clip
+            || draw.state.blur != past.state.blur
             || !ancestors_match(&old.tree, past.layer, &new.tree, draw.layer)
             || picture.images.iter().any(|(source, _)| {
                 source.starts_with(EXTERNAL_TEXTURE_PREFIX) || !textures.same_revision(source)
@@ -376,10 +467,10 @@ pub(crate) fn sample(
     };
     let before = SceneDamage::collect(frame, tracked);
     let previous = before.affected_bounds(frame);
-    let tree = std::sync::Arc::make_mut(&mut frame.tree);
-    if !engine::scene::apply_compositor_samples(&mut tree.layers, &tree.tracks, samples) {
-        return None;
-    }
+    frame.sampled_layers =
+        engine::scene::compositor_layer_samples(&frame.tree.layers, &tracks, samples)?;
+    tracing::trace!(target: "impasto::compositor", covered_layers = frame.sampled_layers.len(),
+        tracks = tracks.len(), "sampled layer values");
     let after = SceneDamage::collect(frame, tracked);
     let current = after.affected_bounds(frame);
     Some(resolve(

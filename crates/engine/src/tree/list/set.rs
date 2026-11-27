@@ -326,6 +326,17 @@ impl DriverSet {
         }
     }
 
+    /// Revalidates coverage after prefetch rows have mounted and been laid out.
+    #[cfg(feature = "js")]
+    pub(crate) fn refresh_compositor_windows(&self, tree: &mut Tree) {
+        for driver in self.lists.iter().filter_map(|entry| entry.value.as_ref()) {
+            if let Some(node) = driver.viewport() {
+                let window = driver.compositor_window(tree);
+                tree.list_compositor_windows.insert(node, window);
+            }
+        }
+    }
+
     fn driver_for_scroll(&self, node: NodeId) -> Option<DriverId> {
         self.scrolls.iter().enumerate().find_map(|(index, entry)| {
             let controller = entry.value.as_ref()?;

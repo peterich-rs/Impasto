@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal, createTrackedEffect, onCleanup } from "solid-js";
 import { onFrame, requestFrame } from "@impasto/solid-renderer";
 import { Canvas, Column, RepaintBoundary, Row, ScrollArea, View, useTheme } from "@impasto/solid-ui";
-import type { Router } from "@impasto/solid-router";
+import { usePageActive, type Router } from "@impasto/solid-router";
 import { loc } from "../copy.ts";
 import { fmtPrice, fmtSigned } from "../format.ts";
 import { marketOpen, minute, sectorOf } from "../engine/analytics.ts";
@@ -14,7 +14,7 @@ import { Flow, historicalRange, Ranges, Tape } from "../widgets/stocks/analysis.
 import { dot, StockChart, stroke } from "../widgets/stocks/chart.tsx";
 import { Depth, OrderBook } from "../widgets/stocks/order-book.tsx";
 import { trackStockSections } from "../widgets/stocks/section-visibility.ts";
-import { Action, change, ClockButton, clock, code, colors, compact, filling, Label, Rule, Section, sectorLabel, sign, tone } from "../widgets/stocks/ui.tsx";
+import { priceSlotWidth, Action, change, ClockButton, clock, code, colors, compact, filling, Label, Rule, Section, sectorLabel, sign, tone } from "../widgets/stocks/ui.tsx";
 import { BackButton, Glyph } from "../widgets/stocks/icons.tsx";
 import { TicketOverlay, type TicketSeed } from "./order.tsx";
 
@@ -25,12 +25,13 @@ function QuoteHeader(props: { engine: QuoteEngine; data: StockSnapshot; time: st
   const theme = useTheme();
   const quote = () => props.data.quote;
   const price = createMemo(() => fmtPrice(quote().last));
-  const priceDigits = createMemo(() => price().length);
   const priceSize = () => props.wide ? 38 : 36;
   const priceStyle = createMemo(() => {
     const em = priceSize() * theme().textScale;
     return {
-      width: Math.ceil((priceDigits() * 0.58 + 0.2) * em),
+      width: priceSlotWidth(priceSize(), theme().textScale),
+      fontFamily: "Monospace",
+      textAlign: "right" as const,
       height: Math.ceil(em * 1.2),
       flexShrink: 1,
     };
@@ -104,12 +105,13 @@ function Favorite(props: { symbol: string }) {
 
 export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: boolean; split?: boolean; transitioning?: boolean }) {
   const sections = ["quote", "chart", "book", "tape", "depth", "flow", "ranges"] as const;
-  const [ready, setReady] = createSignal(-1);
+  const [ready, setReady] = createSignal(0);
+  const active = usePageActive();
   const [ticket, setTicket] = createSignal<TicketSeed | null>(null);
   // Mount the quote and chart on entry. Resume staging when the slide or ticket closes.
   createTrackedEffect(() => {
     const next = ready() + 1;
-    if (next === sections.length) return;
+    if (!active() || next === sections.length) return;
     if (next > sections.indexOf("chart") && (props.transitioning || ticket() !== null)) return;
     const stop = onFrame(() => {
       stop();
@@ -126,7 +128,7 @@ export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: b
     setOpen(false);
     setTicket(null);
   });
-  const revision = useMarketPulse(() => ticket() === null && !props.transitioning);
+  const revision = useMarketPulse(() => active() && ticket() === null && !props.transitioning);
   const snapshot = createMemo((previous?: StockSnapshot) => {
     revision();
     return stockSnapshot(props.engine, props.symbol, previous);
@@ -206,7 +208,7 @@ export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: b
     <Row style={{ backgroundColor: colors.bar, paddingLeft: 16, paddingRight: 16, paddingTop: 8, paddingBottom: 8,
       gap: 10, alignItems: "center", flexShrink: 0 }}>
       <RepaintBoundary style={{ flexDirection: "column", width: 92, minWidth: 0, gap: 2 }}>
-        <Label size={16} weight={600}>{fmtPrice(quote().last)}</Label>
+        <Label size={16} weight={600} style={{ fontFamily: "Monospace", textAlign: "right" }}>{fmtPrice(quote().last)}</Label>
         <Label size={12} color={tone(change(quote()))}>{`${sign(change(quote()))}%`}</Label>
       </RepaintBoundary>
       <Show when={tradeable()} fallback={<Label color={colors.dim}>{loc("指数不可交易", "Index · not tradable")}</Label>}>

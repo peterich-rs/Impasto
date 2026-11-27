@@ -250,6 +250,18 @@ impl Runtime {
         RuntimeBuilder::new()
     }
 
+    /// Disarms the idle VM before a host transfers its ownership.
+    pub fn prepare_migration(&self) {
+        self.state.vm.prepare_migration();
+    }
+
+    /// Refreshes the QuickJS stack limit, restores its hooks, and applies the host turn budgets.
+    pub fn finish_migration(&self, limits: &RuntimeLimits) {
+        self.state
+            .vm
+            .finish_migration(limits.eval_budget_ms, limits.callback_budget_ms);
+    }
+
     /// Drains stack samples from completed VM turns on the owner thread.
     pub fn take_stack_samples(&self) -> Vec<StackSample> {
         self.state.vm.take_stack_samples()

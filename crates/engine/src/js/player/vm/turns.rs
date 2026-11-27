@@ -124,6 +124,10 @@ impl Host {
         self.hook_turn("layout", |_| vec![])
     }
 
+    pub(in crate::js::player) fn memory_pressure(&self) -> Result<(), String> {
+        self.hook_turn("memoryPressure", |_| vec![])
+    }
+
     pub(in crate::js::player) fn scroll_threshold(
         &self,
         id: u32,
@@ -264,6 +268,10 @@ impl Host {
             refs.motions.retain(|(_, id, _, _)| !ids.contains(id));
         }
         canvas::forget_nodes(self, ids);
+    }
+
+    pub(in crate::js::player) fn has_frame_request(&self) -> bool {
+        self.wants_frame.get()
     }
 
     pub(in crate::js::player) fn take_wants_frame(&self) -> bool {

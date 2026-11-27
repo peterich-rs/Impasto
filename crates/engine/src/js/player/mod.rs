@@ -243,9 +243,12 @@ pub struct JsSession {
     /// A failed frame must not schedule another frame by itself.
     suppress_demand: Cell<bool>,
     ui_work_pending: bool,
+    prefetching_list: bool,
     reload_frame: Option<crate::session::FrameOutput>,
     record_failing: bool,
     record_frames: u32,
+    /// Offset from the host's monotonic clock to the platform event clock.
+    gesture_clock_offset_ms: f64,
 }
 
 impl JsSession {
@@ -312,9 +315,11 @@ impl JsSession {
             exit: Cell::new(false),
             suppress_demand: Cell::new(false),
             ui_work_pending: false,
+            prefetching_list: false,
             reload_frame: None,
             record_failing: false,
             record_frames: 0,
+            gesture_clock_offset_ms: 0.0,
         })
     }
 
@@ -411,6 +416,22 @@ impl JsSession {
 }
 
 impl Session for JsSession {
+    fn prepare_platform_handoff(&mut self) -> bool {
+        self.vm.host.runtime.prepare_migration();
+        true
+    }
+
+    fn finish_platform_handoff(&mut self) {
+        self.vm
+            .host
+            .runtime
+            .finish_migration(&javascript::runtime::RuntimeLimits {
+                eval_budget_ms: 500,
+                callback_budget_ms: 32,
+                ..Default::default()
+            });
+    }
+
     fn register_shader_program(
         &mut self,
         source: &str,
@@ -496,11 +517,19 @@ impl Session for JsSession {
     }
 
     fn pointer(&mut self, event: crate::input::PointerEvent) {
+        self.pointer_moves(event, &[]);
+    }
+
+    fn pointer_moves(
+        &mut self,
+        event: crate::input::PointerEvent,
+        history: &[crate::input::PointerSample],
+    ) {
         let inner = &self.inner;
         if event.pen.is_some() {
             inner.last_pen.set(Some(event));
         }
-        let gestures = inner.tree.borrow_mut().pointer(event);
+        let gestures = inner.tree.borrow_mut().pointer_with_history(event, history);
         bump(&inner.marks.pointers);
         if let Err(message) = dispatch_pointer(&self.vm.host, gestures) {
             self.note_script_error(message);
@@ -826,6 +855,10 @@ impl Session for JsSession {
         reason = "JavaScript f64 values convert to the existing fixed-width callback record and f32 geometry"
     )]
     fn frame(&mut self, time: crate::session::FrameTime) -> crate::session::FrameOutput {
+        let offset = time.vsync_ms - time.mono_ms;
+        if offset.is_finite() {
+            self.gesture_clock_offset_ms = offset;
+        }
         if let Some(mut output) = self.reload_frame.take() {
             output.again |= self.wants_frame();
             return output;
@@ -854,7 +887,7 @@ impl Session for JsSession {
                 tree.tick_motions(time.target_ms);
             }
             tree.sync_scroll_offsets();
-            let mut notices = tree.tick(time.target_ms);
+            let mut notices = tree.tick(time.vsync_ms);
             notices.extend(tree.take_scroll_notices());
             drop(tree);
             drop(motion_span);
@@ -1066,6 +1099,9 @@ impl Session for JsSession {
             };
             let mut tree = inner.tree.borrow_mut();
             let record_started = std::time::Instant::now();
+            if self.prefetching_list {
+                inner.drivers.borrow().refresh_compositor_windows(&mut tree);
+            }
             if tree.needs_paint() {
                 let _trace =
                     tracing::debug_span!(target: "impasto::render::record", "record_layers")
@@ -1107,6 +1143,7 @@ impl Session for JsSession {
             } else {
                 None
             };
+            let scene_delta = tree.take_scene_delta();
             let generation = tree.image_generation();
             let images = if generation != self.image_generation {
                 self.image_generation = generation;
@@ -1275,6 +1312,7 @@ impl Session for JsSession {
             let again = self.wants_frame();
             crate::session::FrameOutput {
                 layers,
+                scene_delta,
                 again,
                 ime: self.take_ime(),
                 semantics,
@@ -1304,6 +1342,55 @@ impl Session for JsSession {
             }
         }
     }
+    fn advance_script_deadline(&mut self, mono_ms: i64) -> crate::session::ScriptInvalidation {
+        use crate::session::ScriptInvalidation;
+
+        let host = Rc::clone(&self.vm.host);
+        if self.inner.paused.get() {
+            return ScriptInvalidation::Unchanged;
+        }
+        host.set_clock(mono_ms, false);
+        self.vm.drain_local_io();
+        let result = host
+            .fire_timers()
+            .and_then(|()| host.drain_jobs())
+            .and_then(|()| self.run_reactive());
+        if let Err(error) = result {
+            self.note_script_error(error);
+            return ScriptInvalidation::Ui;
+        }
+        let inner = &self.inner;
+        let tree = inner.tree.borrow();
+        if tree.needs_layout()
+            || tree.semantics_pending()
+            || tree
+                .next_gesture_deadline_ms()
+                .is_some_and(|deadline| deadline - self.gesture_clock_offset_ms <= mono_ms as f64)
+            || inner.graph.has_updates()
+            || inner.driver_frame.get()
+            || inner.settings_frame.get()
+            || host.jobs_pending()
+            || host.needs_frame()
+            || host.has_frame_request()
+        {
+            ScriptInvalidation::Ui
+        } else if tree.needs_paint() || inner.graph.has_paints() {
+            ScriptInvalidation::Content
+        } else {
+            ScriptInvalidation::Unchanged
+        }
+    }
+
+    fn prefetch_compositor_window(
+        &mut self,
+        time: crate::session::FrameTime,
+    ) -> crate::session::FrameOutput {
+        self.prefetching_list = true;
+        let output = self.frame(time);
+        self.prefetching_list = false;
+        output
+    }
+
     fn wants_frame(&mut self) -> bool {
         let inner = &self.inner;
         if self.suppress_demand.replace(false) {
@@ -1315,7 +1402,7 @@ impl Session for JsSession {
         let (visual, motion) = {
             let tree = inner.tree.borrow();
             (
-                tree.needs_layout() || tree.needs_paint() || tree.pending_long_press(),
+                tree.needs_layout() || tree.needs_paint(),
                 tree.motion_active(),
             )
         };
@@ -1324,8 +1411,9 @@ impl Session for JsSession {
         let explicit = inner.settings_frame.take() || self.vm.host.take_wants_frame();
         let driver = inner.driver_frame.get();
         let paints = !inner.paused.get() && inner.graph.has_paints();
-        self.ui_work_pending = explicit || visual || jobs || soon || driver || paints;
-        self.ui_work_pending || motion
+        self.ui_work_pending =
+            explicit || visual || jobs || soon || (!self.prefetching_list && driver) || paints;
+        self.ui_work_pending || driver || motion
     }
 
     fn compositor_eligibility(
@@ -1359,6 +1447,12 @@ impl Session for JsSession {
             .commit_compositor_state(snapshot);
     }
 
+    fn memory_pressure(&mut self) {
+        if let Err(error) = self.vm.host.memory_pressure() {
+            self.note_script_error(error);
+        }
+    }
+
     fn lifecycle(&mut self, event: crate::session::Lifecycle) {
         let inner = &self.inner;
         let paused = matches!(
@@ -1381,10 +1475,18 @@ impl Session for JsSession {
         if inner.paused.get() {
             return None;
         }
-        if self.inner.paused.get() {
-            return None;
-        }
-        self.vm.host.next_deadline().map(|deadline| deadline as f64)
+        let gesture = inner
+            .tree
+            .borrow()
+            .next_gesture_deadline_ms()
+            .map(|deadline| (deadline - self.gesture_clock_offset_ms).ceil());
+        self.vm
+            .host
+            .next_deadline()
+            .map(|deadline| deadline as f64)
+            .into_iter()
+            .chain(gesture)
+            .min_by(f64::total_cmp)
     }
 
     fn inspector_snapshot(&self) -> Option<String> {

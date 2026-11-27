@@ -1,7 +1,7 @@
 //! Named scene reads and operations. Argument coercion runs before borrowing the tree.
 
 use super::{boolean, decode_handle, num, read_bytes, value};
-use crate::input::{DRAG_SLOP, DoubleTapConfig, DragAxis, RecognizerSet};
+use crate::input::{DOUBLE_TAP_SLOP, DoubleTapConfig, DragAxis, RecognizerSet};
 use crate::js::player::{bridge, mutation, nodes};
 use crate::motion::{Band, Decay, Easing, OverscrollMode, ScrollAccept, ScrollPhysics};
 use crate::scene::{
@@ -841,8 +841,8 @@ fn recognizers<'js>(ctx: &Ctx<'js>, spec: &Value<'js>) -> rquickjs::Result<Recog
     let tap = Coerced::<bool>::from_js(ctx, property(ctx, spec, "tap")?)?.0;
     let long_press = Coerced::<bool>::from_js(ctx, property(ctx, spec, "longPress")?)?.0;
     let window_ms = Coerced::<f64>::from_js(ctx, property(ctx, spec, "doubleTapMs")?)?.0;
-    let double_tap = (window_ms > 0.0).then_some(DoubleTapConfig {
-        slop: DRAG_SLOP,
+    let double_tap = (window_ms.is_finite() && window_ms > 0.0).then_some(DoubleTapConfig {
+        slop: DOUBLE_TAP_SLOP,
         window_ms,
     });
     Ok(RecognizerSet {

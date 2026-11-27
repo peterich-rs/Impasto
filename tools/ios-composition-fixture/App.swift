@@ -168,7 +168,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         let offset = view.safeAreaInsets
         let outside = CGPoint(x: 38 + offset.left, y: 43 + offset.top)
         let inside = CGPoint(x: 54 + offset.left, y: 43 + offset.top)
-        guard view.hitTest(outside, with: nil) === content.drawableView,
+        guard view.hitTest(outside, with: nil)?.layer is CAMetalLayer,
               view.hitTest(inside, with: nil)?.accessibilityLabel == "原生绿"
         else { throw FixtureFailure("原生视图的不规则裁剪区域命中错误") }
     }

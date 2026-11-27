@@ -441,6 +441,7 @@ fn layer_kind(kind: &engine::scene::LayerKind) -> &'static str {
         engine::scene::LayerKind::Picture { .. } => "picture",
         engine::scene::LayerKind::PlatformView { .. } => "platformView",
         engine::scene::LayerKind::Fill { .. } => "fill",
+        engine::scene::LayerKind::Paint(_) => "paint",
     }
 }
 

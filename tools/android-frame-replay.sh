@@ -3,21 +3,29 @@ set -euo pipefail
 
 out=${1:?用法 tools/android-frame-replay.sh OUTPUT_DIR [RUNS] [SECONDS]}
 runs=${2:-3}
-seconds=${3:-6}
 refresh=${FRAME_REFRESH:-}
-suite=${FRAME_SUITE:-all}
 reference=${FRAME_REFERENCE:-impasto}
+default_suite=fixture
+if [[ $reference == flutter ]]; then default_suite=all; fi
+suite=${FRAME_SUITE:-$default_suite}
+default_seconds=6
+if [[ $suite == fixture ]]; then default_seconds=18; fi
+seconds=${3:-$default_seconds}
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_dir=$(cd -- "$script_dir/.." && pwd)
 case "$reference" in
   impasto)
-    app=dev.impasto.host.profile
-    activity="$app/dev.impasto.host.ImpastoActivity"
+    app=${FRAME_APP_ID:?Specify FRAME_APP_ID for the installed app}
+    activity=$(adb shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$app" | tail -1)
+    if [[ $activity != "$app/"* ]]; then
+      echo "找不到 $app 的启动入口" >&2
+      exit 1
+    fi
     launch_args=()
     detail_x=120 detail_y=491 daily_x=483 daily_y=982 pause_y=235 crosshair_y=1350
     ;;
   flutter)
-    app=dev.impasto.market_reference
+    app=${FRAME_APP_ID:-dev.impasto.market_reference}
     activity="$app/.MainActivity"
     launch_args=(--ez trace-systrace true)
     detail_x=120 detail_y=306 daily_x=780 daily_y=570 pause_y=132 crosshair_y=960
@@ -25,8 +33,8 @@ case "$reference" in
   *) echo "FRAME_REFERENCE 必须是 impasto 或 flutter" >&2; exit 2 ;;
 esac
 case "$suite" in
-  all|detail|daily|list) ;;
-  *) echo "FRAME_SUITE 必须是 all、detail、daily 或 list" >&2; exit 2 ;;
+  fixture|all|detail|daily|list) ;;
+  *) echo "FRAME_SUITE 必须是 fixture、all、detail、daily 或 list" >&2; exit 2 ;;
 esac
 mkdir -p -- "$out"
 
@@ -114,6 +122,37 @@ scroll_list() {
   done
 }
 
+replay_fixture_detail() {
+  # Match text labels through Android's semantic tree, including density and insets.
+  tap_label 'Open detail' || return
+  tap_label 'Show dialog' || return
+  tap_label 'Close dialog' || return
+  tap_label 'Replay editor' || return
+  adb shell input text replay || return
+  adb shell input keyevent KEYCODE_BACK || return
+  tap_label 'Back'
+}
+
+tap_label() {
+  local label=$1 point tap_x tap_y file=/data/local/tmp/impasto-replay-$$.xml
+  adb shell uiautomator dump "$file" >/dev/null || return
+  point=$(adb shell cat "$file" | python3 -c '
+import re, sys
+from xml.etree import ElementTree
+
+for node in ElementTree.parse(sys.stdin).iter("node"):
+    if sys.argv[1] in (node.get("text"), node.get("content-desc")):
+        left, top, right, bottom = map(int, re.findall(r"-?\d+", node.attrib["bounds"]))
+        print((left + right) // 2, (top + bottom) // 2)
+        break
+else:
+    sys.exit(f"missing visible label {sys.argv[1]!r}")
+' "$label") || { adb shell rm -f "$file"; return 1; }
+  adb shell rm -f "$file"
+  read -r tap_x tap_y <<< "$point"
+  adb shell input tap "$tap_x" "$tap_y"
+}
+
 scroll_detail() {
   for _ in 1 2 3; do swipe 541 1770 541 580 570; done
   for _ in 1 2 3; do swipe 541 580 541 1770 570; done
@@ -144,7 +183,7 @@ if [[ -n $refresh ]]; then
   adb shell settings put system peak_refresh_rate "$refresh"
 fi
 {
-  printf 'app=%s\nreference=%s\nsuite=%s\nruns=%s\nseconds=%s\nrequested_refresh_hz=%s\n' "$app" "$reference" "$suite" "$runs" "$seconds" "${refresh:-default}"
+  printf 'app=%s\nreference=%s\nsuite=%s\nruns=%s\nseconds=%s\nrequested_refresh_hz=%s\nbuild_profile=%s\n' "$app" "$reference" "$suite" "$runs" "$seconds" "${refresh:-default}" "${FRAME_BUILD_PROFILE:-unspecified}"
   printf 'impasto_commit=%s\n' "$(git -C "$repo_dir" rev-parse HEAD)"
   if [[ -n $(git -C "$repo_dir" status --porcelain) ]]; then
     printf 'impasto_checkout_dirty=true\n'
@@ -166,6 +205,13 @@ fi
   adb shell pm path "$app"
 } >"$out/environment.txt"
 for ((run = 1; run <= runs; run++)); do
+  if [[ $suite == fixture ]]; then
+    stop
+    capture "fixture-startup-$run" start
+    capture "fixture-list-$run" scroll_list
+    capture "fixture-detail-$run" replay_fixture_detail
+    continue
+  fi
   if [[ $suite == list ]]; then
     stop
     start

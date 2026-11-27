@@ -45,7 +45,7 @@ pub struct RectVertex {
 }
 
 impl RectInstance {
-    pub fn extra(&self, first: f32, ramp: u32) -> Option<PaintExtra> {
+    pub fn extra(&self, first: f32) -> Option<PaintExtra> {
         let has_gradient = self.flags & RECT_GRADIENT != 0;
         (self.corners.is_some()
             || has_gradient
@@ -53,7 +53,6 @@ impl RectInstance {
         .then(|| {
             let mut gradient = self.gradient_b;
             gradient[1] = first;
-            gradient[3] = ramp as f32;
             PaintExtra {
                 geometry: self.gradient_a,
                 gradient,
@@ -93,6 +92,15 @@ pub fn is_shadow(vertex: &RectVertex) -> bool {
     vertex.shape[2] == RECT_SHADOW as f32
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "shape flags were packed from u32"
+)]
+pub fn has_gradient(vertex: &RectVertex) -> bool {
+    (vertex.shape[3] as u32 & RECT_GRADIENT) != 0
+}
+
 pub fn has_shaped_shadow(vertices: &[RectVertex]) -> bool {
     vertices
         .iter()
@@ -126,7 +134,6 @@ pub const GLYPH_COLOR: u32 = 1;
 pub const GLYPH_GRADIENT: u32 = 2;
 pub const GLYPH_DECORATION: u32 = 4;
 pub const GLYPH_GAMMA: u32 = 8;
-pub const GLYPH_LCD: u32 = 16;
 pub const GLYPH_TEMPORARY_PAGE: u32 = 32;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -143,7 +150,7 @@ pub struct ImageVertex {
     pub rect: [f32; 4],
     pub uv: [f32; 4],
     pub color: [f32; 4],
-    pub meta: [f32; 4],
+    pub meta: [u32; 4],
 }
 
 impl ImageInstance {
@@ -158,7 +165,7 @@ impl ImageInstance {
             rect: self.rect,
             uv: self.uv,
             color: self.color,
-            meta: [flags as f32, 0.0, 0.0, 0.0],
+            meta: [flags, 0, 0, 0],
         }
     }
 }
@@ -166,6 +173,9 @@ impl ImageInstance {
 pub const IMAGE_NEAREST: u32 = 1;
 pub const IMAGE_PREMULTIPLIED_SRGB: u32 = 2;
 pub const IMAGE_BASE_LEVEL: u32 = 4;
+// This CPU proof is independent of the mip flags in bits 3 and 4.
+
+impl ImageVertex {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuMeshBuffer {
@@ -234,16 +244,10 @@ impl MeshBuffer {
 pub struct Mesh {
     pub buffer: std::sync::Arc<std::sync::OnceLock<MeshBuffer>>,
     pub indices: std::ops::Range<u32>,
-    pub stencil_fill: Option<StencilFill>,
+    pub fringe: Option<Box<[[f32; 2]]>>,
     pub bounds: [f32; 4],
     pub brush: Brush,
     pub composite: engine::scene::CanvasComposite,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct StencilFill {
-    pub rule: FillRule,
-    pub cover_indices: std::ops::Range<u32>,
 }
 
 /// Brush of a mesh or decoration.
@@ -273,6 +277,30 @@ pub struct PackedGradient {
     pub radial_radii: [f32; 2],
     /// Stop pairs: premultiplied color, `(offset, 0, 0, 0)`.
     pub stops: Vec<[f32; 4]>,
+}
+
+pub const INLINE_LINEAR_GRADIENT: u32 = 4;
+
+impl PackedGradient {
+    fn new(kind: u32, a: [f32; 4], radial_radii: [f32; 2], stops: Vec<[f32; 4]>) -> Self {
+        Self {
+            kind,
+            a,
+            radial_radii,
+            stops,
+        }
+    }
+
+    pub fn inline_pair(&self) -> Option<[[f32; 4]; 2]> {
+        match self.stops.as_slice() {
+            [start, start_offset, end, end_offset]
+                if self.kind == 0 && start_offset[0] == 0.0 && end_offset[0] == 1.0 =>
+            {
+                Some([*start, *end])
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A gradient with its unit-square geometry mapped into scene points.
@@ -320,12 +348,12 @@ pub fn pack_gradient(
             stops,
         ),
     };
-    Some(PackedGradient {
+    Some(PackedGradient::new(
         kind,
         a,
-        radial_radii: [0.0; 2],
-        stops: pack_stops(stops, alpha)?,
-    })
+        [0.0; 2],
+        pack_stops(stops, alpha)?,
+    ))
 }
 
 /// A canvas gradient already in canvas space.
@@ -333,47 +361,46 @@ pub fn pack_canvas_gradient(
     brush: &engine::scene::CanvasBrush,
     alpha: u8,
 ) -> Option<PackedGradient> {
-    match brush {
-        engine::scene::CanvasBrush::Color(color) => Some(PackedGradient {
-            kind: 0,
-            a: [0.0; 4],
-            radial_radii: [0.0; 2],
-            stops: vec![
-                crate::color::linear_premultiplied(*color, alpha)?,
+    let (kind, a, radii, stops) = match brush {
+        engine::scene::CanvasBrush::Color(color) => {
+            let color = crate::color::linear_premultiplied(*color, alpha)?;
+            (
+                0,
                 [0.0; 4],
-                crate::color::linear_premultiplied(*color, alpha)?,
-                [1.0, 0.0, 0.0, 0.0],
-            ],
-        }),
-        engine::scene::CanvasBrush::Linear { start, end, stops } => Some(PackedGradient {
-            kind: 0,
-            a: [start[0], start[1], end[0], end[1]],
-            radial_radii: [0.0; 2],
-            stops: pack_stops(stops, alpha)?,
-        }),
+                [0.0; 2],
+                vec![color, [0.0; 4], color, [1.0, 0.0, 0.0, 0.0]],
+            )
+        }
+        engine::scene::CanvasBrush::Linear { start, end, stops } => (
+            0,
+            [start[0], start[1], end[0], end[1]],
+            [0.0; 2],
+            pack_stops(stops, alpha)?,
+        ),
         engine::scene::CanvasBrush::Radial {
             start,
             start_radius,
             end,
             end_radius,
             stops,
-        } => Some(PackedGradient {
-            kind: 3,
-            a: [start[0], start[1], end[0], end[1]],
-            radial_radii: [*start_radius, *end_radius],
-            stops: pack_stops(stops, alpha)?,
-        }),
+        } => (
+            3,
+            [start[0], start[1], end[0], end[1]],
+            [*start_radius, *end_radius],
+            pack_stops(stops, alpha)?,
+        ),
         engine::scene::CanvasBrush::Conic {
             center,
             angle,
             stops,
-        } => Some(PackedGradient {
-            kind: 2,
-            a: [center[0], center[1], *angle, *angle + std::f32::consts::TAU],
-            radial_radii: [0.0; 2],
-            stops: pack_stops(stops, alpha)?,
-        }),
-    }
+        } => (
+            2,
+            [center[0], center[1], *angle, *angle + std::f32::consts::TAU],
+            [0.0; 2],
+            pack_stops(stops, alpha)?,
+        ),
+    };
+    Some(PackedGradient::new(kind, a, radii, stops))
 }
 
 /// Stop pairs as the shaders read them.

@@ -46,6 +46,15 @@ pub enum ImageReady {
     },
 }
 
+impl ImageReady {
+    pub(crate) fn source(&self) -> &str {
+        match self {
+            Self::Decoded(handle) => &handle.source,
+            Self::Missing { source, .. } | Self::Failed { source, .. } => source,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ImageError {
     Missing,

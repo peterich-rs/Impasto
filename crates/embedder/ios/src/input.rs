@@ -5,13 +5,104 @@ use engine::session::{
     BackGesture, ImeUpdate, InputEvent, Key, KeyPress, KeyboardType, TextInputAction,
 };
 use engine::{
-    input::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind},
+    input::{
+        Button, Buttons, Modifiers, PenSample, Phase, PointerEvent, PointerHistory, PointerId,
+        PointerKind, PointerSample,
+    },
     semantics::{SemanticsAction, SemanticsId},
     tree::Rect,
 };
 use serde_json::{Value, json};
 
 use super::{ImpastoIOSHost, string, with_host};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ImpastoIOSPointerPoint {
+    x: f32,
+    y: f32,
+    seconds: f64,
+}
+
+/// # Safety
+/// A non-null history must contain `length` initialized points for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn impasto_ios_pointer_move(
+    host: *mut ImpastoIOSHost,
+    surface: u64,
+    pointer: u64,
+    kind: u32,
+    latest: ImpastoIOSPointerPoint,
+    buttons: u32,
+    modifiers: u32,
+    force: f32,
+    radius: f32,
+    altitude: f32,
+    azimuth: f32,
+    history: *const ImpastoIOSPointerPoint,
+    length: usize,
+) {
+    with_host(host, |host| {
+        if !host.current_surface(surface) {
+            return;
+        }
+        let Some(kind) = [
+            PointerKind::Touch,
+            PointerKind::Mouse,
+            PointerKind::Pen,
+            PointerKind::Trackpad,
+        ]
+        .get(kind as usize) else {
+            return;
+        };
+        let Some(latest) = pointer_point(latest) else {
+            return;
+        };
+        let pen = (*kind == PointerKind::Pen
+            && [force, radius, altitude, azimuth]
+                .into_iter()
+                .all(f32::is_finite))
+        .then_some(PenSample {
+            force: force.clamp(0.0, 1.0),
+            radius: radius.max(0.0),
+            altitude,
+            azimuth,
+        });
+        let event = PointerEvent {
+            pointer: PointerId(pointer),
+            kind: *kind,
+            button: Button::None,
+            buttons: Buttons::from_bits(u8::try_from(buttons & 7).unwrap_or_default()),
+            modifiers: Modifiers::from_bits(u8::try_from(modifiers & 15).unwrap_or_default()),
+            pen,
+            ..PointerEvent::new(Phase::Move, latest.x, latest.y, latest.time_ms)
+        };
+        if history.is_null() || !(1..=PointerHistory::CAPACITY).contains(&length) {
+            host.link.post(Command::Pointer(event));
+            return;
+        }
+        // SAFETY: Swift borrows the contiguous point array for the whole call.
+        let positions = unsafe { std::slice::from_raw_parts(history, length) };
+        let mut history = Box::new(PointerHistory::default());
+        for &point in positions {
+            if let Some(sample) = pointer_point(point)
+                && sample.time_ms < latest.time_ms
+            {
+                history.push(sample);
+            }
+        }
+        host.link.post(Command::PointerMoves { event, history });
+    });
+}
+
+fn pointer_point(point: ImpastoIOSPointerPoint) -> Option<PointerSample> {
+    let time_ms = point.seconds * 1_000.0;
+    (point.x.is_finite() && point.y.is_finite() && time_ms.is_finite()).then_some(PointerSample {
+        x: point.x,
+        y: point.y,
+        time_ms,
+    })
+}
 
 pub(super) fn ime_message(update: &ImeUpdate) -> String {
     let state = match update {
@@ -410,7 +501,7 @@ pub unsafe extern "C" fn impasto_ios_pen(
         };
         event.buttons = Buttons::from_bits(if held { Buttons::PRIMARY } else { 0 });
         event.modifiers = Modifiers::from_bits(u8::try_from(modifiers & 15).unwrap_or_default());
-        event.pen = Some(engine::input::PenSample {
+        event.pen = Some(PenSample {
             force: force.clamp(0.0, 1.0),
             radius: radius.max(0.0),
             altitude,

@@ -88,7 +88,6 @@ impl Chrome {
 
 struct Mounted {
     node: NodeId,
-    index: usize,
 }
 
 pub struct ListDriver {
@@ -99,6 +98,9 @@ pub struct ListDriver {
     nodes: ListNodes,
     items: Vec<ListItem>,
     staging: Vec<ListItem>,
+    staging_indices: HashMap<String, usize>,
+    indices: HashMap<String, usize>,
+    pending_anchor: Option<(f32, f32)>,
     prefix: PrefixHeights,
     cache: HashMap<String, f32>,
     mounted: HashMap<String, Mounted>,
@@ -147,19 +149,11 @@ impl ListDriver {
         }
         let top = top?;
         let slack = (view.h * 0.25).min(((bottom - top - view.h).max(0.0)) * 0.5);
-        let mut low = if self.range.start == 0 {
-            top
-        } else {
-            top + slack
-        };
-        let mut high = if self.range.end == self.items.len() {
-            bottom - view.h
-        } else {
-            bottom - view.h - slack
-        };
+        let mut low = top;
+        let mut high = bottom - view.h;
         let prefetch_edges = [
-            (self.range.start > 0).then_some(low),
-            (self.range.end < self.items.len()).then_some(high),
+            (self.range.start > 0).then_some(low + slack),
+            (self.range.end < self.items.len()).then_some(high - slack),
         ];
         let pin = usize::try_from(self.chrome.pin_index).ok();
         let next_start = self
@@ -232,6 +226,9 @@ impl ListDriver {
             nodes: ListNodes::default(),
             items: Vec::new(),
             staging: Vec::new(),
+            staging_indices: HashMap::new(),
+            indices: HashMap::new(),
+            pending_anchor: None,
             prefix: PrefixHeights::default(),
             cache: HashMap::new(),
             mounted: HashMap::new(),
@@ -257,6 +254,7 @@ impl ListDriver {
         if nodes.viewport != self.nodes.viewport {
             self.mounted.clear();
             self.placed = false;
+            self.pending_anchor = None;
             self.placed_w = -1.0;
             self.placed_h = -1.0;
         }
@@ -286,24 +284,76 @@ impl ListDriver {
 
     pub fn begin_items(&mut self) {
         self.staging.clear();
+        self.staging_indices.clear();
     }
 
     pub fn push_item(&mut self, item: ListItem) {
-        if self.staging.iter().any(|row| row.key == item.key) {
-            return;
+        // The first occurrence owns the row identity.
+        if !self.staging_indices.contains_key(&item.key) {
+            self.staging_indices
+                .insert(item.key.clone(), self.staging.len());
+            self.staging.push(item);
         }
-        self.staging.push(item);
     }
 
     pub fn end_items(&mut self) {
         if self.staging == self.items {
-            self.staging.clear();
             return;
         }
-        self.items = std::mem::take(&mut self.staging);
-        self.retain_cache();
+        let from = self
+            .pending_anchor
+            .map_or(self.previous_offset, |(from, _)| from);
+        let offset = self
+            .pending_anchor
+            .map_or(self.previous_offset, |(_, to)| to);
+        let anchor = self
+            .placed
+            .then(|| self.anchor_after_update(offset))
+            .flatten();
+        std::mem::swap(&mut self.items, &mut self.staging);
+        std::mem::swap(&mut self.indices, &mut self.staging_indices);
+        self.begin_items();
+        self.cache.retain(|key, _| self.indices.contains_key(key));
         self.rebuild_prefix();
+        self.pending_anchor =
+            anchor.map(|(index, inside)| (from, self.anchored_offset(index, inside)));
         self.force = true;
+    }
+
+    fn anchor_after_update(&self, offset: f32) -> Option<(usize, f32)> {
+        let (old, inside) = self.anchor(offset)?;
+        if let Some(&index) = self.staging_indices.get(&self.items[old].key) {
+            return Some((index, inside));
+        }
+        // Walk outward in the former order, preferring the following row on a tie.
+        for distance in 1..self.items.len() {
+            for neighbor in [old.checked_add(distance), old.checked_sub(distance)]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(index) = self
+                    .items
+                    .get(neighbor)
+                    .and_then(|item| self.staging_indices.get(&item.key))
+                {
+                    return Some((*index, inside));
+                }
+            }
+        }
+        None
+    }
+
+    fn anchor(&self, offset: f32) -> Option<(usize, f32)> {
+        let index = self
+            .prefix
+            .find_index(offset)
+            .min(self.items.len().checked_sub(1)?);
+        Some((index, offset - self.prefix.item_start(index)))
+    }
+
+    fn anchored_offset(&self, index: usize, inside: f32) -> f32 {
+        self.prefix.item_start(index)
+            + inside.clamp(0.0, (self.prefix.height_at(index) - HEIGHT_EPS).max(0.0))
     }
 
     fn own_rows(&self, tree: &mut Tree) {
@@ -317,12 +367,9 @@ impl ListDriver {
             self.mounted.remove(key);
             return;
         };
-        let index = self
-            .items
-            .iter()
-            .position(|item| item.key == key)
-            .unwrap_or(0);
-        self.mounted.insert(key.to_owned(), Mounted { node, index });
+        if self.indices.contains_key(key) {
+            self.mounted.insert(key.to_owned(), Mounted { node });
+        }
     }
 
     pub fn tick(&mut self, tree: &mut Tree) -> (Vec<ListOp>, Option<Chrome>, bool, bool) {
@@ -333,11 +380,35 @@ impl ListDriver {
         let Ok(view) = tree.rect(viewport) else {
             return (Vec::new(), None, false, false);
         };
-        self.apply_scale(tree.text_scale());
-        let pending_measure = self.measure(tree);
-        let Ok((offset_x, offset_y)) = tree.scroll_offset(viewport) else {
+        let Ok((offset_x, mut offset_y)) = tree.scroll_offset(viewport) else {
             return (Vec::new(), None, false, false);
         };
+        if view.h <= 0.0 {
+            return (Vec::new(), None, false, false);
+        }
+        let anchor_enabled = self.placed
+            && tree.scroll_phase(viewport).ok() == Some(crate::motion::ScrollPhase::Idle);
+        let updated = self
+            .pending_anchor
+            .take()
+            .filter(|(from, _)| anchor_enabled && (*from - offset_y).abs() <= HEIGHT_EPS);
+        let anchor = anchor_enabled
+            .then(|| self.anchor(updated.map_or(offset_y, |(_, to)| to)))
+            .flatten();
+        self.apply_scale(tree.text_scale());
+        let pending_measure = self.measure(tree);
+        if let Some((index, inside)) = anchor {
+            let target = self
+                .anchored_offset(index, inside)
+                .clamp(0.0, (self.prefix.total() - view.h).max(0.0));
+            if (target - offset_y).abs() > HEIGHT_EPS {
+                let _ = tree.set_content_min(viewport, self.prefix.total());
+                if tree.set_scroll_offset(viewport, offset_x, target).is_ok() {
+                    offset_y = target;
+                    self.previous_offset = target;
+                }
+            }
+        }
         let size_changed = (view.w - self.placed_w).abs() > HEIGHT_EPS
             || (view.h - self.placed_h).abs() > HEIGHT_EPS;
         if view.h > 0.0 {
@@ -448,11 +519,6 @@ impl ListDriver {
         self.prefix.rebuild(&heights);
     }
 
-    fn retain_cache(&mut self) {
-        self.cache
-            .retain(|key, _| self.items.iter().any(|item| item.key == *key));
-    }
-
     fn apply_scale(&mut self, scale: f32) {
         if !scale.is_finite() || scale <= 0.0 || (scale - self.scale).abs() <= f32::EPSILON {
             return;
@@ -491,14 +557,9 @@ impl ListDriver {
                 zeros += 1;
                 continue;
             }
-            let index = self
-                .items
-                .iter()
-                .position(|item| item.key == key)
-                .unwrap_or(mounted.index);
-            if let Some(slot) = self.mounted.get_mut(&key) {
-                slot.index = index;
-            }
+            let Some(&index) = self.indices.get(&key) else {
+                continue;
+            };
             let prev = self.prefix.height_at(index);
             self.cache.insert(key, box_rect.h);
             let delta = (box_rect.h - prev).abs();

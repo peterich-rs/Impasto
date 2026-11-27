@@ -2,6 +2,7 @@
 """Check the packaged JNI libraries and their 16 KiB ELF and APK alignment."""
 
 import argparse
+import os
 from pathlib import Path
 import struct
 import zipfile
@@ -78,7 +79,8 @@ def main():
     if args.package.suffix not in {".apk", ".aab", ".aar"}:
         parser.error("expected an APK, AAB or AAR")
     try:
-        check(args.package, args.abi or MACHINES)
+        abis = args.abi or [abi.strip() for abi in os.environ.get("ABI_LIST", "").split(",") if abi.strip()]
+        check(args.package, abis or MACHINES)
     except (ValueError, OSError, zipfile.BadZipFile) as error:
         parser.exit(1, f"{error}\n")
 

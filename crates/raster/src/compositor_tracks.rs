@@ -7,6 +7,23 @@ use engine::scene::{
 use crate::{Frame, Rasterizer, damage};
 
 impl Rasterizer {
+    /// Samples the first frame after installing a replacement list window.
+    /// Its topology and the scroll position both differ from the displayed scene.
+    pub fn sample_compositor_window(
+        &mut self,
+        epoch: u64,
+        target_ms: f64,
+    ) -> Option<CompositorSnapshot> {
+        let previous = self.frame.as_ref()?.previous_revision;
+        let snapshot = self.sample_compositor_tracks(epoch, target_ms)?;
+        if let Some(frame) = self.frame.as_mut() {
+            frame.previous_revision = previous;
+            frame.damage = crate::DamageRect::Full;
+            self.stats.damage = frame.damage;
+        }
+        Some(snapshot)
+    }
+
     /// Samples a route's installed scene without validation, tessellation, or mesh uploads.
     /// `None` requests a UI frame when a track ends, reaches an edge, or becomes stale.
     pub fn sample_compositor_tracks(

@@ -7,10 +7,10 @@ use crate::scene::{
     CanvasBrush, CanvasComposite, CanvasImageOp, CanvasImageRef, CanvasIsolation, CanvasList,
     CanvasOp, CanvasPaint, CanvasPath, CanvasTextOp, ColorStop as ProtoStop, PathVerb,
 };
-use kurbo::{Affine, BezPath, PathEl, Point};
+use kurbo::{Affine, BezPath, PathEl, Point, Shape};
 
 use super::paint::{GradientKind, PaintSource, text_unavailable};
-use super::path::{FillRule, closed_for_fill, stroke_outline};
+use super::path::{FillRule, closed_for_fill, stroke_outline, transform_path};
 use super::record::{self, Deadline, RecOp, Recording, TextAlign, TextBaseline};
 use super::text::flatten_text;
 use super::{CURVE_PIXELS, CanvasError, MAX_OPS, MAX_RECORD_BYTES, MAX_SEGMENTS, narrow};
@@ -58,6 +58,7 @@ fn build(
             }
             RecOp::Fill {
                 path,
+                asset_space,
                 fill,
                 paint,
                 alpha,
@@ -67,13 +68,16 @@ fn build(
                 if composite.reads_destination() {
                     isolated = true;
                 }
-                let Some(path) = path_of(&closed_for_fill(path), *fill, &mut segments)? else {
-                    continue;
-                };
                 let Some(paint) = paint_of(paint, *alpha, *composite, *ctm) else {
                     continue;
                 };
-                ops.push(CanvasOp::Fill { path, paint });
+                ops.extend(filled_path(
+                    &closed_for_fill(path),
+                    *fill,
+                    paint,
+                    asset_space.then_some(*ctm),
+                    &mut segments,
+                )?);
             }
             RecOp::SolidRect {
                 rect,
@@ -98,6 +102,7 @@ fn build(
             }
             RecOp::Stroke {
                 path,
+                asset_space,
                 style,
                 paint,
                 alpha,
@@ -107,14 +112,25 @@ fn build(
                 if composite.reads_destination() {
                     isolated = true;
                 }
-                let outline = stroke_outline(path, *ctm, style, tolerance, deadline)?;
-                let Some(path) = path_of(&outline, FillRule::NonZero, &mut segments)? else {
+                let outline = if *asset_space && super::path::invertible(*ctm).is_some() {
+                    let bounds = path.bounding_box();
+                    let asset_tolerance = bounds.width().max(bounds.height()) / 512.0;
+                    stroke_outline(path, Affine::IDENTITY, style, asset_tolerance, deadline)?
+                } else if *asset_space {
                     continue;
+                } else {
+                    stroke_outline(path, *ctm, style, tolerance, deadline)?
                 };
                 let Some(paint) = paint_of(paint, *alpha, *composite, *ctm) else {
                     continue;
                 };
-                ops.push(CanvasOp::Fill { path, paint });
+                ops.extend(filled_path(
+                    &outline,
+                    FillRule::NonZero,
+                    paint,
+                    asset_space.then_some(*ctm),
+                    &mut segments,
+                )?);
             }
             RecOp::Clear { x, y, w, h, ctm } => {
                 isolated = true;
@@ -202,6 +218,37 @@ fn build(
             bytes,
         }),
     })
+}
+
+fn filled_path(
+    path: &BezPath,
+    rule: FillRule,
+    paint: CanvasPaint,
+    asset_transform: Option<Affine>,
+    segments: &mut usize,
+) -> Result<Option<CanvasOp>, CanvasError> {
+    if let Some(ctm) = asset_transform {
+        let Some(mapped) = path_of(&transform_path(&ctm, path), rule, segments)? else {
+            return Ok(None);
+        };
+        if path.elements().len() <= 128
+            && let [Some(a), Some(b), Some(c), Some(d), Some(x), Some(y)] =
+                ctm.as_coeffs().map(narrow)
+            && let Some(asset) = path_of(path, rule, segments)?
+        {
+            return Ok(Some(CanvasOp::Vector {
+                path: mapped,
+                asset,
+                transform: [a, b, c, d, x, y],
+                paint,
+            }));
+        }
+        return Ok(Some(CanvasOp::Fill {
+            path: mapped,
+            paint,
+        }));
+    }
+    Ok(path_of(path, rule, segments)?.map(|path| CanvasOp::Fill { path, paint }))
 }
 
 fn path_of(
@@ -540,6 +587,10 @@ fn list_bytes(ops: &[CanvasOp], images: &[CanvasImageRef]) -> usize {
         match op {
             CanvasOp::Clip { path } | CanvasOp::Fill { path, .. } => {
                 bytes = bytes.saturating_add(size_of_val(path.verbs.as_ref()));
+            }
+            CanvasOp::Vector { path, asset, .. } => {
+                bytes = bytes.saturating_add(size_of_val(path.verbs.as_ref()));
+                bytes = bytes.saturating_add(size_of_val(asset.verbs.as_ref()));
             }
             CanvasOp::Text(text) => {
                 bytes = bytes.saturating_add(text.utf8.len());

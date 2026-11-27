@@ -30,13 +30,16 @@ internal class AutofillBridge(private val view: ImpastoView) {
 
     fun update(
         ids: LongArray, labels: Array<String>, values: Array<String>,
-        flags: IntArray, bounds: FloatArray,
+        flags: IntArray, bounds: FloatArray, reset: Boolean,
     ) {
-        val nextFields = LinkedHashMap<Long, Field>()
+        val nextFields = if (reset) LinkedHashMap() else LinkedHashMap(fields)
         val visible = Rect()
         val hasVisibleRect = view.getLocalVisibleRect(visible)
-        var nextFocus: Field? = null
+        var nextFocus: Field? = if (reset) null else focusedField
         for (index in ids.indices) {
+            val id = ids[index]
+            nextFields.remove(id)
+            if (nextFocus?.nodeId == id) nextFocus = null
             val label = labels[index]
             if (label.isEmpty()) continue
             val base = index * 4
@@ -45,7 +48,6 @@ internal class AutofillBridge(private val view: ImpastoView) {
                 pixels(bounds[base] + bounds[base + 2]), pixels(bounds[base + 1] + bounds[base + 3]),
             )
             if (!hasVisibleRect || !rect.intersect(visible)) continue
-            val id = ids[index]
             val previous = fields[id]
             val field = Field(id, previous?.virtualId ?: nextId++, label, values[index], rect)
             nextFields[id] = field

@@ -64,6 +64,40 @@ mod tests {
     }
 
     #[test]
+    fn standalone_pack_resolves_an_explicit_project_and_validates_defines() {
+        let sandbox = Sandbox::new();
+        let project = sandbox.0.join("external");
+        fs::create_dir(&project).expect("project directory");
+        fs::write(project.join("main.js"), "console.log(REPLAY_VERSION);").expect("entry");
+        success(sandbox.cli(&[
+            "--project",
+            "external",
+            "pack",
+            "main.js",
+            "build/replay.js",
+            "--define",
+            "REPLAY_VERSION='seeded-replay'",
+        ]));
+        let bundle = fs::read_to_string(project.join("build/replay.js")).expect("bundle");
+        assert!(bundle.contains("seeded-replay"));
+        assert!(!bundle.contains("REPLAY_VERSION"));
+        let failed = sandbox.cli(&[
+            "--project",
+            "external",
+            "pack",
+            "main.js",
+            "build/invalid.js",
+            "--define",
+            "REPLAY_VERSION=1",
+            "--define",
+            "REPLAY_VERSION=2",
+        ]);
+        assert!(!failed.status.success());
+        assert!(String::from_utf8_lossy(&failed.stderr).contains("REPLAY_VERSION"));
+        assert!(!project.join("build/invalid.js").exists());
+    }
+
+    #[test]
     fn external_app_builds_checks_and_runs_without_a_window() {
         let mut sandbox = Sandbox::new();
         success(sandbox.cli(&["create", "sample"]));

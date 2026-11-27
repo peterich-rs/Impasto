@@ -21,6 +21,14 @@ pub use modules::{
     SyncFn, Work, shared, shared_read, shared_write,
 };
 
+/// Work required after running jobs and timers while Raster owns vsync.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptInvalidation {
+    Unchanged,
+    Content,
+    Ui,
+}
+
 /// A low-frequency snapshot of script runtime resources.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RuntimeSample {
@@ -114,6 +122,8 @@ pub struct FrameOutput {
     /// `Some` when the layer epoch changed. The host submits that tree.
     /// `None` means the host may present the installed tree again.
     pub layers: Option<Arc<crate::scene::LayerTree>>,
+    /// Optional incremental description of the new layer snapshot.
+    pub scene_delta: Option<crate::scene::SceneDelta>,
     pub again: bool,
     pub ime: Option<ImeUpdate>,
     pub semantics: Option<crate::semantics::SemanticsPatch>,
@@ -133,6 +143,7 @@ impl FrameOutput {
     pub fn unchanged() -> Self {
         Self {
             layers: None,
+            scene_delta: None,
             again: false,
             ime: None,
             semantics: None,
@@ -163,6 +174,14 @@ pub struct ScriptFault {
 /// [`Session::pointer`] and [`Session::input`], due timers, animation callbacks,
 /// reactive updates, layout, and layer recording.
 pub trait Session {
+    /// Quiesces a session created with the host's migration contract.
+    fn prepare_platform_handoff(&mut self) -> bool {
+        false
+    }
+
+    /// Resumes an idle session after installing it on the platform queue.
+    fn finish_platform_handoff(&mut self) {}
+
     /// Enable opt-in per-frame script counters on this render-thread session.
     fn set_trace(&mut self, _enabled: bool) {}
     fn set_counters(&mut self, _enabled: bool) {}
@@ -183,7 +202,24 @@ pub trait Session {
     fn metrics(&mut self, metrics: &Metrics);
     fn window_display(&mut self, _display: WindowDisplay) {}
     fn pointer(&mut self, event: crate::input::PointerEvent);
+
+    /// Dispatches the latest move, with optional earlier positions for velocity estimation.
+    fn pointer_moves(
+        &mut self,
+        event: crate::input::PointerEvent,
+        _history: &[crate::input::PointerSample],
+    ) {
+        self.pointer(event);
+    }
     fn frame(&mut self, time: FrameTime) -> FrameOutput;
+    /// Pumps a due script deadline without advancing compositor-owned motion.
+    fn advance_script_deadline(&mut self, _mono_ms: i64) -> ScriptInvalidation {
+        ScriptInvalidation::Ui
+    }
+    /// Prepares a replacement list window while the installed scene keeps presenting.
+    fn prefetch_compositor_window(&mut self, time: FrameTime) -> FrameOutput {
+        self.frame(time)
+    }
     /// Whether the current tree may animate on the compositor while UI is idle.
     fn compositor_eligibility(
         &self,
@@ -210,6 +246,8 @@ pub trait Session {
     fn take_faults(&mut self) -> Vec<ScriptFault> {
         Vec::new()
     }
+    /// Releases application-owned caches in response to system memory pressure.
+    fn memory_pressure(&mut self) {}
     fn lifecycle(&mut self, _event: Lifecycle) {}
     fn settings(&mut self, _settings: &PlatformSettings) {}
     /// The window became or resigned key. This is not text focus.

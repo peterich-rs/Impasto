@@ -67,7 +67,7 @@ pub fn test(
                 &bundle.to_string_lossy(),
                 modules(sandbox.path())?,
                 snapshots,
-                Some(app.assets()),
+                Some(app.assets().to_path_buf()),
                 options.filter,
             )?;
             print_report(bundle, &report, options.trace);

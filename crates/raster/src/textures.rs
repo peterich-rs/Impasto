@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{ImageUploadStats, gpu::Gpu};
 
 static NEXT_UPLOAD: AtomicU64 = AtomicU64::new(1);
+const GRACE_GENERATIONS: u64 = 180;
+const DEFAULT_INACTIVE_MIB: u64 = 48;
+const MIB: u64 = 1024 * 1024;
 
 /// An uploaded texture. `Send + Sync` so the `io` thread hands it over.
 #[derive(Clone)]
@@ -73,7 +76,7 @@ impl GpuImage {
     ) -> Option<Self> {
         let (image, command) = Self::prepare(gpu, device, width, height, rgba)?;
         if let Some(command) = command {
-            gpu.validation(|| {
+            gpu.upload_validation(|| {
                 gpu.submit([command]);
                 Ok(())
             })
@@ -101,11 +104,18 @@ impl GpuImage {
         }
         let size = [width, height];
         let rgba = &rgba[..bytes];
-        let converted = (width.max(height) >= 128)
-            .then(|| gpu.image_upload())
-            .flatten()
-            .and_then(|upload| gpu.validation(|| Ok(upload.prepare(gpu, size, rgba))).ok());
-        let (texture, upload, conversion) = converted
+        let converted = if width.max(height) >= 128
+            && let Some(upload) = gpu.image_upload()
+        {
+            match gpu.upload_validation(|| Ok(upload.prepare(gpu, size, rgba))) {
+                Ok(prepared) => Some(prepared),
+                Err(crate::Status::PresentFailed) => None,
+                Err(_) => return None,
+            }
+        } else {
+            None
+        };
+        let (view, upload, conversion) = converted
             .map(|(image, stats, command)| (image, stats, Some(command)))
             .unwrap_or_else(|| {
                 let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -123,7 +133,7 @@ impl GpuImage {
                 let pixels = crate::color::premultiply_rgba(rgba);
                 crate::image_upload::upload_rgba(gpu, &texture, size, &pixels);
                 (
-                    texture,
+                    texture.create_view(&Default::default()),
                     ImageUploadStats {
                         source_bytes: bytes as u64,
                         resident_bytes: bytes as u64,
@@ -135,7 +145,6 @@ impl GpuImage {
         if gpu.is_lost() {
             return None;
         }
-        let view = texture.create_view(&Default::default());
         Some((
             Self {
                 view: Arc::new(view),
@@ -291,14 +300,43 @@ pub enum Load {
 struct Cached {
     image: GpuImage,
     used: u64,
+    touched: u64,
+    bytes: u64,
 }
 
-/// Keeps the presented textures alive while replacements await a valid scene.
+pub(crate) struct EvictedImage {
+    pub view: wgpu::TextureView,
+}
+
+impl Cached {
+    fn new(image: GpuImage, touched: u64) -> Self {
+        let base_bytes = u64::from(image.width)
+            .saturating_mul(u64::from(image.height))
+            .saturating_mul(4);
+        Self {
+            bytes: image.upload.resident_bytes.max(base_bytes),
+            image,
+            used: 0,
+            touched,
+        }
+    }
+
+    fn eviction(&self) -> EvictedImage {
+        EvictedImage {
+            view: self.image.view().clone(),
+        }
+    }
+}
+
+/// Keeps textures for the installed scene and recently used images.
 pub struct TextureStore {
     active: HashMap<Arc<str>, Cached>,
     gpu_views: HashMap<Arc<str>, GpuImage>,
     staged: HashMap<Arc<str>, Option<Cached>>,
     generation: u64,
+    attempt: u64,
+    inactive_budget: u64,
+    evicted: Vec<EvictedImage>,
     device: u64,
     invalidated: bool,
     uploads: ImageUploadStats,
@@ -311,6 +349,9 @@ impl TextureStore {
             gpu_views: HashMap::new(),
             staged: HashMap::new(),
             generation: 0,
+            attempt: 0,
+            inactive_budget: DEFAULT_INACTIVE_MIB * MIB,
+            evicted: Vec::new(),
             device,
             invalidated: false,
             uploads: ImageUploadStats::default(),
@@ -356,7 +397,7 @@ impl TextureStore {
             return;
         }
         self.uploads.add(image.upload);
-        let entry = Some(Cached { image, used: 0 });
+        let entry = Some(Cached::new(image, self.attempt));
         if let Some(slot) = self.staged.get_mut(source) {
             *slot = entry;
         } else {
@@ -365,6 +406,14 @@ impl TextureStore {
     }
 
     pub fn forget(&mut self, source: &str) {
+        if self
+            .active
+            .get(source)
+            .is_some_and(|cached| cached.used != self.generation)
+            && let Some(cached) = self.active.remove(source)
+        {
+            self.evicted.push(cached.eviction());
+        }
         if let Some(slot) = self.staged.get_mut(source) {
             *slot = None;
         } else if let Some((key, _)) = self.active.get_key_value(source) {
@@ -373,16 +422,63 @@ impl TextureStore {
     }
 
     pub fn clear(&mut self) {
+        self.active.retain(|_, cached| {
+            let preserve = cached.used == self.generation;
+            if !preserve {
+                self.evicted.push(cached.eviction());
+            }
+            preserve
+        });
         self.staged.clear();
         self.invalidated = true;
     }
 
+    pub fn evictions(&mut self) -> impl Iterator<Item = EvictedImage> + '_ {
+        self.evicted.drain(..)
+    }
+
     pub fn begin_frame(&mut self) -> TextureTransaction<'_> {
-        self.generation = self.generation.wrapping_add(1);
+        self.attempt = self.attempt.wrapping_add(1);
         TextureTransaction {
             store: self,
             added: HashMap::new(),
             conversions: Vec::new(),
+        }
+    }
+
+    fn prune_inactive(&mut self) {
+        let generation = self.generation;
+        let mut inactive_bytes = 0_u64;
+        self.active.retain(|_, cached| {
+            let age = generation.wrapping_sub(cached.used);
+            if age > GRACE_GENERATIONS {
+                self.evicted.push(cached.eviction());
+                return false;
+            }
+            if age != 0 {
+                inactive_bytes = inactive_bytes.saturating_add(cached.bytes);
+            }
+            true
+        });
+        if inactive_bytes > self.inactive_budget {
+            let mut oldest: Vec<_> = self
+                .active
+                .iter()
+                .filter_map(|(source, cached)| {
+                    let age = generation.wrapping_sub(cached.used);
+                    (age != 0).then(|| (age, Arc::clone(source), cached.bytes))
+                })
+                .collect();
+            oldest.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            for (_, source, bytes) in oldest {
+                if let Some(cached) = self.active.remove(&source) {
+                    self.evicted.push(cached.eviction());
+                }
+                inactive_bytes -= bytes;
+                if inactive_bytes <= self.inactive_budget {
+                    break;
+                }
+            }
         }
     }
 }
@@ -420,7 +516,7 @@ impl TextureTransaction<'_> {
             None
         };
         if let Some(cached) = cached {
-            cached.used = self.store.generation;
+            cached.touched = self.store.attempt;
         }
     }
 
@@ -472,42 +568,90 @@ impl TextureTransaction<'_> {
         };
         self.conversions.extend(conversion);
         let result = ready(&image);
-        self.added.insert(
-            Arc::clone(source),
-            Cached {
-                image,
-                used: self.store.generation,
-            },
-        );
+        self.added
+            .insert(Arc::clone(source), Cached::new(image, self.store.attempt));
         result
     }
 
     pub fn commit(self, gpu: &Gpu) -> Result<ImageUploadStats, crate::Status> {
         if !self.conversions.is_empty() {
-            gpu.validation(|| {
+            gpu.hot_validation(|| {
                 gpu.submit(self.conversions);
                 Ok(())
             })?;
+        } else {
+            gpu.check_async_health()?;
         }
         let store = self.store;
+        store.generation = store.generation.wrapping_add(1);
         let generation = store.generation;
         if store.invalidated {
-            store.active.clear();
+            store
+                .evicted
+                .extend(store.active.drain().map(|(_, cached)| cached.eviction()));
         } else {
-            store.active.retain(|_, cached| cached.used == generation);
-        }
-        for (source, entry) in store.staged.drain() {
-            if let Some(cached) = entry
-                && cached.used == generation
-            {
-                store.active.insert(source, cached);
+            for cached in store.active.values_mut() {
+                if cached.touched == store.attempt {
+                    cached.used = generation;
+                }
             }
         }
-        for (source, cached) in self.added {
+        for (source, entry) in store.staged.drain() {
+            let previous = if let Some(mut cached) = entry
+                && cached.touched == store.attempt
+            {
+                cached.used = generation;
+                store.active.insert(source, cached)
+            } else {
+                store.active.remove(&source)
+            };
+            if let Some(previous) = previous {
+                store.evicted.push(previous.eviction());
+            }
+        }
+        for (source, mut cached) in self.added {
+            cached.used = generation;
             store.uploads.add(cached.image.upload);
-            store.active.insert(source, cached);
+            if let Some(previous) = store.active.insert(source, cached) {
+                store.evicted.push(previous.eviction());
+            }
         }
         store.invalidated = false;
+        store.prune_inactive();
         Ok(std::mem::take(&mut store.uploads))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{FontLibrary, tests::headless};
+
+    #[test]
+    fn texture_budget_evicts_only_the_oldest_inactive_entries() {
+        let Some(raster) = headless(FontLibrary::new()) else {
+            return;
+        };
+        let device = raster.device.as_ref().unwrap();
+        let factory = raster.texture_factory().unwrap();
+        let mut store = super::TextureStore::new(device.generation);
+        store.inactive_budget = 4;
+        for source in ["first", "second", "presented"] {
+            store.install(source, factory.upload_rgba(1, 1, &[255; 4]).unwrap());
+            let mut frame = store.begin_frame();
+            frame.touch(source);
+            frame.commit(&device.gpu).unwrap();
+        }
+        assert!(store.get("first").is_none());
+        assert!(store.get("second").is_some());
+        assert!(store.get("presented").is_some());
+
+        let mut discarded = store.begin_frame();
+        discarded.touch("second");
+        drop(discarded);
+        store.clear();
+        assert!(store.get("second").is_none());
+        assert!(store.get("presented").is_some());
+        store.begin_frame().commit(&device.gpu).unwrap();
+        assert!(store.get("presented").is_none());
     }
 }

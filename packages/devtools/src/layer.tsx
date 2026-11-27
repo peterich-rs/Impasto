@@ -202,7 +202,7 @@ function ErrorBanner(props: { open(): void }) {
 }
 function Panel(props: { close(): void; page: () => string; selectPage(page: string): void }) {
   const theme = useTheme();
-  const page = props.page;
+  const page = () => props.page();
   const pages = devtoolPages();
   const current = () => pages.find((entry) => entry.id === page()) ?? pages[0];
   return (

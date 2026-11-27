@@ -59,7 +59,14 @@ export function App(props: { initial?: string }): NodeHandle {
         })),
       },
     ],
-    { initial: props.initial ?? "/watchlist" },
+    {
+      initial: props.initial ?? "/watchlist",
+      tabs: {
+        initial: "watchlist",
+        branches: { watchlist: "/watchlist", account: "/account", settings: "/settings" },
+        maxRetained: 2,
+      },
+    },
   );
   const shell = Column({
     style: {

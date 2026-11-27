@@ -3958,6 +3958,8 @@ dependencies = [
  "etagere",
  "fontique",
  "half",
+ "indexmap",
+ "lru",
  "lyon_geom",
  "lyon_path",
  "lyon_tessellation",

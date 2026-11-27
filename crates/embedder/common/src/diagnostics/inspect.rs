@@ -100,6 +100,7 @@ fn write_layer(tree: &LayerTree, id: LayerId, out: &mut String, first: &mut bool
 fn kind_name(kind: &LayerKind) -> &'static str {
     match kind {
         LayerKind::Fill { .. } => "fill",
+        LayerKind::Paint(_) => "paint",
         LayerKind::Offset { .. } => "offset",
         LayerKind::Transform { .. } => "transform",
         LayerKind::Clip { .. } | LayerKind::CornerClip { .. } => "clip",
