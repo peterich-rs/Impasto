@@ -2,25 +2,32 @@ package dev.impasto.plugins.filesystem
 
 import androidx.activity.result.ActivityResultRegistryOwner
 import dev.impasto.host.ImpastoHost
-import java.io.File
+import org.json.JSONObject
 
-/** Uses the attached Activity's result registry and imports the result into app-private storage. */
+/** Imports files and presents document dialogs through the attached Activity. */
 object FileSystemPlugin {
+    private const val name = "@impasto/file-system"
+
     fun register(host: ImpastoHost) {
-        val activity = host.activity
-        val picker = (activity as? ActivityResultRegistryOwner)?.activityResultRegistry?.let { registry ->
-            DocumentPicker(activity, registry) { id, path, error ->
-                if (!host.completeNativeRequest(id, path, error) && path != null) {
-                    File(activity.filesDir, path).parentFile?.deleteRecursively()
+        val state = host.takeRetainedPluginState(name) as? DocumentPicker.State ?: DocumentPicker.State()
+        val picker = (host.activity as? ActivityResultRegistryOwner)?.activityResultRegistry?.let { registry ->
+            DocumentPicker(host.activity, registry, state) { id, value, failure ->
+                val error = failure?.let {
+                    val code = when (it) {
+                        is DocumentPicker.Cancelled -> "cancelled"
+                        is SecurityException -> "permission-denied"
+                        else -> "io"
+                    }
+                    JSONObject().put("code", code).put("message", it.message ?: "Document operation failed").toString()
                 }
+                host.completeNativeRequest(id, value?.toString(), error)
             }
         }
-        host.registerNativePlugin("@impasto/file-system", detach = { picker?.close(); null }) { request ->
-            if (request.operation == "@impasto/file-system/pick" && picker != null) {
-                picker.open(request.id)
-            } else {
-                request.fail("Host does not provide a document picker")
-            }
+        host.registerNativePlugin(name, hasPendingState = { state.pending != null }, detach = { picker?.detach(it) }) { request ->
+            val action = request.operation.substringAfterLast('/')
+            if (picker == null) request.fail("host-unavailable", "The window has no Activity Result registry")
+            else if (action in setOf("pickFiles", "pickDirectory", "saveFile")) picker.open(request, action)
+            else request.fail("Unknown document operation")
         }
     }
 }

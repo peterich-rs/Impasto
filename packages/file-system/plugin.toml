@@ -6,7 +6,12 @@ min_impasto_version = "0.1.0"
 path = "rust"
 
 [ios]
-path = "ios"
+path = "apple/ios"
+package = "ImpastoFileSystem"
+plugin_class = "ImpastoFileSystemPlugin"
+
+[macos]
+path = "apple/macos"
 package = "ImpastoFileSystem"
 plugin_class = "ImpastoFileSystemPlugin"
 

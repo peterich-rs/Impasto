@@ -27,9 +27,14 @@ import androidx.fragment.app.FragmentContainerView
 import dev.impasto.host.ExternalTexture
 import dev.impasto.host.ImpastoHost
 import dev.impasto.host.PlatformViewFactory
+import dev.impasto.plugins.clipboard.ClipboardPlugin
+import dev.impasto.plugins.connectivity.ConnectivityPlugin
 import dev.impasto.plugins.filesystem.FileSystemPlugin
+import dev.impasto.plugins.haptics.HapticsPlugin
 import dev.impasto.plugins.linking.LinkingPlugin
 import dev.impasto.plugins.permissions.PermissionsPlugin
+import dev.impasto.plugins.share.SharePlugin
+import dev.impasto.plugins.systeminfo.SystemInfoPlugin
 
 class NativeActivity : FragmentActivity() {
     private val capturePhoto = registerForActivityResult(ActivityResultContracts.TakePicturePreview()) { image ->
@@ -139,10 +144,15 @@ class NotesFragment : Fragment() {
         if (host == null) {
             showFailure()
         } else {
+            ClipboardPlugin.register(host)
+            ConnectivityPlugin.register(host)
             FileSystemPlugin.register(host)
+            HapticsPlugin.register(host)
             LinkingPlugin.register(host)
             PermissionsPlugin.register(host)
-        container.addView(host.view, FrameLayout.LayoutParams(-1, -1))
+            SharePlugin.register(host)
+            SystemInfoPlugin.register(host)
+            container.addView(host.view, FrameLayout.LayoutParams(-1, -1))
             photo = host.view.openExternalTexture("site-photo", 320, 180)
         }
     }

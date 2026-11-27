@@ -201,10 +201,15 @@ pub fn run_filtered(
             engine::session::read_asset_bytes(file, length, limit)
         }) as AssetReader
     });
+    let transport_started = Instant::now();
     let config = ModuleConfig {
         asset_reader,
         registry: ModuleRegistry::new(modules).into(),
         script_execution: ScriptExecution::HeadlessTest,
+        // Test frames can jump ahead to JavaScript timers while native work runs on real threads.
+        transport_clock: Some(Arc::new(move || {
+            i64::try_from(transport_started.elapsed().as_millis()).unwrap_or(i64::MAX)
+        })),
         exec: Arc::new(methods),
         post_delivery: Some(Arc::new(move |delivery| {
             let _ = routed.send(Command::Delivery(delivery));

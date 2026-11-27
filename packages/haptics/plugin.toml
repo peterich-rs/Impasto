@@ -1,0 +1,24 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[ios]
+path = "apple/ios"
+package = "ImpastoHaptics"
+plugin_class = "ImpastoHapticsPlugin"
+
+[macos]
+path = "apple/macos"
+package = "ImpastoHaptics"
+plugin_class = "ImpastoHapticsPlugin"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.haptics"
+plugin_class = "HapticsPlugin"
+
+[android.permissions]
+"android.permission.VIBRATE" = ["@impasto/haptics/native#impact", "@impasto/haptics/native#selection", "@impasto/haptics/native#notification", "@impasto/haptics/native#vibrate", "@impasto/haptics/native#vibratePattern", "@impasto/haptics/native#cancel", "@impasto/haptics/native#isSupported"]

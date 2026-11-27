@@ -1,12 +1,17 @@
 import { createSignal, onCleanup, Show } from "solid-js";
 import { AsyncStorage } from "@impasto/async-storage";
 import { Restoration } from "@impasto/app-state";
+import { availableFormats } from "@impasto/clipboard";
+import { getStatus } from "@impasto/connectivity";
 import { FileSystem } from "@impasto/file-system";
+import { impact } from "@impasto/haptics";
 import { Linking } from "@impasto/linking";
 import { Permission, type PermissionHandle } from "@impasto/permissions";
+import { shareFiles, shareText } from "@impasto/share";
 import { boot } from "@impasto/solid-renderer";
 import { createRouter, RouterView, type RouteParams } from "@impasto/solid-router";
 import { Button, Column, ExternalTexture, Field, KeyboardAvoidingView, PlatformView, ScrollArea, Text } from "@impasto/solid-ui";
+import { getAppInfo } from "@impasto/system-info";
 
 type Draft = { version: 1; record: string; note: string; attachment: string };
 
@@ -131,10 +136,18 @@ export default function Main() {
 
     async function share() {
       try {
-        await Linking.shareText(`现场记录 ${record}\n${note()}`);
+        const text = `现场记录 ${record}\n${note()}`;
+        const file = attachment();
+        const result = file ? await shareFiles([{ path: file }], { text }) : await shareText(text);
+        setStatus(`分享 · ${result.status}`);
       } catch {
         setStatus("未能打开系统分享");
       }
+    }
+
+    async function showStatus(action: () => Promise<string>) {
+      try { setStatus(await action()); }
+      catch (error) { setStatus(String(error)); }
     }
 
     return (
@@ -173,6 +186,19 @@ export default function Main() {
             <Button label="请求定位权限" style={button} onClick={() => void requestPermission("定位", Permission.locationWhenInUse)} />
             <Button label="请求精确闹钟权限" style={button} onClick={() => void requestPermission("精确闹钟", Permission.scheduleExactAlarm)} />
             <Button label="分享记录" style={button} onClick={() => void share()} />
+            <Button label="在应用内打开项目主页" style={button} onClick={() => void showStatus(async () =>
+              (await Linking.openURL("https://github.com/peterich-rs/Impasto", { mode: "inAppBrowser" }))
+                ? "已打开项目主页" : "未找到可用浏览器")} />
+            <Button label="查看网络状态" style={button} onClick={() => void showStatus(async () =>
+              JSON.stringify(await getStatus()))} />
+            <Button label="查看应用信息" style={button} onClick={() => void showStatus(async () =>
+              JSON.stringify(await getAppInfo()))} />
+            <Button label="播放触感反馈" style={button} onClick={() => void showStatus(async () => {
+              await impact("medium");
+              return "已请求触感反馈";
+            })} />
+            <Button label="查看剪贴板格式" style={button} onClick={() => void showStatus(async () =>
+              (await availableFormats()).join("、") || "剪贴板为空")} />
             <Show when={status()}>
               <Text style={{ fontSize: 15, color: muted }}>{status()}</Text>
             </Show>

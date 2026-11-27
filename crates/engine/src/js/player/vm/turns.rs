@@ -488,8 +488,14 @@ impl Host {
         if self.paused.get() {
             return None;
         }
-        self.runtime
-            .next_deadline_ms()
-            .filter(|deadline| *deadline > self.runtime.clock_ms())
+        let deadline = if matches!(
+            self.inner.config.script_execution,
+            crate::session::ScriptExecution::HeadlessTest
+        ) {
+            self.runtime.next_timer_ms()
+        } else {
+            self.runtime.next_deadline_ms()
+        };
+        deadline.filter(|deadline| *deadline > self.runtime.clock_ms())
     }
 }

@@ -9,11 +9,15 @@ impasto.workspace = true
 impasto-app-state = { path = "../../../packages/app-state/rust" }
 impasto-async-storage = { path = "../../../packages/async-storage/rust" }
 impasto-clipboard = { path = "../../../packages/clipboard/rust" }
+impasto-connectivity = { path = "../../../packages/connectivity/rust" }
 impasto-devtools = { path = "../../../packages/devtools/rust" }
 impasto-file-system = { path = "../../../packages/file-system/rust" }
+impasto-haptics = { path = "../../../packages/haptics/rust" }
 impasto-http = { path = "../../../packages/http/rust" }
 impasto-linking = { path = "../../../packages/linking/rust" }
 impasto-permissions = { path = "../../../packages/permissions/rust" }
+impasto-share = { path = "../../../packages/share/rust" }
+impasto-system-info = { path = "../../../packages/system-info/rust" }
 impasto-websocket = { path = "../../../packages/websocket/rust" }
 
 [lints]

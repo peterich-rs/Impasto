@@ -20,4 +20,6 @@ android {
 
 dependencies {
     compileOnly(project(":impasto-host"))
+    implementation("androidx.activity:activity:1.10.1")
+    implementation("androidx.browser:browser:1.8.0")
 }

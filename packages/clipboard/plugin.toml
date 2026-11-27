@@ -4,3 +4,18 @@ min_impasto_version = "0.1.0"
 
 [rust]
 path = "rust"
+
+[ios]
+path = "apple/ios"
+package = "ImpastoClipboard"
+plugin_class = "ImpastoClipboardPlugin"
+
+[macos]
+path = "apple/macos"
+package = "ImpastoClipboard"
+plugin_class = "ImpastoClipboardPlugin"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.clipboard"
+plugin_class = "ClipboardPlugin"

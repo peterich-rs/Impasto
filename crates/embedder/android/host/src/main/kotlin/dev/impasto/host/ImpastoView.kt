@@ -3,6 +3,7 @@ package dev.impasto.host
 import android.app.Activity
 import android.content.ClipboardManager
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.SparseArray
@@ -269,6 +270,8 @@ class ImpastoView internal constructor(
     }
 
     fun documentDirectory(): String = context.filesDir.absolutePath
+
+    fun downloadsDirectory(): String? = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)?.absolutePath
 
     fun readClipboard(): String =
         context.getSystemService(ClipboardManager::class.java)?.primaryClip

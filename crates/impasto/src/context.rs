@@ -23,6 +23,7 @@ pub struct AppPaths {
     data: Option<PathBuf>,
     cache: Option<PathBuf>,
     temp: Option<PathBuf>,
+    downloads: Option<PathBuf>,
 }
 
 impl AppPaths {
@@ -32,6 +33,7 @@ impl AppPaths {
             data: None,
             cache,
             temp,
+            downloads: None,
         }
     }
 
@@ -59,6 +61,33 @@ impl AppPaths {
 
     pub fn temp_dir(&self) -> Result<&Path, PathError> {
         self.temp.as_deref().ok_or(PathError("temp"))
+    }
+
+    /// Returns the host's download directory when the platform provides one.
+    pub fn downloads_dir(&self) -> Result<&Path, PathError> {
+        self.downloads.as_deref().ok_or(PathError("downloads"))
+    }
+
+    #[doc(hidden)]
+    pub fn with_downloads_dir(mut self, downloads: Option<PathBuf>) -> Self {
+        self.downloads = downloads;
+        self
+    }
+
+    /// Creates independent application directories underneath a private test sandbox.
+    #[doc(hidden)]
+    pub fn isolated(root: &Path) -> std::io::Result<Self> {
+        fn directory(root: &Path, name: &str) -> std::io::Result<PathBuf> {
+            let path = root.join(name);
+            std::fs::create_dir_all(&path)?;
+            Ok(path)
+        }
+        Ok(Self::new(
+            Some(directory(root, "documents")?),
+            Some(directory(root, "cache")?),
+            Some(directory(root, "temp")?),
+        )
+        .with_data_dir(Some(directory(root, "data")?)))
     }
 }
 

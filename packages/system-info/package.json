@@ -1,0 +1,11 @@
+{
+  "name": "@impasto/system-info",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts",
+    "./native": "./src/native.stub.ts"
+  }
+}

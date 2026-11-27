@@ -1,25 +1,108 @@
-//! Inbound URL events and outbound platform links.
+//! Inbound deep links and validated outbound URLs.
 
-use std::sync::Arc;
+use std::pin::pin;
+use std::sync::Mutex;
 
-use impasto::os::NativeChannel;
+use futures_channel::mpsc;
+use futures_util::{StreamExt as _, future};
+use impasto::os::{NativePlugin, NativePluginError};
 use impasto::{
-    ImpastoError, ImpastoEvents, PluginContext, PluginInitError, PluginRegistrar, Runtime,
-    Subscription,
+    CancelToken, ImpastoError, ImpastoEvents, ImpastoType, PluginContext, PluginInitError,
+    PluginRegistrar, Subscription, TypedSink,
 };
+use serde::Serialize;
+use url::Url;
 
 #[derive(Debug)]
-struct LinkError(String);
+struct LinkError {
+    code: &'static str,
+    message: String,
+}
+
+impl LinkError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<NativePluginError> for LinkError {
+    fn from(error: NativePluginError) -> Self {
+        let code = match error.code.as_str() {
+            "host-unavailable" => "host-unavailable",
+            "cannot-open" => "cannot-open",
+            _ => "platform",
+        };
+        Self::new(code, error.message)
+    }
+}
 
 impl ImpastoError for LinkError {
     fn scope(&self) -> &'static str {
         "linking"
     }
     fn code(&self) -> &'static str {
-        "platform"
+        self.code
     }
     fn message(&self) -> String {
-        self.0.clone()
+        self.message.clone()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, ImpastoType, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum OpenUrlMode {
+    #[default]
+    External,
+    InAppBrowser,
+}
+
+#[derive(Clone, Copy, Debug, ImpastoType, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum DismissButtonStyle {
+    Done,
+    Close,
+    Cancel,
+}
+
+#[derive(Debug, Default, ImpastoType, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenUrlOptions {
+    mode: Option<OpenUrlMode>,
+    toolbar_color: Option<String>,
+    dismiss_button_style: Option<DismissButtonStyle>,
+}
+
+#[derive(Serialize)]
+struct OpenUrl<'a> {
+    url: &'a str,
+    options: OpenUrlOptions,
+}
+
+fn validate(input: &str, mode: OpenUrlMode) -> Result<Url, LinkError> {
+    if input.trim() != input || input.chars().any(char::is_control) {
+        return Err(LinkError::new(
+            "invalid-url",
+            "URLs cannot have whitespace at the ends or control characters",
+        ));
+    }
+    let url =
+        Url::parse(input).map_err(|error| LinkError::new("invalid-url", error.to_string()))?;
+    match url.scheme() {
+        "file" | "javascript" | "data" | "vbscript" | "content" | "intent" | "blob" => Err(
+            LinkError::new("unsupported-scheme", "this URL scheme cannot be opened"),
+        ),
+        "http" | "https" if !url.has_host() => {
+            Err(LinkError::new("invalid-url", "a web URL requires a host"))
+        }
+        "http" | "https" => Ok(url),
+        _ if mode == OpenUrlMode::InAppBrowser => Err(LinkError::new(
+            "unsupported-scheme",
+            "the in-app browser accepts HTTP or HTTPS URLs",
+        )),
+        _ => Ok(url),
     }
 }
 
@@ -28,17 +111,10 @@ enum LinkEvent {
     Url { url: String },
 }
 
-#[impasto::module(
-    name = "Linking",
-    specifier = "@impasto/linking/native",
-    object = true,
-    init = init,
-    events = LinkEvent
-)]
+#[impasto::module(name = "Linking", specifier = "@impasto/linking/native", object = true, init = init, events = LinkEvent)]
 struct LinkingPlugin {
-    initial_url: Option<String>,
-    channel: Option<Arc<NativeChannel>>,
-    runtime: Runtime,
+    context: PluginContext,
+    native: NativePlugin,
     _subscription: Subscription,
 }
 
@@ -49,9 +125,8 @@ impl LinkingPlugin {
             let _ = events.emit(LinkEvent::Url { url: url.into() });
         });
         Ok(Self {
-            initial_url: ctx.initial_url().map(str::to_owned),
-            channel: ctx.extension(),
-            runtime: ctx.runtime().clone(),
+            context: ctx.clone(),
+            native: NativePlugin::new(ctx, "@impasto/linking"),
             _subscription: subscription,
         })
     }
@@ -59,65 +134,143 @@ impl LinkingPlugin {
 
 #[impasto::export]
 impl LinkingPlugin {
+    pub fn is_linking_host_available(&self) -> bool {
+        self.native.is_hosted()
+    }
+
     #[impasto::method(rename = "getInitialURL")]
     pub fn get_initial_url(&self) -> Option<String> {
-        self.initial_url.clone()
+        self.context.initial_url().map(str::to_owned)
     }
 
-    #[impasto::method(rename = "openURL")]
-    pub async fn open_url(&self, url: String) -> Result<(), LinkError> {
-        if let Some(channel) = &self.channel {
-            return channel
-                .request("@impasto/linking/open", &url)
-                .await
-                .map(|_| ())
-                .map_err(LinkError);
+    #[impasto::method(rename = "canOpenURL")]
+    pub async fn can_open_url(&self, url: String) -> Result<bool, LinkError> {
+        let url = validate(&url, OpenUrlMode::External)?;
+        if !self.native.is_hosted() {
+            return Ok(false);
         }
         #[cfg(target_os = "macos")]
-        {
-            self.runtime
-                .spawn_main(move || open_appkit(&url))
+        if !self.native.has_channel() {
+            return self
+                .context
+                .runtime()
+                .spawn_main(move || open_appkit(url.as_str(), false))
                 .await
-                .map_err(|error| LinkError(error.to_string()))?
+                .map_err(|error| LinkError::new("host-unavailable", error.to_string()));
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = &self.runtime;
-            Err(LinkError(
-                "opening links is unavailable on this host".into(),
-            ))
-        }
+        Ok(self.native.request("canOpen", &url.as_str()).await?)
     }
 
-    #[impasto::method(awaits_user)]
-    pub async fn share_text(&self, text: String) -> Result<(), LinkError> {
-        let channel = self
-            .channel
-            .as_ref()
-            .ok_or_else(|| LinkError("sharing is unavailable on this host".into()))?;
-        channel
-            .request("@impasto/linking/share", &text)
-            .await
-            .map(|_| ())
-            .map_err(LinkError)
+    #[impasto::method(rename = "openURL", awaits_user)]
+    pub async fn open_url(
+        &self,
+        url: String,
+        options: Option<OpenUrlOptions>,
+    ) -> Result<bool, LinkError> {
+        let options = options.unwrap_or_default();
+        let url = validate(&url, options.mode.unwrap_or_default())?;
+        if options.toolbar_color.as_ref().is_some_and(|value| {
+            value.len() != 7
+                || !value.starts_with('#')
+                || !value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+        }) {
+            return Err(LinkError::new(
+                "invalid-url",
+                "toolbarColor must use #RRGGBB",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        if self.native.is_hosted() && !self.native.has_channel() {
+            return self
+                .context
+                .runtime()
+                .spawn_main(move || open_appkit(url.as_str(), true))
+                .await
+                .map_err(|error| LinkError::new("host-unavailable", error.to_string()));
+        }
+        Ok(self
+            .native
+            .request(
+                "open",
+                &OpenUrl {
+                    url: url.as_str(),
+                    options,
+                },
+            )
+            .await?)
+    }
+
+    pub async fn watch_urls(
+        &self,
+        mut sink: TypedSink<String>,
+        cancel: CancelToken,
+    ) -> Result<(), LinkError> {
+        let (sender, mut receiver) = mpsc::channel(16);
+        let sender = Mutex::new(sender);
+        let _subscription = self.context.on_open_url(move |url| {
+            if let Ok(mut sender) = sender.lock()
+                && let Err(error) = sender.try_send(url.to_owned())
+                && error.is_full()
+            {
+                impasto::tracing::warn!("deep-link stream is full");
+            }
+        });
+        let forward = async {
+            while let Some(url) = receiver.next().await {
+                if sink.send(url).await.is_err() {
+                    break;
+                }
+            }
+        };
+        future::select(pin!(forward), pin!(cancel.cancelled())).await;
+        Ok(())
     }
 }
 
 #[cfg(target_os = "macos")]
-fn open_appkit(url: &str) -> Result<(), LinkError> {
+fn open_appkit(url: &str, open: bool) -> bool {
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::{NSString, NSURL};
 
-    let url = NSURL::URLWithString(&NSString::from_str(url))
-        .ok_or_else(|| LinkError("unsupported URL".into()))?;
-    if NSWorkspace::sharedWorkspace().openURL(&url) {
-        Ok(())
-    } else {
-        Err(LinkError("openURL failed".into()))
-    }
+    NSURL::URLWithString(&NSString::from_str(url)).is_some_and(|url| {
+        let workspace = NSWorkspace::sharedWorkspace();
+        if open {
+            workspace.openURL(&url)
+        } else {
+            workspace.URLForApplicationToOpenURL(&url).is_some()
+        }
+    })
 }
 
 /// Registers the application URL bindings.
 pub fn register(registrar: &mut PluginRegistrar) {
     registrar.add(LinkingPlugin::plugin());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbound_validation_rejects_local_and_script_url_schemes() {
+        for input in [
+            "file:///tmp/test",
+            "javaScript:alert(1)",
+            "content://foo",
+            "data:text/plain,x",
+        ] {
+            assert_eq!(
+                validate(input, OpenUrlMode::External).unwrap_err().code(),
+                "unsupported-scheme"
+            );
+        }
+        assert_eq!(
+            validate("https://", OpenUrlMode::External)
+                .unwrap_err()
+                .code(),
+            "invalid-url"
+        );
+        assert!(validate("demo://callback", OpenUrlMode::External).is_ok());
+        assert!(validate("demo://callback", OpenUrlMode::InAppBrowser).is_err());
+    }
 }

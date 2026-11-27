@@ -1,0 +1,24 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[ios]
+path = "apple/ios"
+package = "ImpastoConnectivity"
+plugin_class = "ImpastoConnectivityPlugin"
+
+[macos]
+path = "apple/macos"
+package = "ImpastoConnectivity"
+plugin_class = "ImpastoConnectivityPlugin"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.connectivity"
+plugin_class = "ConnectivityPlugin"
+
+[android.permissions]
+"android.permission.ACCESS_NETWORK_STATE" = ["@impasto/connectivity/native#getStatus", "@impasto/connectivity/native#watchStatus"]

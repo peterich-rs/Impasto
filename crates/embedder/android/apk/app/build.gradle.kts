@@ -35,9 +35,14 @@ glue.resolve("plugins.properties").takeIf { it.isFile }?.reader()?.use { config.
 dependencies {
     implementation(project(":impasto-host"))
     if (!config.containsKey("framework")) {
+        implementation(project(":impasto_clipboard"))
+        implementation(project(":impasto_connectivity"))
         implementation(project(":impasto_file_system"))
+        implementation(project(":impasto_haptics"))
         implementation(project(":impasto_linking"))
         implementation(project(":impasto_permissions"))
+        implementation(project(":impasto_share"))
+        implementation(project(":impasto_system_info"))
     }
     config.getProperty("plugin.modules", "").split(',').filter(String::isNotBlank).forEach {
         implementation(project(it))
@@ -147,6 +152,9 @@ android {
 
 androidComponents {
     onVariants { variant ->
+        if (!generatedApp) {
+            variant.sources.manifests.addStaticManifestFile(file("src/standalone/AndroidManifest.xml").path)
+        }
         val cargoRelease = when (variant.buildType) {
             "debug" -> false
             "release" -> true

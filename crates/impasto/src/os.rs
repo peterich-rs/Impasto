@@ -2,6 +2,7 @@
 
 pub use crate::os_channel::NativeChannel;
 pub use crate::os_events::{NativeEventChannel, NativeEventStream};
+pub use crate::os_plugin::{NativePlugin, NativePluginError};
 
 #[cfg(target_os = "android")]
 pub mod android {
