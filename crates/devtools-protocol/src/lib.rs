@@ -87,7 +87,7 @@ pub struct ChannelUpdate<T> {
 }
 
 /// Process identity and current viewport, obtained after authentication.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub pid: u32,
     pub app_name: String,

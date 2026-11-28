@@ -1,3 +1,4 @@
+use devtools_protocol::FrameRecord;
 use impasto::ImpastoType;
 
 use crate::store::{Recording, frames, network, views};
@@ -37,22 +38,81 @@ pub(crate) fn evaluate(data: &Recording) -> Vec<Finding> {
         });
     };
     let recent = || data.frames.entries().iter().rev().take(60);
-    let jank = recent().filter(|frame| frame.over_budget).count();
-    let slowest = recent().max_by(|a, b| frames::duration(a).total_cmp(&frames::duration(b)));
-    let most_over_budget = recent()
-        .filter(|frame| frame.budget_ms > 0. && frame.e2e_ms > 2. * frame.budget_ms)
-        .max_by(|a, b| a.e2e_ms.total_cmp(&b.e2e_ms));
-    if let Some(frame) = if jank >= 3 { slowest } else { most_over_budget } {
+    let budget = data.frame_budget();
+    let stats = frames::stats(recent(), budget);
+    let severe_stage = recent().any(|frame| {
+        let budget = frames::effective_budget(frame, budget);
+        budget > 0. && frames::stage_duration(frame) > 2. * budget
+    });
+    let severity = if severe_stage || stats.dropped_frames >= 3 || stats.hitch_ms_per_sec >= 10. {
+        Some("critical")
+    } else if stats.hitch_ms_per_sec >= 5. {
+        Some("warning")
+    } else {
+        None
+    };
+    if let Some(severity) = severity
+        && let Some(frame) = recent().max_by(|a, b| compare_jank(a, b, budget))
+    {
+        let (stage, count) = [
+            ("UI", stats.ui_jank_count),
+            ("Raster", stats.raster_jank_count),
+            ("GPU", stats.gpu_jank_count),
+        ]
+        .into_iter()
+        .max_by_key(|&(_, count)| count)
+        .unwrap_or(("Present", 0));
+        let stage = if count > 0 { stage } else { "Present" };
         add(
             "frame.jank_burst",
-            "critical",
-            "Frames exceeded their budget",
-            format!("{jank} / 60 · worst {:.2} ms", frames::duration(frame)),
-            "Inspect the slowest frame to find the stage that consumed its budget.",
+            severity,
+            "Frame hitch burst",
+            format!(
+                "{:.1} ms/s hitch · {} dropped ({stage})",
+                stats.hitch_ms_per_sec, stats.dropped_frames
+            ),
+            "Inspect the frame with the most dropped refresh intervals.",
             "frame",
             frame.id.to_string(),
             "breakdown",
         );
+    }
+    let (observed, seconds) = repaint_window(data);
+    if observed.len() >= 10 && seconds >= 2. {
+        let wakes: Vec<_> = observed
+            .into_iter()
+            .filter(|frame| idle_repaint(frame))
+            .collect();
+        let wake_hz = wakes.len() as f64 / seconds;
+        if wake_hz >= 2.
+            && let Some(frame) = wakes
+                .iter()
+                .max_by(|a, b| frames::stage_duration(a).total_cmp(&frames::stage_duration(b)))
+        {
+            let count = wakes.len() as f64;
+            let (total_views, measured) = wakes
+                .iter()
+                .filter_map(|frame| frame.repainted_view_count)
+                .fold((0., 0.), |(total, measured), views| {
+                    (total + f64::from(views), measured + 1.)
+                });
+            let paint = if measured > 0. {
+                format!("{:.1} views/frame", total_views / measured)
+            } else {
+                "— views/frame".to_owned()
+            };
+            let timer_ms = wakes.iter().map(|frame| frame.timer_ms).sum::<f64>() / count;
+            add(
+                "frame.idle_repaint_churn",
+                if wake_hz >= 20. { "warning" } else { "info" },
+                "Background repaints",
+                format!("{wake_hz:.1}/s · {paint} · {timer_ms:.2} ms timer/frame"),
+                "Inspect frames that woke without input to find periodic repaint work.",
+                "frame",
+                frame.id.to_string(),
+                "breakdown",
+            );
+        }
     }
     let blocked = recent()
         .take_while(|frame| frame.compositor_block.is_some())
@@ -209,6 +269,33 @@ pub(crate) fn evaluate(data: &Recording) -> Vec<Finding> {
     findings
 }
 
+fn compare_jank(a: &FrameRecord, b: &FrameRecord, budget: f64) -> std::cmp::Ordering {
+    frames::dropped_vsyncs(a, budget)
+        .cmp(&frames::dropped_vsyncs(b, budget))
+        .then_with(|| frames::stage_duration(a).total_cmp(&frames::stage_duration(b)))
+}
+
+fn repaint_window(data: &Recording) -> (Vec<&FrameRecord>, f64) {
+    // At 60 Hz the last 60 frames span only one second.
+    const WINDOW_MS: f64 = 5_000.;
+    let entries = data.frames.entries();
+    let end = entries.iter().map(|frame| frame.at_ms).fold(0., f64::max);
+    let mut start = end;
+    let frames = entries
+        .iter()
+        .filter(|frame| frame.at_ms >= end - WINDOW_MS)
+        .inspect(|frame| start = start.min(frame.at_ms))
+        .collect();
+    (frames, (end - start) / 1_000.)
+}
+
+fn idle_repaint(frame: &FrameRecord) -> bool {
+    frame.trigger == "wake"
+        && frame.input_events == 0
+        && !frame.compositor_only
+        && !frames::failed_or_skipped(frame)
+}
+
 pub(crate) fn evidence(data: &Recording, finding: &str) -> Vec<crate::types::Row> {
     use crate::types::Row;
 
@@ -225,7 +312,7 @@ pub(crate) fn evidence(data: &Recording, finding: &str) -> Vec<crate::types::Row
                 })
                 .collect();
             if finding == "frame.jank_burst" {
-                rows.sort_by(|a, b| frames::duration(b).total_cmp(&frames::duration(a)));
+                rows.sort_by(|a, b| compare_jank(b, a, data.frame_budget()));
             }
             rows.into_iter()
                 .take(5)
@@ -234,8 +321,32 @@ pub(crate) fn evidence(data: &Recording, finding: &str) -> Vec<crate::types::Row
                     name: format!("Frame #{}", frame.id),
                     detail: format!(
                         "{:.2} ms / {:.2} ms budget",
-                        frames::duration(frame),
-                        frame.budget_ms
+                        frames::stage_duration(frame),
+                        frames::effective_budget(frame, data.frame_budget())
+                    ),
+                    ..Row::default()
+                })
+                .collect()
+        }
+        "frame.idle_repaint_churn" => {
+            let (observed, _) = repaint_window(data);
+            let mut rows: Vec<_> = observed
+                .into_iter()
+                .filter(|frame| idle_repaint(frame))
+                .collect();
+            rows.sort_by(|a, b| frames::stage_duration(b).total_cmp(&frames::stage_duration(a)));
+            rows.into_iter()
+                .take(5)
+                .map(|frame| Row {
+                    id: frame.id.to_string(),
+                    name: format!("Frame #{} · wake", frame.id),
+                    detail: format!(
+                        "{} · {:.2} ms timer · {} repainted views",
+                        frame.layout_cause,
+                        frame.timer_ms,
+                        frame
+                            .repainted_view_count
+                            .map_or_else(|| "—".to_owned(), |count| count.to_string())
                     ),
                     ..Row::default()
                 })
@@ -331,9 +442,10 @@ mod tests {
             (1..=3)
                 .map(|id| FrameRecord {
                     id,
-                    e2e_ms: 23.,
+                    at_ms: id as f64 * 16.,
+                    presented: true,
+                    raster_ms: 23.,
                     budget_ms: 16.,
-                    over_budget: true,
                     ..FrameRecord::default()
                 })
                 .collect(),
@@ -355,5 +467,111 @@ mod tests {
                 .iter()
                 .all(|finding| finding.id != "net.error_rate")
         );
+    }
+    #[test]
+    fn hitch_audit_uses_warning_and_critical_boundaries() {
+        for (span, expected) in [
+            (4000., None),
+            (3200., Some("warning")),
+            (1600., Some("critical")),
+        ] {
+            let mut data = Recording::default();
+            data.frames.update(
+                false,
+                vec![
+                    FrameRecord {
+                        id: 1,
+                        presented: true,
+                        budget_ms: 16.,
+                        ui_ms: 12.,
+                        raster_ms: 12.,
+                        e2e_ms: 35.,
+                        ..FrameRecord::default()
+                    },
+                    FrameRecord {
+                        id: 2,
+                        at_ms: span,
+                        presented: true,
+                        budget_ms: 16.,
+                        gpu: devtools_protocol::GpuTiming {
+                            frame_span_us: Some(25_000.),
+                            ..Default::default()
+                        },
+                        ..FrameRecord::default()
+                    },
+                ],
+            );
+            let findings = evaluate(&data);
+            let finding = findings
+                .iter()
+                .find(|finding| finding.id == "frame.jank_burst");
+            assert_eq!(finding.map(|value| value.severity.as_str()), expected);
+            if let Some(finding) = finding {
+                assert!(finding.metric.ends_with("1 dropped (GPU)"));
+                assert_eq!(finding.selection, "2");
+            }
+        }
+    }
+
+    #[test]
+    fn idle_repaint_audit_uses_input_and_two_seconds_of_observation() {
+        for (interval, count, expected) in [
+            (200., 10, None),
+            (200., 11, Some("info")),
+            (50., 41, Some("warning")),
+        ] {
+            let mut data = Recording::default();
+            data.frames.update(
+                false,
+                (0..count)
+                    .map(|id| FrameRecord {
+                        id,
+                        at_ms: id as f64 * interval,
+                        presented: true,
+                        budget_ms: 16.,
+                        trigger: "wake".to_owned(),
+                        layout_cause: "timer".to_owned(),
+                        timer_ms: 0.5,
+                        repainted_view_count: (id % 2 == 0).then_some(3),
+                        raster_ms: 4.,
+                        ..FrameRecord::default()
+                    })
+                    .collect(),
+            );
+            let findings = evaluate(&data);
+            let finding = findings
+                .iter()
+                .find(|finding| finding.id == "frame.idle_repaint_churn");
+            assert_eq!(finding.map(|value| value.severity.as_str()), expected);
+            if let Some(finding) = finding {
+                assert!(finding.metric.contains("3.0 views/frame"));
+                assert!(
+                    evidence(&data, &finding.id)
+                        .iter()
+                        .any(|row| row.detail.contains("0.50 ms timer · 3 repainted views"))
+                );
+                assert!(
+                    evidence(&data, &finding.id)
+                        .iter()
+                        .any(|row| row.detail.contains("0.50 ms timer · — repainted views"))
+                );
+            }
+            let interactive = data
+                .frames
+                .entries()
+                .iter()
+                .cloned()
+                .map(|mut frame| {
+                    frame.input_events = 1;
+                    frame
+                })
+                .collect();
+            data.frames.update(true, interactive);
+            assert!(
+                evaluate(&data)
+                    .iter()
+                    .all(|finding| finding.id != "frame.idle_repaint_churn")
+            );
+        }
     }
 }

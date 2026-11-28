@@ -187,7 +187,7 @@ pub struct PhaseSample {
 /// Per-frame timing sample, trimmed from [`crate::FrameTiming`].
 #[derive(Clone, Debug)]
 pub struct FrameSample {
-    pub repainted_view_count: u32,
+    pub repainted_view_count: Option<u32>,
     pub seq: u64,
     pub(crate) changed_at: u64,
     pub schedule: ScheduleTiming,
@@ -225,13 +225,40 @@ pub struct FrameSample {
     pub layout_cause: &'static str,
     pub gestures: u32,
     pub over_budget: bool,
+    pub ui_over_budget: bool,
+    pub raster_over_budget: bool,
+    pub gpu_over_budget: bool,
     pub phases: PhaseSample,
+}
+
+impl FrameSample {
+    pub(super) fn input_events(&self) -> u32 {
+        let phase = self.phases;
+        [
+            self.gestures,
+            phase.pointers,
+            phase.keys,
+            phase.edits,
+            phase.ime,
+            phase.scrolls,
+            phase.focus,
+            phase.blur,
+        ]
+        .into_iter()
+        .fold(0, u32::saturating_add)
+    }
+
+    pub(super) fn gpu_span_ms(&self) -> Option<f64> {
+        self.gpu_timing
+            .as_ref()
+            .map(|timing| timing.frame_span_us / 1_000.0)
+    }
 }
 
 impl Default for FrameSample {
     fn default() -> Self {
         Self {
-            repainted_view_count: 0,
+            repainted_view_count: None,
             seq: 0,
             changed_at: 0,
             schedule: ScheduleTiming::default(),
@@ -269,6 +296,9 @@ impl Default for FrameSample {
             layout_cause: "none",
             gestures: 0,
             over_budget: false,
+            ui_over_budget: false,
+            raster_over_budget: false,
+            gpu_over_budget: false,
             phases: PhaseSample::default(),
         }
     }
@@ -1090,6 +1120,9 @@ impl TelemetryHub {
             {
                 frame.gpu = key;
                 frame.gpu_timing.clone_from(&timing);
+                frame.gpu_over_budget = frame.budget_ms > 0.0
+                    && frame.gpu_span_ms().is_some_and(|ms| ms > frame.budget_ms);
+                frame.over_budget |= frame.gpu_over_budget;
                 true
             } else {
                 false
@@ -1288,6 +1321,45 @@ mod tests {
         assert_eq!(capture.frames[0].gpu.status, raster::GpuTimingStatus::Ready);
         assert_eq!(capture.pending_gpu(), 0);
         assert_eq!(capture.unfinished_frames, 0);
+    }
+
+    #[test]
+    fn gpu_backfill_marks_over_budget_on_the_same_frame_revision() {
+        use raster::{GpuFrameTiming, GpuSample, GpuTimingStatus, GpuTimingUpdate};
+
+        let hub = TelemetryHub::new();
+        let sample = GpuSample {
+            frame_id: 15,
+            device_generation: 3,
+            status: GpuTimingStatus::Pending,
+        };
+        hub.push_frame(FrameSample {
+            number: 15,
+            budget_ms: 16.,
+            presented: true,
+            gpu: sample,
+            ..FrameSample::default()
+        });
+        let original = hub.latest_frame().unwrap();
+        hub.patch_gpu_timing(GpuTimingUpdate {
+            sample: GpuSample {
+                status: GpuTimingStatus::Ready,
+                ..sample
+            },
+            timing: Some(GpuFrameTiming {
+                clock_start_us: 0.,
+                frame_span_us: 25_000.,
+                passes_sum_us: 21_000.,
+                passes: Vec::new(),
+            }),
+        });
+        let (revision, updated) = hub.frames_since(original.changed_at);
+        assert_eq!(revision, original.changed_at + 1);
+        assert_eq!(updated[0].seq, original.seq);
+        assert_eq!(updated[0].changed_at, revision);
+        assert_eq!(updated[0].gpu_span_ms(), Some(25.));
+        assert!(updated[0].gpu_over_budget && updated[0].over_budget);
+        assert!(!updated[0].ui_over_budget && !updated[0].raster_over_budget);
     }
 
     #[test]

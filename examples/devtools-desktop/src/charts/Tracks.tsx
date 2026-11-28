@@ -19,17 +19,23 @@ export function Legend(props: { entries: readonly [string, number][] }) {
 
 export function Tracks(props: {
   tracks: readonly Track[];
-  project: (width: number, height: number) => ProjectedCanvas[];
   height?: number;
   onClick?: (time: number, track: number) => void;
-}) {
+} & (
+  { project: (width: number, height: number) => ProjectedCanvas[]; projectTrack?: never } |
+  { project?: never; projectTrack: (track: number, width: number, height: number) => ProjectedCanvas | undefined }
+)) {
   const [width, setWidth] = createSignal(0);
   const [cursor, setCursor] = createSignal<number>();
   const height = () => props.height ?? 63;
-  const plots = createMemo(() => width() ? props.project(width(), height()) : []);
+  const plots = createMemo(() => width() && props.project ? props.project(width(), height()) : []);
   return <Column style={{ width: "100%" }}>
     <For each={props.tracks}>{(track, index) => {
-      const plot = () => plots()[index()];
+      const plot = createMemo(() => {
+        if (!props.projectTrack) return plots()[index()];
+        const w = width();
+        return w > 0 ? props.projectTrack(index(), w, height()) : undefined;
+      });
       return <Column style={{ gap: 6, marginBottom: 7 }}>
         <Row style={{ alignItems: "center", gap: 9 }}>
           <Label weight={600}>{track.label}</Label>

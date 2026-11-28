@@ -37,12 +37,12 @@ examples/devtools-desktop/src/
 │   ├── NavRail.tsx              # 左侧 48pt 导航轨（6 模块 + 错误计数徽章 + Console 开关）
 │   ├── InspectorDrawer.tsx      # 右侧可调上下文检查器外壳（按页面与选中上下文切换内容）
 │   ├── ConsoleDrawer.tsx        # 底部可折叠实时 Logs / Errors 抽屉
-│   ├── StatusBar.tsx            # 底部 24pt 状态条（连接/RTT、FPS/P95、缓冲计数、Profile）
+│   ├── StatusBar.tsx            # 底部 24pt 状态条（连接/RTT、Hitch/呈现频次/P95、缓冲计数、Profile）
 │   └── CommandPalette.tsx       # ⌘K 模态命令面板（模糊过滤 + 键盘上下回车）
 ├── charts/
 │   ├── buffer.ts                # Uint8Array -> Float64Array 安全对齐视图 & ProjectedCanvas 通用绘制器
 │   ├── InteractiveCanvas.tsx    # 统一画布壳（CanvasController + pointerPosition 映射 + Zoom/Wheel/Drag/Hover）
-│   ├── FrameStripChart.tsx      # 顶部常驻 / Frames 页帧条带堆叠柱图
+│   ├── FrameStripChart.tsx      # 顶部常驻 / Frames 页帧条带阶段柱图
 │   ├── LaneGanttChart.tsx       # 单帧 5 泳道甘特瀑布图
 │   ├── FlamegraphChart.tsx      # JS CPU 火焰图
 │   ├── SyncTrackCharts.tsx      # 4 轨时间同步实时心电图 + Heap/Resource 堆叠面积图
@@ -113,7 +113,7 @@ Rust Core 不硬编码十六进制色值，只向 Canvas 投影缓冲区写入�
 
 ### 2.3 排版规范（`src/theme/typography.ts`）
 
-- **数据等宽铁律**：所有帧号、毫秒耗时、FPS、百分比、内存字节、HTTP 状态码、坐标矩形、源码行号、Hex/JSON 文本强制 `fontFamily: "Monospace"`（对应 macOS 宿主已注册的 `SF Mono` / `Menlo`），杜绝数字实时刷新时横向抖动。
+- **数据等宽铁律**：所有帧号、毫秒耗时、呈现频次、百分比、内存字节、HTTP 状态码、坐标矩形、源码行号、Hex/JSON 文本强制 `fontFamily: "Monospace"`（对应 macOS 宿主已注册的 `SF Mono` / `Menlo`），杜绝数字实时刷新时横向抖动。
 - **高密度桌面字阶**：
   - `micro`: `11pt`（状态栏、图表轴刻度、热力徽章、快捷键提示）
   - `table`: `12pt`（表格行、树节点、日志行、键值对，固定行高 `24pt`~`26pt`）
@@ -249,10 +249,10 @@ Rust Core 不硬编码十六进制色值，只向 Canvas 投影缓冲区写入�
 
 | 图表组件 | 渲染形态 | 交互能力 | 性能与细节约束 |
 |---|---|---|---|
-| `FrameStripChart` | 垂直堆叠柱（底→顶：Script / Layout / Record / Queue / Raster / GPU），超预算柱顶加珊瑚红告警帽，Compositor-Only 帧用半高冰蓝柱，Skipped 帧用底部红三角；横穿 `8.33ms`（120Hz）或 `16.67ms`（60Hz）预算虚线 | 单击选中单帧；拖拽水平框选多帧触发区间对比；滚轮左右平移历史帧；双指捏合 `onZoom` 调节柱宽（`2pt` ~ `18pt`） | `visible_count` 按 `width / barPitch` 由 Rust 裁剪，超出 2400 帧时仅投影视口可见柱 |
+| `FrameStripChart` | Split 帧左柱堆叠 UI 阶段，右柱并排显示 Raster 与 GPU。Shared 帧的 UI 和 Raster 累加为 CPU 柱。Compositor 帧使用全宽瓶颈柱。超预算阶段加红帽，未呈现帧加底部红条。预算虚线使用可见区最新帧的有效预算 | 单击选中单帧；拖拽水平框选多帧触发区间对比；滚轮左右平移历史帧；双指捏合 `onZoom` 调节柱宽（`2pt` ~ `18pt`） | `visible_count` 按 `width / barPitch` 由 Rust 裁剪，超出 2400 帧时仅投影视口可见柱 |
 | `LaneGanttChart` | 5 条水平泳道（`Platform` / `UI` / `Raster` / `IO` / `GPU`），每条泳道内支持多层嵌套 Span 条；左侧 `64pt` 固定泳道头；GPU 泳道背景加细微区分并标注 `GPU Clock (rel 0.0ms)` | `onWheel` 左右平移 + `onZoom` 缩放时间轴；点击任意 Span 高亮并在检查器显示 `fields`、耗时与源码信息；`cursor: "grab" / "grabbing"` | 宽度 `< 1.5pt` 的微细 Span 由 Rust 在投影期合并为 LOD 摘要条，避免海量零宽绘制 |
 | `FlamegraphChart` | 自顶向下（或自底向上翻转）的调用栈矩形层，同函数名用稳定哈希微调色相；宽度 `>= 42pt` 的帧内绘制截断函数名 | 单击任意函数块下钻放大至 100% 宽；双击空白或点击顶部 `Reset Zoom` 复位；悬停显示 `self%`、`total%`、符号化 `file:line:col`；支持顶部搜索框高亮匹配帧（未匹配帧降透明度） | 符号化与前缀树布局完全在 Rust `analyzer/flamegraph.rs` 完成，切换搜索词响应 `< 5ms` |
-| `SyncTrackCharts` | Overview 4 轨同步心电图（Frame Time / CPU+GPU / JS Heap / Active Net）与 JS Heap 7 分类堆叠面积图、Resources 趋势图 | 多轨共享同一 `hoverTimeMs` signal：鼠标滑过任意一轨时，其余 3 轨同步绘制垂直虚线游标并刷新各轨读数标签 | 采样点超过画布像素宽时由 Rust 执行 Min-Max 降采样，保留尖峰不削峰 |
+| `SyncTrackCharts` | Overview 4 轨同步心电图（Frame bottleneck / CPU+GPU / JS Heap / Active Net）与 JS Heap 7 分类堆叠面积图、Resources 趋势图 | 多轨共享同一 `hoverTimeMs` signal：鼠标滑过任意一轨时，其余 3 轨同步绘制垂直虚线游标并刷新各轨读数标签 | 采样点超过画布像素宽时由 Rust 执行 Min-Max 降采样，保留尖峰不削峰 |
 | `NetworkWaterfallBar` | 表格行内 `110×12pt` 微型 9 阶段水平条 + 右侧 Inspector 精确 9 阶段瀑布（每阶段一行：阶段名、水平条、精确 `ms` 数值） | 行内迷你条直接由 `query_network_slice` 返回的紧凑 `segments: [startRatio, lenRatio, colorBucket]` 绘制（或直接由轻量化 `View`/共享 `Canvas` 渲染）；详情页可点击展开每跳 `RedirectHop` | Pending 进行中请求绘制动态推进条（截至当前时刻），杜绝空白列 |
 | `TreemapChart` | 按 `bytes` 面积比例铺满画布的 Squarified Treemap 矩形，按 `group` 着色，一级分组带 `1px` 边框与左上角标题 | 悬停显示完整模块路径、`renderedBytes`、`apportionedBytecodeBytes`、`retainedPoolBytes`；点击目录/Chunk 下钻，点击顶部面包屑返回上级 | 矩形面积 `< 20×14pt` 自动隐藏文字标签，保持画面干净易读 |
 

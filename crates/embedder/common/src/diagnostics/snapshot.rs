@@ -213,6 +213,7 @@ fn phase_map(phase: PhaseSample) -> PluginValue {
 
 fn frames_channel(hub: &DiagnosticsHub, args: &[PluginValue]) -> Result<PluginValue, String> {
     let since = since_arg(args);
+    let refresh_rate = *hub.refresh_rate.lock().unwrap_or_else(|p| p.into_inner());
     let guard = hub.frames.lock().unwrap_or_else(|p| p.into_inner());
     let entries: Vec<PluginValue> = guard
         .tail(since)
@@ -248,6 +249,53 @@ fn frames_channel(hub: &DiagnosticsHub, args: &[PluginValue]) -> Result<PluginVa
                         .map_or(PluginValue::Null, |id| PluginValue::Str(id.to_string())),
                 ),
                 ("e2eMs", fnum(frame.schedule.e2e_ms())),
+                (
+                    "topology",
+                    frame
+                        .schedule
+                        .topology
+                        .map_or(PluginValue::Null, |value| PluginValue::Str(value.into())),
+                ),
+                (
+                    "skipReason",
+                    frame
+                        .schedule
+                        .skip_reason
+                        .map_or(PluginValue::Null, |value| PluginValue::Str(value.into())),
+                ),
+                ("presented", PluginValue::Bool(frame.presented)),
+                (
+                    "missedVsync",
+                    PluginValue::Bool(frame.schedule.missed_vsync),
+                ),
+                (
+                    "trigger",
+                    PluginValue::Str(frame.schedule.trigger.name().into()),
+                ),
+                (
+                    "targetLeadMs",
+                    frame
+                        .schedule
+                        .target_lead_ms()
+                        .map_or(PluginValue::Null, fnum),
+                ),
+                (
+                    "deadlineOverrunMs",
+                    frame
+                        .schedule
+                        .deadline_overrun_ms()
+                        .map_or(PluginValue::Null, fnum),
+                ),
+                (
+                    "gpuSpanMs",
+                    frame.gpu_span_ms().map_or(PluginValue::Null, fnum),
+                ),
+                ("uiOverBudget", PluginValue::Bool(frame.ui_over_budget)),
+                (
+                    "rasterOverBudget",
+                    PluginValue::Bool(frame.raster_over_budget),
+                ),
+                ("gpuOverBudget", PluginValue::Bool(frame.gpu_over_budget)),
                 ("draws", num(u64::from(frame.raster.render.draws))),
                 ("passes", num(u64::from(frame.raster.render.passes))),
                 (
@@ -281,7 +329,20 @@ fn frames_channel(hub: &DiagnosticsHub, args: &[PluginValue]) -> Result<PluginVa
             ])
         })
         .collect();
+    let first = guard
+        .tail(0)
+        .map(|frame| frame.at_ms)
+        .min_by(f64::total_cmp);
     Ok(map(vec![
+        (
+            "sampledAt",
+            fnum(super::telemetry::mono_ns() as f64 / 1_000_000.),
+        ),
+        ("firstFrameAt", first.map_or(PluginValue::Null, fnum)),
+        (
+            "refreshRate",
+            refresh_rate.map_or(PluginValue::Null, |hz| fnum(f64::from(hz))),
+        ),
         ("revision", num(guard.revision())),
         ("entries", PluginValue::List(entries)),
     ]))

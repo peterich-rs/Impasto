@@ -181,8 +181,11 @@ pub(crate) fn frame_strip(
 ) -> ProjectedCanvas {
     let mut plot = Plot::new(width, height);
     let pitch = plot.width / f64::from(visible.clamp(1, 2400));
+    let fallback_budget = data.frame_budget();
     let maximum = frame_window(data, start, visible)
-        .map(|entry| frames::duration(entry).max(entry.budget_ms))
+        .map(|frame| {
+            frames::stage_duration(frame).max(frames::effective_budget(frame, fallback_budget))
+        })
         .fold(1_f64, f64::max)
         * 1.12;
     let height = (plot.height - 14.).max(0.);
@@ -191,44 +194,90 @@ pub(crate) fn frame_strip(
     for (column, frame) in frame_window(data, start, visible).enumerate() {
         let x = column as f64 * pitch;
         let w = (pitch - 1.).max(pitch * 0.6);
-        let bottom = plot.height - 14.;
-        let mut y = bottom;
-        let series = if frame.compositor_only {
-            [0., 0., 0., 0., 0., 0., frames::duration(frame).max(0.1)]
-        } else {
-            [
-                frame.script_ms,
-                frame.layout_ms,
-                frame.record_ms,
-                frame.queue_ms,
-                frame.raster_ms,
-                frame.gpu.frame_span_us.unwrap_or_default() / 1_000.,
-                0.,
-            ]
+        let bottom = height;
+        let flags = frames::stage_flags(frame, fallback_budget);
+        let mut bar = |x, w, parts: &[(u16, f64)], over| {
+            let mut y = bottom;
+            for &(color, duration) in parts {
+                let h = (duration * scale).max(0.);
+                y -= h;
+                plot.rect(color, Rect { x, y, w, h });
+            }
+            if over {
+                plot.rect(
+                    7,
+                    Rect {
+                        x,
+                        y: y - 3.,
+                        w,
+                        h: 3.,
+                    },
+                );
+            }
         };
-        for (color, duration) in series.into_iter().enumerate() {
-            let h = (duration * scale).max(0.);
-            y -= h;
-            plot.rect(color as u16, Rect { x, y, w, h });
+        if frame.compositor_only {
+            bar(x, w, &[(6, frames::stage_duration(frame))], flags.any());
+        } else {
+            let split = frames::is_split(frame);
+            let gpu = frames::gpu_duration(frame);
+            let (sub_w, gap) = strip_halves(w);
+            let parts = [frame.script_ms, frame.layout_ms, frame.record_ms];
+            let total: f64 = parts.iter().sum();
+            let ui = frames::ui_duration(frame);
+            let ratio = if total > ui { ui / total } else { 1. };
+            let [script, layout, record] = parts.map(|ms| ms * ratio);
+            let other_ui = (ui - total).max(0.);
+            if split {
+                bar(
+                    x,
+                    sub_w,
+                    &[(0, script), (1, layout), (2, record), (3, other_ui)],
+                    flags.ui,
+                );
+                let raster_x = x + sub_w + gap;
+                if gpu > 0. {
+                    let gpu_w = sub_w * 0.4;
+                    let raster_w = sub_w - gpu_w;
+                    bar(raster_x, raster_w, &[(4, frame.raster_ms)], flags.raster);
+                    bar(raster_x + raster_w, gpu_w, &[(5, gpu)], flags.gpu);
+                } else {
+                    bar(
+                        raster_x,
+                        sub_w,
+                        &[(4, frame.raster_ms)],
+                        flags.raster || flags.gpu,
+                    );
+                }
+            } else {
+                let cpu_w = if gpu > 0. { sub_w } else { w };
+                let other_cpu =
+                    other_ui + (frames::cpu_duration(frame) - ui - frame.raster_ms).max(0.);
+                bar(
+                    x,
+                    cpu_w,
+                    &[
+                        (0, script),
+                        (1, layout),
+                        (2, record),
+                        (3, other_cpu),
+                        (4, frame.raster_ms),
+                    ],
+                    flags.ui || flags.raster,
+                );
+                if gpu > 0. {
+                    bar(x + sub_w + gap, sub_w, &[(5, gpu)], flags.gpu);
+                }
+            }
         }
-        if frame.skip_reason.is_some() {
+        if frames::failed_or_skipped(frame) {
+            let h = bottom.min(4.);
             plot.rect(
                 7,
                 Rect {
                     x,
-                    y: bottom - 4.,
+                    y: bottom - h,
                     w,
-                    h: 4.,
-                },
-            );
-        } else if frame.over_budget || frame.missed_vsync {
-            plot.rect(
-                7,
-                Rect {
-                    x,
-                    y: y - 3.,
-                    w,
-                    h: 3.,
+                    h,
                 },
             );
         }
@@ -250,16 +299,22 @@ pub(crate) fn frame_strip(
             plot.label(format!("#{}", frame.id), x + 2., bottom + 7., 72.);
         }
     }
-    if let Some(last) = frame_window(data, start, visible)
+    if let Some(budget) = frame_window(data, start, visible)
         .last()
-        .filter(|frame| frame.budget_ms > 0.)
+        .map(|frame| frames::effective_budget(frame, fallback_budget))
+        .filter(|budget| *budget > 0.)
     {
-        let y = height - last.budget_ms * scale;
+        let y = height - budget * scale;
         plot.line(81, [(0., y), (plot.width, y)], true, true);
     }
     plot.line(84, outlines, false, true);
     plot.canvas.max_y = maximum;
     plot.finish()
+}
+
+fn strip_halves(width: f64) -> (f64, f64) {
+    let gap = 1_f64.min(width * 0.55);
+    ((width - gap) * 0.5, gap)
 }
 
 pub(crate) fn hit_frame_strip(
@@ -275,14 +330,24 @@ pub(crate) fn hit_frame_strip(
     }
     let column = (x / width * f64::from(visible.clamp(1, 2400))) as usize;
     let frame = frame_window(data, start, visible).nth(column)?;
+    let fallback_budget = data.frame_budget();
+    let mut detail = format!(
+        "UI {:.1} · Raster {:.1} · GPU {:.1} · E2E {:.1} / {:.1} ms · {}",
+        frames::ui_duration(frame),
+        frame.raster_ms,
+        frames::gpu_duration(frame),
+        frame.e2e_ms,
+        frames::effective_budget(frame, fallback_budget),
+        frame.trigger,
+    );
+    let dropped = frames::dropped_vsyncs(frame, fallback_budget);
+    if dropped > 0 {
+        detail.push_str(&format!(" · +{dropped} dropped"));
+    }
     Some(Hit {
         id: frame.id.to_string(),
         name: format!("Frame #{}", frame.id),
-        detail: format!(
-            "{:.2} ms · {:.2} ms budget",
-            frames::duration(frame),
-            frame.budget_ms
-        ),
+        detail,
         path: Vec::new(),
         fields: Vec::new(),
     })
@@ -300,9 +365,13 @@ const GANTT_HEAD: f64 = 92.;
 
 fn gantt_rect(bar: &gantt::Bar, lane_height: f64, viewport: Viewport) -> Option<Rect> {
     let x_scale = (viewport.width - GANTT_HEAD - 4.).max(0.) / (viewport.end - viewport.start);
-    let x = (GANTT_HEAD + (bar.start - viewport.start) * x_scale).max(GANTT_HEAD);
-    let end = (GANTT_HEAD + (bar.start + bar.duration - viewport.start) * x_scale)
-        .min(viewport.width - 4.);
+    let right = viewport.width - 4.;
+    let mut x = (GANTT_HEAD + (bar.start - viewport.start) * x_scale).max(GANTT_HEAD);
+    let mut end = (GANTT_HEAD + (bar.start + bar.duration - viewport.start) * x_scale).min(right);
+    if bar.duration == 0. && (viewport.start..=viewport.end).contains(&bar.start) {
+        x = x.min(right - 2.).max(GANTT_HEAD);
+        end = (x + 2.).min(right);
+    }
     let depth = bar.depth as f64;
     let row = ((lane_height - 10.) / 9.).max(1.);
     let y = bar.lane as f64 * lane_height + 7. + depth * row + 16.;
@@ -620,113 +689,113 @@ fn tracks(
     plot.finish()
 }
 
-pub(crate) fn overview(
+pub(crate) fn overview_end(data: &Recording, track: u32) -> f64 {
+    match track {
+        0 | 1 => data.frames.entries().back().map_or(0., |frame| frame.at_ms),
+        2 => data
+            .runtime
+            .back()
+            .map_or(0., |entry| number(entry, "at_ms")),
+        3 => data
+            .network
+            .values()
+            .map(|record| number(record, "at_ms").max(number(record, "done_ms")))
+            .fold(0., f64::max),
+        _ => 0.,
+    }
+}
+
+pub(crate) fn overview_track(
     data: &Recording,
+    track: u32,
     width: f64,
     height: f64,
     seconds: u32,
-) -> Vec<ProjectedCanvas> {
-    let frames = data.frames.entries();
-    let end = frames
-        .back()
-        .map_or(0., |frame| frame.at_ms)
-        .max(
-            data.runtime
-                .back()
-                .map_or(0., |entry| number(entry, "at_ms")),
-        )
-        .max(
-            data.network
-                .values()
-                .map(|record| number(record, "at_ms").max(number(record, "done_ms")))
-                .fold(0., f64::max),
-        );
+    end: f64,
+) -> Option<ProjectedCanvas> {
     let start = end - f64::from(seconds.clamp(1, 120)) * 1000.;
-    let budget = frames
-        .back()
-        .map(|frame| frame.budget_ms)
-        .filter(|&budget| budget > 0.);
-    let mut requests = Vec::new();
-    let mut durations = Vec::new();
-    for entry in data.network.values() {
-        let begin = number(entry, "at_ms");
-        requests.push((begin, 1));
-        if let Some(finish) = entry["done_ms"].as_f64() {
-            requests.push((finish.max(begin), -1));
-            durations.push((finish, network::elapsed(entry)));
-        }
-    }
-    requests.sort_by(|a, b| a.0.total_cmp(&b.0));
-    durations.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut active = 0_i32;
-    vec![
-        tracks(
-            width,
-            height,
-            start,
-            end,
-            &[series(
+    let frames = data.frames.entries();
+    let frame_points = || {
+        frames
+            .iter()
+            .filter(|frame| (start..=end).contains(&frame.at_ms))
+    };
+    let (series, budget) = match track {
+        0 => (
+            vec![series(
                 84,
-                frames
-                    .iter()
-                    .map(|frame| (frame.at_ms, frames::duration(frame))),
+                frame_points().map(|frame| (frame.at_ms, frames::stage_duration(frame))),
             )],
-            budget,
+            frame_points()
+                .max_by(|a, b| a.at_ms.total_cmp(&b.at_ms))
+                .map(|frame| frames::effective_budget(frame, data.frame_budget()))
+                .filter(|&budget| budget > 0.),
         ),
-        tracks(
-            width,
-            height,
-            start,
-            end,
-            &[
-                series(0, frames.iter().map(|frame| (frame.at_ms, frame.ui_ms))),
-                series(4, frames.iter().map(|frame| (frame.at_ms, frame.raster_ms))),
+        1 => (
+            vec![
+                series(0, frame_points().map(|frame| (frame.at_ms, frame.ui_ms))),
+                series(
+                    4,
+                    frame_points().map(|frame| (frame.at_ms, frame.raster_ms)),
+                ),
                 series(
                     5,
-                    frames
-                        .iter()
+                    frame_points()
                         .filter_map(|frame| Some((frame.at_ms, frame.gpu.frame_span_us? / 1000.))),
                 ),
             ],
             None,
         ),
-        tracks(
-            width,
-            height,
-            start,
-            end,
-            &[series(
+        2 => (
+            vec![series(
                 48,
-                data.runtime.iter().map(|entry| {
-                    (
-                        number(entry, "at_ms"),
-                        number(&entry["value"]["detail"], "memory_used_size") / 1048576.,
-                    )
+                data.runtime.iter().filter_map(|entry| {
+                    let time = entry["at_ms"].as_f64()?;
+                    let heap = entry["value"]["detail"]["memory_used_size"].as_f64()?;
+                    (start..=end)
+                        .contains(&time)
+                        .then_some((time, heap / 1048576.))
                 }),
             )],
             None,
         ),
-        tracks(
-            width,
-            height,
-            start,
-            end,
-            &[
-                series(
-                    22,
-                    requests.into_iter().map(|(time, delta)| {
-                        active += delta;
-                        (time, f64::from(active.max(0)))
-                    }),
-                ),
-                series(
-                    23,
-                    durations.into_iter().map(|(time, ms)| (time, ms / 1000.)),
-                ),
-            ],
-            None,
-        ),
-    ]
+        3 => (overview_network(data, start, end), None),
+        _ => return None,
+    };
+    (budget.is_some() || series.iter().any(|series| !series.points.is_empty()))
+        .then(|| tracks(width, height, start, end, &series, budget))
+}
+
+fn overview_network(data: &Recording, start: f64, end: f64) -> Vec<Series> {
+    let mut changes = Vec::new();
+    let mut durations = Vec::new();
+    let mut active = 0_i32;
+    for entry in data.network.values() {
+        let begin = number(entry, "at_ms");
+        let finish = entry["done_ms"].as_f64().map(|time| time.max(begin));
+        if begin < start && finish.is_none_or(|time| time >= start) {
+            active += 1;
+        } else if (start..=end).contains(&begin) {
+            changes.push((begin, 1));
+        }
+        if let Some(finish) = finish.filter(|time| (start..=end).contains(time)) {
+            changes.push((finish, -1));
+            durations.push((finish, network::elapsed(entry) / 1000.));
+        }
+    }
+    if changes.is_empty() && active == 0 {
+        return Vec::new();
+    }
+    changes.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    durations.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut points = vec![(start, f64::from(active))];
+    for (time, change) in changes {
+        points.push((time, f64::from(active)));
+        active += change;
+        points.push((time, f64::from(active)));
+    }
+    points.push((end, f64::from(active)));
+    vec![series(22, points), series(23, durations)]
 }
 
 pub(crate) fn heap(data: &Recording, width: f64, height: f64) -> ProjectedCanvas {
@@ -900,6 +969,62 @@ pub(crate) fn resources(data: &Recording, width: f64, height: f64) -> Vec<Projec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_bars_compare_ui_raster_and_gpu_independently_against_budget() {
+        let mut data = Recording::default();
+        data.frames.update(
+            false,
+            vec![FrameRecord {
+                id: 1,
+                presented: true,
+                trigger: "vsync".to_owned(),
+                ui_ms: 10.,
+                script_ms: 6.,
+                layout_ms: 4.,
+                raster_ms: 10.,
+                e2e_ms: 24.,
+                missed_vsync: true,
+                budget_ms: 16.,
+                topology: Some("platform-ui".to_owned()),
+                gpu: devtools_protocol::GpuTiming {
+                    frame_span_us: Some(8_000.),
+                    ..Default::default()
+                },
+                ..FrameRecord::default()
+            }],
+        );
+        let chart = frame_strip(&data, 100., 100., 0, 1, None, None);
+        let y_budget = 86. - 16. * 86. / chart.max_y;
+        let rect = |color| {
+            let bytes = &chart
+                .rect_buckets
+                .iter()
+                .find(|bucket| bucket.color == color)
+                .unwrap()
+                .rects
+                .0;
+            bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .copied()
+                .map(f64::from_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        let ui = rect(1);
+        let raster = rect(4);
+        let gpu = rect(5);
+        assert!(ui[0] + ui[2] < raster[0]);
+        assert!(raster[0] < gpu[0]);
+        assert!(ui[1] > y_budget && raster[1] > y_budget && gpu[1] > y_budget);
+        assert!(!chart.rect_buckets.iter().any(|bucket| bucket.color == 7));
+        let tip = hit_frame_strip(&data, 25., 100., 0, 1).unwrap().detail;
+        assert_eq!(
+            tip,
+            "UI 10.0 · Raster 10.0 · GPU 8.0 · E2E 24.0 / 16.0 ms · vsync"
+        );
+    }
 
     #[test]
     fn projection_clips_rects_and_agrees_with_frame_hit() {

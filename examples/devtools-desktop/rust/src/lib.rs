@@ -477,6 +477,19 @@ impl Desktop {
             .unwrap_or_default()
     }
 
+    pub fn frame_revision(&self, frame_id: String) -> Option<String> {
+        let id = frame_id.parse().ok()?;
+        let state = self.read();
+        let data = &state.data;
+        let revision = data.frame_revision(id)?;
+        let capture = data.capture["id"].as_u64().unwrap_or_default();
+        let has_spans = data.spans.contains_key(&id);
+        Some(format!(
+            "{}:{id}:{revision}:{capture}:{has_spans}",
+            state.generation
+        ))
+    }
+
     pub fn frame_context(&self, frame_id: String) -> Vec<Row> {
         let state = self.read();
         let Ok(frame) = frame_id.parse::<u64>() else {
@@ -563,7 +576,7 @@ impl Desktop {
             .frames
             .entries()
             .iter()
-            .max_by(|a, b| frames::duration(a).total_cmp(&frames::duration(b)))
+            .max_by(|a, b| frames::stage_duration(a).total_cmp(&frames::stage_duration(b)))
             .map(|frame| frame.id.to_string())
     }
 
@@ -579,8 +592,8 @@ impl Desktop {
             all.iter()
                 .filter(|frame| (a.min(b)..=a.max(b)).contains(&frame.id))
         };
-        let selected_stats = frames::stats(selected());
-        let all_stats = frames::stats(all.iter());
+        let selected_stats = frames::stats(selected(), state.data.frame_budget());
+        let all_stats = frames::stats(all.iter(), state.data.frame_budget());
         let average = |sum: f64, count: u32| sum / f64::from(count.max(1));
         Ok(FrameComparison {
             selected_ui_ms: average(
@@ -692,7 +705,7 @@ impl Desktop {
             state.data.capture = capture;
             state.data.spans.clear();
             state.trace = None;
-            state.touch();
+            state.changed(Channel::Frames);
             std::mem::take(&mut state.capture_sampler)
         })?;
         if stop_sampler {
@@ -1694,13 +1707,19 @@ impl Desktop {
         Ok(actions::format_curl(record))
     }
 
-    pub fn project_overview_tracks(
+    pub fn overview_window_end(&self, track: u32) -> f64 {
+        projection::overview_end(&self.read().data, track)
+    }
+
+    pub fn project_overview_track(
         &self,
+        track: u32,
         width: f64,
         height: f64,
         seconds: u32,
-    ) -> Vec<ProjectedCanvas> {
-        projection::overview(&self.read().data, width, height, seconds)
+        end_ms: f64,
+    ) -> Option<ProjectedCanvas> {
+        projection::overview_track(&self.read().data, track, width, height, seconds, end_ms)
     }
 
     pub fn get_live_audits(&self) -> Vec<Finding> {

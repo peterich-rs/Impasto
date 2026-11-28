@@ -48,7 +48,7 @@ export function Search(props: { value: string; change: (value: string) => void; 
   const c = useTokens();
   return <Field
     style={{ width: props.width ?? 220, minWidth: 100 }}
-    controlProps={{ style: { height: 28, minHeight: 28, paddingLeft: 8, paddingRight: 8, backgroundColor: c().canvas, borderColor: c().border, borderRadius: 4 } }}
+    controlProps={{ style: { height: 28, minHeight: 28, paddingLeft: 8, paddingRight: 8, paddingTop: 0, paddingBottom: 0, backgroundColor: c().canvas, borderColor: c().border, borderWidth: 1, borderRadius: 4 } }}
     textProps={{ style: { fontSize: 12, color: c().primary } }}
     value={props.value}
     placeholder={props.placeholder}

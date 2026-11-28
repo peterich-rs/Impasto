@@ -68,6 +68,7 @@ pub(crate) fn bars(frame: &FrameRecord, capture: Option<&Value>) -> Vec<Bar> {
         let start = 0.;
         let mut ui = start;
         for (name, duration, color) in [
+            ("Gesture", frame.gesture_ms, 0),
             ("Motion", frame.motion_ms, 0),
             ("Dispatch", frame.dispatch_ms, 0),
             ("Timers", frame.timer_ms, 0),
@@ -76,8 +77,8 @@ pub(crate) fn bars(frame: &FrameRecord, capture: Option<&Value>) -> Vec<Bar> {
             ("Reactive flush", frame.flush_ms, 0),
             ("Layout callbacks", frame.layout_cb_ms, 1),
             ("Layout", frame.laywork_ms, 1),
-            ("Record", frame.record_ms, 2),
             ("Canvas record", frame.canvas_record_ms, 2),
+            ("Record", frame.record_ms, 2),
             ("Semantics", frame.semantics_ms, 2),
         ] {
             ui = stage(1, ui, name, duration, color);
@@ -88,20 +89,50 @@ pub(crate) fn bars(frame: &FrameRecord, capture: Option<&Value>) -> Vec<Bar> {
         let ui_end = frame.ui_ms.max(ui);
         let mut raster = stage(0, ui_end, "Raster queue", frame.queue_ms, 3);
         let raster_start = raster;
+        let picture_prepare = frame.picture_prepare_ms.max(0.);
+        let glyph_prepare = frame.glyph_prepare_ms.clamp(0., picture_prepare);
+        raster = stage(
+            2,
+            raster,
+            "Compile pictures",
+            picture_prepare - glyph_prepare,
+            4,
+        );
+        raster = stage(2, raster, "Prepare glyphs", glyph_prepare, 4);
+        let mut remaining = frame.present_ms.max(0.);
         for (name, duration) in [
-            ("Prepare pictures", frame.picture_prepare_ms),
-            ("Prepare glyphs", frame.glyph_prepare_ms),
-            ("Compose", frame.compose_ms),
             ("Encode", frame.encode_ms),
+            ("Acquire surface", frame.acquire_ms),
             ("Raster flush", frame.raster_flush_ms),
             ("Queue submit", frame.queue_submit_ms),
-            ("Acquire surface", frame.acquire_ms),
-            ("Present", frame.present_ms),
+            ("Surface present", frame.surface_present_ms),
         ] {
+            // Encode combines the work done on both sides of late acquire.
+            let duration = duration.clamp(0., remaining);
             raster = stage(2, raster, name, duration, 4);
+            remaining -= duration;
         }
-        if raster <= raster_start {
-            stage(2, raster_start, "Raster work", frame.raster_ms, 4);
+        if let Some(error) = frame.present_error.as_deref() {
+            bars.push(Bar {
+                id: "Present failed".to_owned(),
+                label: "Present failed".to_owned(),
+                lane: 2,
+                depth: 0,
+                start: raster,
+                duration: remaining,
+                color: 7,
+                fields: json!({"phase": "Present failed", "duration_ms": remaining, "reason": error}),
+            });
+        } else {
+            let label = if remaining == frame.present_ms {
+                "Present"
+            } else {
+                "Present overhead"
+            };
+            raster = stage(2, raster, label, remaining, 4);
+            if raster <= raster_start && frame.present_ms == 0.0 {
+                stage(2, raster_start, "Raster work", frame.raster_ms, 4);
+            }
         }
     }
     if !bars.iter().any(|bar| bar.lane == 4) {
@@ -119,4 +150,42 @@ pub(crate) fn bars(frame: &FrameRecord, capture: Option<&Value>) -> Vec<Bar> {
         }
     }
     bars
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raster_breakdown_does_not_add_parent_spans_to_their_stages() {
+        let mut frame = FrameRecord {
+            picture_prepare_ms: 2.,
+            glyph_prepare_ms: 0.5,
+            compose_ms: 3.5,
+            encode_ms: 2.,
+            acquire_ms: 0.5,
+            raster_flush_ms: 0.5,
+            queue_submit_ms: 0.5,
+            surface_present_ms: 0.25,
+            present_ms: 5.,
+            ..FrameRecord::default()
+        };
+        for error in [None, Some("acquire missed".to_owned())] {
+            frame.present_error = error;
+            let stages = bars(&frame, None);
+            let raster: Vec<_> = stages.iter().filter(|stage| stage.lane == 2).collect();
+            assert_eq!(raster.iter().map(|stage| stage.duration).sum::<f64>(), 7.);
+            assert_eq!(raster[0].duration, 1.5);
+            assert_eq!(raster[1].duration, 0.5);
+            assert!(
+                raster
+                    .windows(2)
+                    .all(|pair| pair[0].start + pair[0].duration == pair[1].start)
+            );
+            assert_eq!(
+                raster.iter().any(|stage| stage.label == "Present failed"),
+                frame.present_error.is_some(),
+            );
+        }
+    }
 }

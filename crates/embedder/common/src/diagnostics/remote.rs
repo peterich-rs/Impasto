@@ -940,7 +940,7 @@ fn frame_spans(capture: &TraceCapture, frame_id: u64) -> Option<Value> {
         })
     }).collect();
     Some(json!({
-        "capture_id": capture.id, "frame": frame_value(frame, FrameFields::Full),
+        "capture_id": capture.id, "frame": remote_frame::record(frame),
         "spans": spans, "omitted_spans": omitted,
     }))
 }
@@ -1003,9 +1003,18 @@ fn frame_value(frame: &super::FrameSample, fields: FrameFields) -> Value {
         });
     json!({
         "id": frame.number, "revision": frame.changed_at, "budget_ms": frame.budget_ms,
+        "at_ms": frame.at_ms, "presented": frame.presented, "present_ms": frame.present_ms,
+        "present_error": frame.present_error.map(|status| status.to_string()),
+        "surface_present_ms": frame.raster.surface_present.as_secs_f64() * 1_000.0,
         "ui_ms": frame.schedule.ui_ms(), "raster_ms": frame.schedule.raster_ms(),
         "queue_ms": frame.schedule.queue_ms(), "e2e_ms": frame.schedule.e2e_ms(),
-        "topology": frame.schedule.topology,
+        "work_ms": frame.work_ms, "skip_reason": frame.schedule.skip_reason,
+        "topology": frame.schedule.topology, "missed_vsync": frame.schedule.missed_vsync,
+        "trigger": frame.schedule.trigger.name(),
+        "target_lead_ms": frame.schedule.target_lead_ms(),
+        "deadline_overrun_ms": frame.schedule.deadline_overrun_ms(),
+        "ui_over_budget": frame.ui_over_budget, "raster_over_budget": frame.raster_over_budget,
+        "gpu_over_budget": frame.gpu_over_budget, "input_events": frame.input_events(),
         "compositor_only": frame.schedule.compositor_only,
         "compositor_block": frame.schedule.compositor_block.map(|reason| json!({
             "reason": reason.name(), "node": reason.node().map(|id| id.to_string()),
@@ -1096,6 +1105,7 @@ mod tests {
             )
             .await;
             assert_eq!(initial["result"]["frames"]["reset"], false);
+            assert!(initial["result"]["frames"]["sampled_at_ms"].is_number());
             assert_eq!(initial["result"]["errors"]["reset"], true);
             hub.push_frame(super::super::FrameSample {
                 number: 42,

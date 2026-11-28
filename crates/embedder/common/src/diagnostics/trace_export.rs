@@ -727,6 +727,7 @@ impl Builder {
                     "gpu_status",
                     FieldValue::Str(frame.gpu.status.name().to_owned()),
                 ),
+                ("gpu_over_budget", FieldValue::Bool(frame.gpu_over_budget)),
             ];
             self.instant(
                 GPU_SUMMARY_TRACK_UUID,

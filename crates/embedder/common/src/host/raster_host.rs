@@ -193,7 +193,9 @@ pub(super) fn raster_frame(
     );
     let entered = span.enter();
     tracing::debug!(target: "impasto::render", id = submission.number, "Impasto raster");
-    if let Some(schedule) = submission.schedule.as_mut() {
+    if let Some(schedule) = submission.schedule.as_mut()
+        && !schedule.compositor_only
+    {
         schedule.raster_start_ns = mono_ns();
     }
     if let Some(hub) = &submission.telemetry {

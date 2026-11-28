@@ -102,6 +102,15 @@ pub(super) struct GpuFrameTiming {
     pub(super) passes: Vec<GpuPassTiming>,
 }
 
+#[derive(Default, ImpastoType)]
+pub(super) struct FramePage {
+    pub(super) revision: f64,
+    pub(super) entries: Vec<FrameSample>,
+    pub(super) sampled_at: f64,
+    pub(super) first_frame_at: Option<f64>,
+    pub(super) refresh_rate: Option<f64>,
+}
+
 #[derive(ImpastoType)]
 pub(super) struct FrameSample {
     pub(super) seq: f64,
@@ -112,6 +121,17 @@ pub(super) struct FrameSample {
     pub(super) raster_ms: f64,
     pub(super) queue_ms: f64,
     pub(super) compositor_only: Option<bool>,
+    pub(super) topology: Option<String>,
+    pub(super) skip_reason: Option<String>,
+    pub(super) presented: bool,
+    pub(super) missed_vsync: bool,
+    pub(super) trigger: String,
+    pub(super) target_lead_ms: Option<f64>,
+    pub(super) deadline_overrun_ms: Option<f64>,
+    pub(super) gpu_span_ms: Option<f64>,
+    pub(super) ui_over_budget: bool,
+    pub(super) raster_over_budget: bool,
+    pub(super) gpu_over_budget: bool,
     pub(super) compositor_block: Option<String>,
     pub(super) compositor_block_node: Option<String>,
     pub(super) e2e_ms: f64,

@@ -21,9 +21,20 @@ pub struct FrameRecord {
     pub record_ms: f64,
     pub submit_ms: f64,
     pub present_ms: f64,
+    /// Whether the agent's surface presentation call succeeded.
+    pub presented: bool,
+    pub present_error: Option<String>,
+    pub surface_present_ms: f64,
     pub over_budget: bool,
     pub compositor_only: bool,
     pub missed_vsync: bool,
+    pub trigger: String,
+    pub target_lead_ms: Option<f64>,
+    pub deadline_overrun_ms: Option<f64>,
+    pub ui_over_budget: bool,
+    pub raster_over_budget: bool,
+    pub gpu_over_budget: bool,
+    pub input_events: u32,
     pub topology: Option<String>,
     pub skip_reason: Option<String>,
     pub compositor_block: Option<CompositorBlock>,
@@ -64,7 +75,7 @@ pub struct FrameRecord {
     pub textures: u32,
     pub atlas_entries: u32,
     pub atlas_hits: u32,
-    pub repainted_view_count: u32,
+    pub repainted_view_count: Option<u32>,
     pub vertex_bytes: u64,
     pub uniform_bytes: u64,
     pub stop_bytes: u64,
@@ -73,33 +84,19 @@ pub struct FrameRecord {
     pub atlas_upload_bytes: u64,
     pub gpu: GpuTiming,
     pub runtime_sample: Option<RuntimeSample>,
-    #[serde(default)]
     pub picture_prepare_ms: f64,
-    #[serde(default)]
     pub glyph_prepare_ms: f64,
-    #[serde(default)]
     pub compose_ms: f64,
-    #[serde(default)]
     pub encode_ms: f64,
-    #[serde(default)]
     pub raster_flush_ms: f64,
-    #[serde(default)]
     pub queue_submit_ms: f64,
-    #[serde(default)]
     pub acquire_ms: f64,
-    #[serde(default)]
     pub atlas_misses: u32,
-    #[serde(default)]
     pub atlas_evictions: u32,
-    #[serde(default)]
     pub atlas_bytes: u64,
-    #[serde(default)]
     pub image_resident_bytes: u64,
-    #[serde(default)]
     pub offscreen_peak_bytes: u64,
-    #[serde(default)]
     pub offscreen_passes: u32,
-    #[serde(default)]
     pub direct_present: bool,
 }
 
@@ -148,40 +145,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn older_frames_default_raster_and_resource_details() -> Result<(), serde_json::Error> {
+    fn frame_record_round_trips_presentation_and_stage_metrics() -> Result<(), serde_json::Error> {
         let frame = FrameRecord {
             id: 7,
-            flush_ms: 1.25,
-            raster_flush_ms: 0.4,
+            presented: true,
+            trigger: "vsync".to_owned(),
+            target_lead_ms: Some(16.5),
+            deadline_overrun_ms: Some(2.5),
+            missed_vsync: true,
+            ui_over_budget: true,
+            raster_over_budget: false,
+            gpu_over_budget: true,
+            input_events: 4,
+            surface_present_ms: 0.25,
+            raster_flush_ms: 0.5,
             ..FrameRecord::default()
         };
-        let mut wire = serde_json::to_value(frame)?;
-        if let Some(fields) = wire.as_object_mut() {
-            for name in [
-                "picture_prepare_ms",
-                "glyph_prepare_ms",
-                "compose_ms",
-                "encode_ms",
-                "raster_flush_ms",
-                "queue_submit_ms",
-                "acquire_ms",
-                "atlas_misses",
-                "atlas_evictions",
-                "atlas_bytes",
-                "image_resident_bytes",
-                "offscreen_peak_bytes",
-                "offscreen_passes",
-                "direct_present",
-            ] {
-                fields.remove(name);
-            }
-        }
-        let old: FrameRecord = serde_json::from_value(wire)?;
-        assert_eq!(old.id, 7);
-        assert_eq!(old.flush_ms, 1.25);
-        assert_eq!(old.raster_flush_ms, 0.0);
-        assert_eq!(old.atlas_bytes, 0);
-        assert!(!old.direct_present);
+        let wire = serde_json::to_value(frame)?;
+        assert_eq!(wire["trigger"], "vsync");
+        assert_eq!(wire["presented"], true);
+        let decoded: FrameRecord = serde_json::from_value(wire.clone())?;
+        assert_eq!(serde_json::to_value(decoded)?, wire);
         Ok(())
     }
 }

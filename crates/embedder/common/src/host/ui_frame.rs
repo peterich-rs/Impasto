@@ -10,10 +10,10 @@ use super::{
     Acks, FramePipeline, FrameSubmission, Inbox, RasterCompletion, RasterHost, RasterPort,
     RunnerSlot, UiHost, arm, compositor_animation, elapsed_ms, end_frame, fault_followup,
     layer_tree_line, ms_to_ns, next_frame_number, raster_frame, refresh_wake, session_call,
-    surface_cmds,
+    surface_cmds, target_present_ns,
 };
 use super::{issue_list, schedule_gpu_poll, write_inspect};
-use crate::diagnostics::telemetry::{ScheduleTiming, mono_ns, mono_ns_at};
+use crate::diagnostics::telemetry::{FrameTrigger, ScheduleTiming, mono_ns, mono_ns_at};
 use crate::error::BootError;
 use crate::input::FrameInput;
 
@@ -70,13 +70,14 @@ pub(super) fn on_frame(
     }
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     if let Some(session) = runtime.session.as_mut() {
-        session.begin_repaint_frame(
-            runtime
-                .telemetry
-                .as_deref()
-                .is_some_and(crate::diagnostics::TelemetryHub::tracks_repaints),
-            runtime.frame_number,
-        );
+        let tracks_repaints = runtime
+            .telemetry
+            .as_deref()
+            .is_some_and(crate::diagnostics::TelemetryHub::tracks_repaints);
+        session.begin_repaint_frame(tracks_repaints, runtime.frame_number);
+        if tracks_repaints && let Some(schedule) = schedule.as_mut() {
+            schedule.repainted_view_count = Some(0);
+        }
     }
     let (paused, gesture_ms) = deliver_frame_input(runtime, time);
     let session_started = Instant::now();
@@ -406,7 +407,13 @@ fn frame_schedule(
             ui_start_ns.saturating_sub(ms_to_ns(queued_ms))
         });
         ScheduleTiming {
+            trigger: if from_vsync {
+                FrameTrigger::Vsync
+            } else {
+                FrameTrigger::Wake
+            },
             vsync_ns,
+            target_present_ns: vsync_ns.and_then(|base_ns| target_present_ns(base_ns, time)),
             ui_start_ns,
             topology: Some(runtime.queue_placement),
             in_flight_depth: u32::try_from(runtime.frames.in_flight).ok(),
@@ -513,10 +520,9 @@ fn run_session(
         Ok(mut output) => {
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
             if let Some(hub) = runtime.telemetry.as_ref() {
-                if let Some(schedule) = schedule {
-                    schedule.repainted_view_count = output.repaints.as_ref().map_or(0, |batch| {
-                        u32::try_from(batch.total_repainted_views).unwrap_or(u32::MAX)
-                    });
+                if let (Some(schedule), Some(batch)) = (schedule.as_mut(), &output.repaints) {
+                    schedule.repainted_view_count =
+                        Some(u32::try_from(batch.total_repainted_views).unwrap_or(u32::MAX));
                 }
                 hub.note_repaints(output.repaints.take(), session.take_picked_view());
                 if let Some(tree) = output.layers.as_ref().or(runtime.latest.as_ref()) {

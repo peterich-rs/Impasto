@@ -1,5 +1,5 @@
 import { For, Show, createMemo, createSignal, createTrackedEffect } from "solid-js";
-import { Column, Pressable, Row, ScrollArea, View } from "@impasto/solid-ui";
+import { Column, Pressable, RepaintBoundary, Row, ScrollArea, View } from "@impasto/solid-ui";
 import { scene } from "@impasto/solid-renderer";
 import * as core from "@app/devtools-core";
 import { Bar, Divider, Empty, Label, Spacer, Tool, ms } from "../components/ui";
@@ -26,8 +26,18 @@ export function Workbench() {
   const [targets, showTargets] = createSignal(false);
   const [consoleHeight, setConsoleHeight] = createSignal(225);
   const state = ws.state;
-  const hasSession = createMemo(() => !!ws.tick()?.session);
-  const name = createMemo(() => ws.tick()?.session?.appName || "");
+  const hasSession = createMemo(() => !!ws.session());
+  const name = createMemo(() => ws.session()?.appName || "");
+  const frameStatus = createMemo(() => {
+    const sample = ws.tick()?.stats;
+    const p95 = sample?.count ? ms(sample.p95Ms) : "—";
+    const hitch = `${ws.hitchLabel()} hitch`;
+    const cadence = ws.cadenceLabel();
+    return sample?.idle ? `${cadence} · ${hitch} · P95 ${p95}` : `${hitch} · ${cadence} · P95 ${p95}`;
+  });
+  const frameCount = createMemo(() => ws.tick()?.frameCount ?? 0);
+  const logCount = createMemo(() => ws.tick()?.logCount ?? 0);
+  const rtt = createMemo(() => ws.tick()?.rttMs);
   const activeProfile = createMemo(() => profiles.find(item => item.id === ws.tick()?.profile) ?? profiles[1]);
   const connection = () => state() === "connected" ? ws.tick()?.paused ? "Paused" : "Live"
     : state() === "connecting" ? "Connecting" : state() === "reconnecting" ? "Reconnecting"
@@ -85,6 +95,10 @@ export function Workbench() {
       <Tool label="Cmd K" icon="search" active={ws.command()} onClick={toggleCommands} />
     </Row>
     <Divider />
+    <Show when={ws.inspectingSelf()}>
+      <Bar><Icon name="warning" color={c().warn} /><Label tone={c().warn}>Inspecting this DevTools window · telemetry updates can trigger new frames</Label></Bar>
+      <Divider />
+    </Show>
     <Show when={state() === "reconnecting" || state() === "offline_snapshot" || ws.tick()?.reconnectedNewPid}>
       <View style={{ backgroundColor: c().elevated, flexShrink: 0 }}>
         <Bar>
@@ -139,12 +153,13 @@ export function Workbench() {
       <Tool label="Forward" icon="chevron" iconOnly disabled={ws.nav.position().index + 1 === ws.nav.position().total} onClick={() => ws.nav.step(1)} />
       <View style={{ width: 6, height: 6, borderRadius: 3, flexShrink: 0, backgroundColor: color() }} />
       <Label size={11} tone={color()}>{connection()}</Label>
-      <Show when={ws.tick()?.rttMs != null}><Label mono subtle size={11}>{ms(ws.tick()?.rttMs)} RTT</Label></Show>
+      <Show when={rtt() != null}><Label mono subtle size={11}>{ms(rtt())} RTT</Label></Show>
       <View style={{ flex: 1, minWidth: 0 }}><Label subtle size={11}>{ws.notice() || ws.tick()?.message || ""}</Label></View>
       <Show when={hasSession()}>
-        <Label mono subtle size={11}>{ws.tick()?.stats.fps.toFixed(0)} fps</Label>
-        <Label mono subtle size={11}>P95 {ms(ws.tick()?.stats.p95Ms)}</Label>
-        <Label mono subtle size={11}>{ws.tick()?.frameCount} frames · {ws.tick()?.logCount} logs</Label>
+        <RepaintBoundary style={{ flexDirection: "row", alignItems: "center", gap: 9, flexShrink: 0 }}>
+          <Label mono subtle size={11}>{frameStatus()}</Label>
+          <Label mono subtle size={11}>{frameCount()} frames · {logCount()} logs</Label>
+        </RepaintBoundary>
       </Show>
     </Row>
 
@@ -159,13 +174,14 @@ export function Workbench() {
         <Divider />
         <Show when={ws.sessions().length > 0} fallback={<Empty title="No running targets" hint="Start a local app with DevTools enabled, or attach an Android or iOS device using the CLI." />}>
           <ScrollArea style={{ height: Math.min(ws.sessions().length * 34, 280), minHeight: 0 }}>
-            <For each={ws.sessions()}>{target => <Pressable role={1} accessibilityLabel={target.name}
-              onClick={() => { showTargets(false); void ws.attach(target.id); }}
+            <For each={ws.sessions()} keyed={target => target.id}>{target => <Pressable role={1} accessibilityLabel={target().name}
+              onClick={() => { showTargets(false); void ws.attach(target().id); }}
               style={{ height: 34, flexDirection: "row", alignItems: "center", gap: 8, paddingLeft: 12, paddingRight: 12,
-                backgroundColor: target.id === ws.current() ? c().selected : c().panel, cursor: "pointer" }}>
-              <Icon name="target" /><Label>{target.name}</Label><Spacer />
-              <Label mono subtle size={10}>{target.platform} · {target.id}</Label>
-              <Show when={target.hasSourceMap}><Label subtle size={10}>Symbols</Label></Show>
+                backgroundColor: target().id === ws.current() ? c().selected : c().panel, cursor: "pointer" }}>
+              <Icon name="target" /><Label>{target().name}</Label><Spacer />
+              <Show when={target().isSelf}><Label subtle size={10}>This DevTools</Label></Show>
+              <Label mono subtle size={10}>{target().platform} · {target().id}</Label>
+              <Show when={target().hasSourceMap}><Label subtle size={10}>Symbols</Label></Show>
             </Pressable>}</For>
           </ScrollArea>
         </Show>

@@ -194,8 +194,8 @@ export function NetworkPage() {
                 <InteractiveCanvas label="Network waterfall" height={162} project={(w, h) => {
                   ws.network(); return core.projectNetworkWaterfall(token(), hop() ?? null, w, h);
                 }} />
-                <For each={(ws.network(), core.queryRedirects(token(), 0, 24).rows)}>{row =>
-                  <Tool label={`Hop ${Number(row.id) + 1} · ${row.kind}`} active={hop() === Number(row.id)} onClick={() => setHop(current => current === Number(row.id) ? undefined : Number(row.id))} />
+                <For each={(ws.network(), core.queryRedirects(token(), 0, 24).rows)} keyed={row => row.id}>{row =>
+                  <Tool label={`Hop ${Number(row().id) + 1} · ${row().kind}`} active={hop() === Number(row().id)} onClick={() => setHop(current => current === Number(row().id) ? undefined : Number(row().id))} />
                 }</For>
                 <Show when={hop() != null}><Label mono subtle lines={4}>{core.queryRedirects(token(), hop() ?? 0, 1).rows[0]?.detail}</Label></Show>
               </Section>
@@ -243,9 +243,9 @@ export function NetworkPage() {
         <For each={[
           entry().status, entry().method || "—", entry().url || "—", entry().initiator || "—", entry().protocol ? (entry().reused ? `${entry().protocol} ↻` : entry().protocol) : "—",
           bytes(entry().bytes), ms(entry().elapsedMs),
-        ]}>{(value, index) => <View style={{ width: columnSizes[index()] || undefined, flex: index() === 2 ? 1 : undefined, minWidth: 0 }}>
-          <Label size={11} mono={index() !== 2} subtle={index() > 2}
-            tone={index() === 0 ? (/^[45]|failed/.test(value) ? c().danger : value.startsWith("2") ? c().ok : c().warn) : undefined}>{value}</Label>
+        ]} keyed={false}>{(value, index) => <View style={{ width: columnSizes[index] || undefined, flex: index === 2 ? 1 : undefined, minWidth: 0 }}>
+          <Label size={11} mono={index !== 2} subtle={index > 2}
+            tone={index === 0 ? (/^[45]|failed/.test(value()) ? c().danger : value().startsWith("2") ? c().ok : c().warn) : undefined}>{value()}</Label>
         </View>}</For>
         <Waterfall segments={entry().segments} />
       </Pressable>

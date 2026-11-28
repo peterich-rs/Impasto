@@ -17,6 +17,7 @@ pub struct TargetSummary {
     pub project_root: Option<String>,
     pub framework_root: Option<String>,
     pub has_source_map: bool,
+    pub is_self: bool,
 }
 
 #[derive(Clone)]
@@ -42,6 +43,7 @@ impl Target {
                     .as_ref()
                     .map(|path| path.display().to_string()),
                 has_source_map: self.symbol_path().is_some_and(Path::is_file),
+                is_self: entry.pid == std::process::id(),
             },
             Self::Device(entry) => {
                 let platform = match entry.device_kind {
@@ -56,6 +58,7 @@ impl Target {
                     project_root: Some(entry.project_root.display().to_string()),
                     framework_root: None,
                     has_source_map: self.symbol_path().is_some_and(Path::is_file),
+                    is_self: false,
                 }
             }
         }

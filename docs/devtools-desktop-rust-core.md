@@ -236,7 +236,8 @@ stateDiagram-v2
 
 | 规则 ID | 触发条件 | 建议与深链目标（`target_intent`） |
 |---|---|---|
-| `frame.jank_burst` | 最近 60 帧内超预算帧 `>= 3` 帧，或单帧 `e2e_ms > 2 * budget_ms` | 定位到最慢帧 → `Frames` 页选中该 `frame_id` 并展开 `Breakdown` |
+| `frame.jank_burst` | 最近 60 帧的 Hitch 达到 `10 ms/s`、累计掉帧达到 3 次或单帧瓶颈超过预算两倍时为 critical。Hitch 从 `5 ms/s` 起为 warning | 定位到掉帧最多的帧 → `Frames` 页选中该 `frame_id` 并展开 `Breakdown` |
+| `frame.idle_repaint_churn` | 最近 5 秒内的帧跨度至少 2 秒且包含至少 10 帧。无输入的 Wake 呈现从 `2/s` 起为 info，从 `20/s` 起为 warning | 定位到瓶颈耗时最高的后台帧，列出布局原因、定时器耗时与重绘数 |
 | `frame.compositor_block` | 连续 `>= 5` 帧出现 `compositor_block.is_some()` | 指出阻断原因 `reason` 与 `node` → 跳转 `Views` 选中该节点 |
 | `view.repaint_hotspot` | 某节点在近 60 帧重绘次数 `>= 30` 且含 `FullPictureRebuild` 或 `CanvasRedraw` | 提示加 `RepaintBoundary` 或隔离响应式读取 → 跳转 `Views` 选中该节点 |
 | `view.layout_overflow` | `RepaintStore.layout_issues` 非空 | 列出溢出像素 `excess` 最大的容器 → 跳转 `Views (Layout Issues)` |
@@ -332,7 +333,7 @@ pub struct ProjectedCanvas {
 
 | 导出方法 | 说明 |
 |---|---|
-| `project_frame_strip(width, height, start_idx, visible_count, selected_id, range_start, range_end)` | 返回 `ProjectedCanvas`（堆叠帧柱 + 预算红线 + 选中框） |
+| `project_frame_strip(width, height, start_idx, visible_count, selected_id, range_start, range_end)` | 返回 `ProjectedCanvas`（Split 阶段并排柱 + 预算红线 + 选中框） |
 | `hit_test_frame_strip(x, width, start_idx, visible_count)` | 返回命中 `Option<u64>`（`frame_id`）及轻量悬浮 Tooltip 摘要 |
 | `get_frame_detail(frame_id)` | 返回单帧完整分阶段指标、Raster 4 阶段与上传字节、GPU Pass 列表、响应式计数 |
 | `compare_frame_range(start_id, end_id)` | 返回多帧框选区间的 P50/P95/均值/掉帧数对比统计 |

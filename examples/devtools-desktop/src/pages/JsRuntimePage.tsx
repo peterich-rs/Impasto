@@ -30,6 +30,7 @@ function ProfileTable(props: {
 
 export function JsRuntimePage() {
   const ws = useWorkspace();
+  const gcHistory = createMemo(() => { ws.runtime(); ws.generation(); return core.queryGcHistory(); });
   const c = useTokens();
   const [tab, setTab] = createSignal("flamegraph");
   const [mode, setMode] = createSignal("flame");
@@ -123,9 +124,9 @@ export function JsRuntimePage() {
       <Show when={tab() === "console"} fallback={
         <Show when={tab() === "resources"} fallback={<Pane>
           <Section title="GC history">
-            <Show when={(ws.runtime(), core.queryGcHistory().length)} fallback={<Label subtle>No GC measurements retained</Label>}>
-              <For each={core.queryGcHistory()}>{row => <Tool label={`${row.name} · ${row.detail}`} onClick={() => {
-                setGc(core.gcDetail(Number(row.id))); ws.showInspector(true);
+            <Show when={gcHistory().length > 0} fallback={<Label subtle>No GC measurements retained</Label>}>
+              <For each={gcHistory()} keyed={row => row.id}>{row => <Tool label={`${row().name} · ${row().detail}`} onClick={() => {
+                setGc(core.gcDetail(Number(row().id))); ws.showInspector(true);
               }} />}</For>
             </Show>
           </Section>

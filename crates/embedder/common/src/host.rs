@@ -1798,6 +1798,17 @@ fn layer_tree_line(tree: &engine::scene::LayerTree) -> String {
     )
 }
 
+fn target_present_ns(base_ns: u64, time: FrameTime) -> Option<u64> {
+    // Platform display timestamps and the process clock can have different origins.
+    let lead_ms = time.target_ms - time.vsync_ms;
+    let lead_ms = if lead_ms > 0.0 && lead_ms <= 1_000.0 {
+        lead_ms
+    } else {
+        time.interval_ms
+    };
+    (lead_ms.is_finite() && lead_ms > 0.0).then(|| base_ns.saturating_add(ms_to_ns(lead_ms)))
+}
+
 fn ms_to_ns(ms: f64) -> u64 {
     Duration::try_from_secs_f64(ms / 1_000.0)
         .ok()

@@ -11,11 +11,11 @@ use super::{
     FrameSubmission, RasterCompletion, RasterHost, UiHost, end_frame, lock, ms_to_ns,
     next_frame_number, raster_frame,
     raster_host::{images_ready, install_scene},
-    refresh_wake,
+    refresh_wake, target_present_ns,
 };
 use crate::FrameRateHint;
 use crate::command::{Command, FrameToken, SurfaceId};
-use crate::diagnostics::telemetry::{ScheduleTiming, mono_ns_at};
+use crate::diagnostics::telemetry::{FrameTrigger, ScheduleTiming, mono_ns_at};
 use crate::error::BootError;
 use crate::queue::Inbox;
 use crate::scheduler::Gpu;
@@ -212,6 +212,7 @@ impl CompositorMode {
             self.handoff(inbox, token, generation, None);
             return Ok(());
         }
+        let raster_started = Instant::now();
         let installed_window = self.install_window(graphics, token, generation, time)?;
         let snapshot = {
             let mut raster = graphics.raster.borrow_mut();
@@ -247,7 +248,7 @@ impl CompositorMode {
         {
             self.request_window(inbox, generation, time);
         }
-        let submission = plan.submission(time, posted_at);
+        let submission = plan.submission(time, posted_at, raster_started);
         let span = tracing::info_span!(target: "impasto::compositor", "compositor_frame",
             frame_id = submission.number, queue = "raster", active_tracks = plan.tree.tracks.len(),
             ui_woken = false, target_ms = time.target_ms, missed_vsync = tracing::field::Empty,
@@ -255,10 +256,12 @@ impl CompositorMode {
         .entered();
         graphics.needs_present = true;
         let completion = raster_frame(graphics, submission, true, || {})?;
-        let missed =
-            time.interval_ms > 0.0 && posted_at.elapsed().as_secs_f64() * 1000.0 > time.interval_ms;
-        span.record("missed_vsync", missed);
         let output = completion.output;
+        if let Some(timing) = output.timing
+            && timing.schedule.topology.is_some()
+        {
+            span.record("missed_vsync", timing.schedule.missed_vsync);
+        }
         let mut rate = FrameRateHint::Display;
         if let Some(run) = lock(&self.active).as_mut()
             && run.generation == generation
@@ -472,13 +475,21 @@ pub(super) fn prefetch_image(runtime: &UiHost, source: &str) -> bool {
 }
 
 impl Plan {
-    fn submission(&self, time: FrameTime, frame_started: Instant) -> FrameSubmission {
+    fn submission(
+        &self,
+        time: FrameTime,
+        frame_started: Instant,
+        raster_started: Instant,
+    ) -> FrameSubmission {
         let telemetry = self.telemetry.clone().filter(|hub| hub.collects_frames());
         let posted_ns = mono_ns_at(frame_started);
         let schedule = telemetry.as_ref().map(|_| ScheduleTiming {
+            trigger: FrameTrigger::Compositor,
             vsync_ns: Some(posted_ns),
+            target_present_ns: target_present_ns(posted_ns, time),
             ui_start_ns: posted_ns,
             ui_done_ns: posted_ns,
+            raster_start_ns: mono_ns_at(raster_started),
             topology: Some(self.topology),
             budget_ns: ms_to_ns(time.interval_ms),
             compositor_only: true,
@@ -633,6 +644,34 @@ mod tests {
     }
 
     #[test]
+    fn raster_vsync_submission_carries_its_trigger_and_target() {
+        use crate::diagnostics::{TelemetryHub, telemetry::FrameTrigger};
+        use engine::session::FrameTime;
+        use std::time::Instant;
+
+        let plan = Plan {
+            telemetry: Some(Arc::new(TelemetryHub::new())),
+            ..plan()
+        };
+        let time = FrameTime {
+            vsync_ms: 100.,
+            target_ms: 108.,
+            interval_ms: 16.,
+            mono_ms: 12.,
+        };
+        let posted = Instant::now();
+        let raster_started = posted + std::time::Duration::from_millis(3);
+        let schedule = plan
+            .submission(time, posted, raster_started)
+            .schedule
+            .unwrap();
+        assert_eq!(schedule.trigger, FrameTrigger::Compositor);
+        assert_eq!(schedule.target_lead_ms(), Some(8.));
+        assert_eq!(schedule.ui_ms(), 0.);
+        assert_eq!(schedule.queue_ms(), 3.);
+    }
+
+    #[test]
     fn publishing_a_new_window_keeps_raster_vsync_ownership() {
         use engine::session::FrameTime;
         use std::time::Instant;
@@ -640,7 +679,8 @@ mod tests {
         let mode = CompositorMode::default();
         let first = mode.begin(plan(), None);
         let make_window = || {
-            let mut next = plan().submission(FrameTime::at(100.0), Instant::now());
+            let now = Instant::now();
+            let mut next = plan().submission(FrameTime::at(100.0), now, now);
             next.layers_changed = true;
             next.compositor_epoch = Some(1);
             next

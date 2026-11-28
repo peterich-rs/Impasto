@@ -150,7 +150,11 @@ impl Subscription {
             };
             if initial || update.reset || Some(update.revision) != since {
                 *cursor = Some(update.revision);
-                batch.insert(name.to_owned(), json!(update));
+                let mut update = json!(update);
+                if channel == Channel::Frames {
+                    update["sampled_at_ms"] = json!(crate::timing::mono_ms());
+                }
+                batch.insert(name.to_owned(), update);
             }
         }
         Value::Object(batch)

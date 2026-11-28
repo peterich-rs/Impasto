@@ -264,12 +264,7 @@ pub(super) fn render_layers(
         .map_or_else(ScheduleTiming::default, |mut schedule| {
             schedule.present_start_ns = present_start_ns;
             schedule.submit_done_ns = stats.submit_done.map(mono_ns_at);
-            schedule.present_done_ns = mono_ns_at(present_done);
-            schedule.missed_vsync = schedule.budget_ns > 0
-                && schedule
-                    .present_done_ns
-                    .saturating_sub(schedule.vsync_ns.unwrap_or(schedule.ui_start_ns))
-                    > schedule.budget_ns;
+            schedule.finish_present(mono_ns_at(present_done));
             schedule
         });
     let timing = FrameTiming {

@@ -13,6 +13,8 @@ use crate::store::Recording;
 
 use crate::DesktopError;
 
+const SESSION_SCHEMA_VERSION: u32 = 2;
+
 const MAX_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(ImpastoType)]
@@ -109,7 +111,7 @@ fn parse_session(bytes: &[u8]) -> Result<Recording, DesktopError> {
         schema_version,
         mut session,
     } = serde_json::from_slice(bytes)?;
-    if schema_version != 1 {
+    if schema_version != SESSION_SCHEMA_VERSION {
         return Err(DesktopError::new("Unsupported session schema"));
     }
     session.clip();
@@ -170,7 +172,7 @@ pub(crate) fn write_session(
     format: &str,
 ) -> Result<(), DesktopError> {
     let session = SessionRef {
-        schema_version: 1,
+        schema_version: SESSION_SCHEMA_VERSION,
         session: recording,
     };
     let max = MAX_ARTIFACT_BYTES.saturating_sub(trace.map_or(0, |bytes| bytes.len() as u64));

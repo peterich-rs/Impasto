@@ -6,12 +6,12 @@ import { Legend } from "../charts/Tracks";
 import { Bar, Divider, Empty, KeyValues, Label, Pane, Section, Spacer, Tabs, Tool, ms } from "../components/ui";
 import { SliceTable, TableRow } from "../components/SliceTable";
 import { PageLayout } from "../shell/PageLayout";
-import { useWorkspace } from "../state/workspace";
+import { formatCadence, useWorkspace } from "../state/workspace";
 
 const inspectorTabs = [{ id: "breakdown", label: "Breakdown" }, { id: "repaints", label: "Repainted views" }, { id: "js", label: "JS & reactive" }];
 const pageTabs = [{ id: "timeline", label: "Timeline" }, { id: "capture", label: "Capture summary" }];
 const frameLegend: readonly [string, number][] = [
-  ["Script", 0], ["Layout", 1], ["Record", 2], ["Queue", 3], ["Raster", 4], ["GPU", 5], ["Compositor", 6], ["Over budget", 7],
+  ["Script", 0], ["Layout", 1], ["Record", 2], ["Other CPU", 3], ["Raster", 4], ["GPU", 5], ["Compositor", 6], ["Over budget / missed present", 7],
 ];
 const paintPaths = ["", "fast_layer_patch", "picture_patch", "full_picture_rebuild", "canvas_redraw"];
 
@@ -31,6 +31,11 @@ export function FramesPage() {
   const capture = createMemo(() => ws.tick()?.latestCapture ?? undefined);
   const count = createMemo(() => ws.tick()?.frameCount ?? 0);
   const frame = createMemo(() => focus() ?? ws.tick()?.latestFrame ?? undefined);
+  const frameRevision = createMemo(() => {
+    ws.frame(); ws.generation();
+    const id = frame();
+    return id ? core.frameRevision(id) : undefined;
+  });
 
   function choose(id: string | null | undefined) {
     if (!id) return;
@@ -77,12 +82,12 @@ export function FramesPage() {
   });
   createTrackedEffect(() => { if (capture()) setMode("capture"); });
   const detail = createMemo(() => {
-    ws.frame();
+    frameRevision();
     const id = frame();
     return id ? core.getFrameDetail(id) : [];
   });
   const context = createMemo(() => {
-    ws.frame(); ws.resource();
+    frameRevision(); ws.resource();
     const id = frame();
     return id ? core.frameContext(id) : [];
   });
@@ -90,6 +95,11 @@ export function FramesPage() {
     ws.frame();
     const ids = range();
     return ids ? core.compareFrameRange(...ids) : undefined;
+  });
+  const omittedSpans = createMemo(() => {
+    frameRevision();
+    const id = frame();
+    return id ? core.omittedSpans(id) : 0;
   });
   const viewport = (width: number) => {
     const columns = Math.max(1, Math.min(Math.floor(width / pitch()), count() || 1));
@@ -114,9 +124,9 @@ export function FramesPage() {
                 <KeyValues fields={bar().fields} />
               </Section><Divider /></>}</Show>
               <Section title={`Frame #${id()}`}>
-                <For each={context().filter(row => row.kind === "block")}>{row =>
-                  <Tool label={`Blocked · ${row.name}`} icon="chevron" onClick={() =>
-                    ws.nav.go({ kind: "view", nodeId: row.id, highlight: true, fromFrameId: id() })} />
+                <For each={context().filter(row => row.kind === "block")} keyed={row => row.id}>{row =>
+                  <Tool label={`Blocked · ${row().name}`} icon="chevron" onClick={() =>
+                    ws.nav.go({ kind: "view", nodeId: row().id, highlight: true, fromFrameId: id() })} />
                 }</For>
                 <KeyValues fields={detail()} empty="Frame is outside the retained window" />
               </Section>
@@ -124,7 +134,7 @@ export function FramesPage() {
               <Section title={`Frame #${id()} · JS & reactive`}>
                 <Tool label="Open in flamegraph" icon="chevron" onClick={() => ws.nav.go({ kind: "js", subTab: "flamegraph", frameId: id() })} />
                 <KeyValues fields={detail().filter(field => /updates|sets|nodes created|ffi |style resolves|callback ms|canvas |script ms/.test(field.name))} />
-                <For each={context().filter(row => row.kind === "stack")}>{row => <Label mono size={11} lines={5}>{row.detail}</Label>}</For>
+                <For each={context().filter(row => row.kind === "stack")} keyed={row => row.id}>{row => <Label mono size={11} lines={5}>{row().detail}</Label>}</For>
               </Section>
             </Show>
           </Pane>}>
@@ -144,13 +154,17 @@ export function FramesPage() {
       </Show>
     }>{range => <Pane>
       <Section title="Range comparison" detail={`${range().selected.count} selected`}>
-        <KeyValues fields={[
-          ["P50", ms(range().selected.p50Ms), ms(range().all.p50Ms)],
-          ["P95", ms(range().selected.p95Ms), ms(range().all.p95Ms)],
-          ["Mean UI", ms(range().selectedUiMs), ms(range().allUiMs)],
-          ["Mean raster", ms(range().selectedRasterMs), ms(range().allRasterMs)],
-          ["Over budget", String(range().selected.jankCount), String(range().all.jankCount)],
-        ].map(([name, selected, all]) => ({ name, value: `${selected} / ${all}`, depth: 0 }))} />
+        <KeyValues fields={([
+          ["Hitch (ms/s)", (stats) => stats.hitchMsPerSec.toFixed(1)],
+          ["Dropped", (stats) => String(stats.droppedFrames)],
+          ["On-time", (stats) => `${stats.onTimePct.toFixed(1)}%`],
+          ["Cadence", formatCadence],
+          ["P95 bottleneck", (stats) => ms(stats.p95Ms)],
+          ["P95 E2E", (stats) => ms(stats.p95E2eMs)],
+          ["UI / Raster / GPU over", (stats) => `${stats.uiJankCount} / ${stats.rasterJankCount} / ${stats.gpuJankCount}`],
+        ] satisfies [string, (stats: core.FrameStats) => string][]).map(([name, format]) => ({
+          name, value: `${format(range().selected)} / ${format(range().all)}`, depth: 0,
+        }))} />
         <Label subtle>Selected / retained frames</Label>
         <Tool label="Clear selection" onClick={() => setRange(undefined)} />
       </Section>
@@ -204,9 +218,9 @@ export function FramesPage() {
     <Divider />
     <Show when={mode() === "capture"} fallback={<Pane>
       <Show when={frame()} fallback={<Empty title="Frame timeline" hint="The platform, UI, raster, I/O and GPU lanes appear when a frame is available." />}>
-        {id => <Section title={`Frame #${id()}`} detail={(ws.frame(), core.omittedSpans(id()) ? `${core.omittedSpans(id())} spans omitted` : "GPU clock is relative")}>
+        {id => <Section title={`Frame #${id()}`} detail={omittedSpans() ? `${omittedSpans()} spans omitted` : "GPU clock is relative"}>
           <InteractiveCanvas label="Five-lane frame timeline" height={310} interactive
-            project={(w, h) => { ws.frame(); return core.projectFrameGantt(id(), w, h, ...timeline()); }}
+            project={(w, h) => { frameRevision(); return core.projectFrameGantt(id(), w, h, ...timeline()); }}
             onClick={point => {
               setSpan(core.hitTestFrameGantt(id(), point.x, point.y, point.width, point.height, ...timeline()) ?? undefined);
               ws.setFrameTab("breakdown");

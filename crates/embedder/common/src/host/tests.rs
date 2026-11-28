@@ -1083,7 +1083,13 @@ fn noop_pointer_move_does_not_record_telemetry_frame_or_present() {
         token: first_token,
         time: now(),
     }));
-    let (seq_after_first, _) = telemetry.frames_since(0);
+    let (seq_after_first, first_frames) = telemetry.frames_since(0);
+    let timing = first_frames[0].schedule;
+    assert_eq!(
+        timing.trigger,
+        crate::diagnostics::telemetry::FrameTrigger::Vsync
+    );
+    assert!(timing.target_present_ns.is_some());
     let presents_after_first = presents.load(Ordering::Relaxed);
     assert_eq!(presents_after_first, 1);
 
@@ -1183,8 +1189,41 @@ fn resource_wait_retries_without_counting_drawable_failures() {
     }
     let (_, frames) = telemetry.frames_since(0);
     assert_eq!(frames.len(), 5);
-    assert!(
-        frames.iter().all(|frame| !frame.presented
-            && frame.present_error == Some(raster::Status::ResourcesPending))
+    assert!(frames.iter().all(|frame| !frame.presented
+        && frame.present_error == Some(raster::Status::ResourcesPending)
+        && frame.schedule.trigger == crate::diagnostics::telemetry::FrameTrigger::Wake
+        && frame.schedule.target_present_ns.is_none()));
+}
+
+#[test]
+fn presentation_target_uses_the_display_lead_or_a_valid_interval() {
+    let base = 41_000_000;
+    let time = FrameTime {
+        vsync_ms: 900_000.,
+        target_ms: 900_012.5,
+        interval_ms: 16.,
+        mono_ms: 100.,
+    };
+    assert_eq!(super::target_present_ns(base, time), Some(53_500_000));
+    assert_eq!(
+        super::target_present_ns(
+            base,
+            FrameTime {
+                target_ms: f64::NAN,
+                ..time
+            }
+        ),
+        Some(57_000_000)
     );
+    assert_eq!(
+        super::target_present_ns(
+            base,
+            FrameTime {
+                target_ms: 901_001.,
+                ..time
+            }
+        ),
+        Some(57_000_000)
+    );
+    assert_eq!(super::target_present_ns(base, FrameTime::at(100.)), None);
 }
