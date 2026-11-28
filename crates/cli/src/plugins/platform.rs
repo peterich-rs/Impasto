@@ -101,13 +101,19 @@ impl Platform {
         root: &Path,
         target: &str,
         cargo_name: &str,
-        app: &App,
         options: Option<&PluginOptions>,
+        features: Option<BTreeSet<String>>,
     ) -> Result<()> {
-        let features = project.select_features(target, app, options)?;
+        let mut background_modes = BTreeSet::new();
         let mut swift_features = BTreeMap::new();
         for feature in features.iter().flatten() {
             let config = &project.features[feature];
+            if !config.background_modes.is_empty()
+                && (target != "ios" || config.background_modes.iter().any(|mode| !identifier(mode)))
+            {
+                bail!("无效的 iOS 后台模式 {feature}");
+            }
+            background_modes.extend(config.background_modes.iter().cloned());
             project
                 .usage_description_keys
                 .extend(config.usage_description_keys.clone());
@@ -228,6 +234,7 @@ impl Platform {
             if project.package.is_some()
                 || project.module.is_some()
                 || project.plugin_class.is_some()
+                || project.prepare.is_some()
             {
                 bail!("平台插件的注册信息需要 path");
             }
@@ -236,6 +243,13 @@ impl Platform {
         let path = under(root, &path)?;
         let package = project.package.context("平台插件需要声明 package")?;
         let plugin_class = project.plugin_class;
+        if project
+            .prepare
+            .as_deref()
+            .is_some_and(|method| target != "ios" || !identifier(method))
+        {
+            bail!("无效的 iOS 启动方法");
+        }
         let module = project.module.unwrap_or_else(|| package.clone());
         if plugin_class
             .as_deref()
@@ -272,6 +286,8 @@ impl Platform {
             gradle_module,
             module,
             plugin_class,
+            prepare: project.prepare,
+            background_modes,
             features,
             swift_features: swift_features.into_values().collect(),
         });
@@ -280,7 +296,7 @@ impl Platform {
 }
 
 impl PlatformProject {
-    fn select_features(
+    pub(super) fn select_features(
         &self,
         target: &str,
         app: &App,

@@ -37,6 +37,8 @@ pub(crate) fn piece(trace: &mut Option<RequestTrace>, piece: &HttpPiece<'_>) {
                 headers,
             } => trace.head(status, url, redirected, headers),
             HttpPiece::Chunk(bytes, _) => trace.chunk(bytes),
+            #[cfg(target_os = "ios")]
+            HttpPiece::Upload { .. } => {}
         }
     }
 }
@@ -47,6 +49,16 @@ pub(crate) fn finish<T>(trace: Option<RequestTrace>, result: &Result<T, crate::w
         trace.finish(
             error.map(|error| error.message.as_str()),
             error.is_some_and(|error| error.kind == crate::wire::HttpFailure::Canceled),
+        );
+    }
+}
+
+pub(crate) fn finish_transfer(trace: Option<RequestTrace>, result: &Result<(), crate::HttpError>) {
+    if let Some(trace) = trace {
+        let error = result.as_ref().err();
+        trace.finish(
+            error.map(|error| error.message.as_str()),
+            error.is_some_and(|error| error.code == crate::wire::HttpFailure::Canceled.code()),
         );
     }
 }

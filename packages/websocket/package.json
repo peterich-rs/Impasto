@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./compat": "./src/compat.ts",
-    "./polyfill": "./src/polyfill.ts"
+    "./polyfill": "./src/polyfill.ts",
+    "./native": "./src/native.stub.ts"
   }
 }

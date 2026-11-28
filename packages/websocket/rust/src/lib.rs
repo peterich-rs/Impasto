@@ -15,7 +15,7 @@ mod ios;
 mod socket;
 mod trace;
 
-use socket::{SocketSession, SocketSlotTracker, WebSocketTransport};
+use socket::{SocketSession, SocketSlotTracker, WebSocketSettings, WebSocketTransport};
 
 #[derive(Debug)]
 struct SocketError(String);
@@ -25,7 +25,19 @@ impl ImpastoError for SocketError {
         "websocket"
     }
     fn code(&self) -> &'static str {
-        "socket"
+        if self.0.contains("timed out") {
+            "timeout"
+        } else if self.0.starts_with("too many") {
+            "too-many-sockets"
+        } else if self.0.contains("URL") {
+            "bad-url"
+        } else if self.0.contains("handshake") || self.0.contains("subprotocol") {
+            "handshake"
+        } else if self.0.contains("closed") || self.0.contains("not open") {
+            "closed"
+        } else {
+            "network"
+        }
     }
     fn message(&self) -> String {
         self.0.clone()
@@ -78,6 +90,7 @@ enum NativeWebSocketEvent {
     },
     Error {
         message: String,
+        code: Option<String>,
     },
 }
 
@@ -142,6 +155,8 @@ struct WebSocketPlugin {
     tracker: SocketSlotTracker,
     transport: Option<Arc<dyn WebSocketTransport>>,
     diagnostics: Option<Arc<dyn DiagnosticsSink>>,
+    hosted: bool,
+    connectivity: impasto::os::NativePlugin,
 }
 
 impl WebSocketPlugin {
@@ -155,21 +170,46 @@ impl WebSocketPlugin {
             tracker: SocketSlotTracker::default(),
             transport,
             diagnostics: ctx.diagnostics_sink(),
+            hosted: ctx.is_hosted(),
+            connectivity: impasto::os::NativePlugin::new(ctx, "@impasto/connectivity"),
         })
     }
 }
 
+#[derive(Clone, PartialEq, serde::Deserialize, ImpastoType)]
+#[serde(rename_all = "camelCase")]
+struct OnlineStatus {
+    is_connected: bool,
+}
+
 #[impasto::export]
 impl WebSocketPlugin {
+    pub async fn watch_online(
+        &self,
+        sink: TypedSink<OnlineStatus>,
+        cancel: CancelToken,
+    ) -> Result<(), SocketError> {
+        self.connectivity
+            .watch("status", sink, cancel)
+            .await
+            .map_err(|error| SocketError(error.message))
+    }
+
+    pub fn is_websocket_host_available(&self) -> bool {
+        self.hosted
+    }
+
     #[impasto::method(resource)]
     pub fn open(
         &self,
         url: String,
         protocols: Option<Vec<String>>,
+        settings: Option<WebSocketSettings>,
     ) -> Result<NativeWebSocketHandle, SocketError> {
         let session = SocketSession::open(
             url,
             protocols.unwrap_or_default(),
+            settings.unwrap_or_default(),
             &self.tracker,
             self.transport.clone(),
             self.diagnostics.clone(),

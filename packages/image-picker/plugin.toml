@@ -1,0 +1,34 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[dependencies]
+"@impasto/file-system" = "builtin"
+"@impasto/permissions" = "builtin"
+
+[ios]
+path = "apple/ios"
+package = "ImpastoImagePicker"
+plugin_class = "ImpastoImagePickerPlugin"
+
+[macos]
+path = "apple/macos"
+package = "ImpastoImagePicker"
+plugin_class = "ImpastoImagePickerPlugin"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.imagepicker"
+plugin_class = "ImagePickerPlugin"
+
+[android.features.camera]
+dependency_features = { "@impasto/permissions" = ["camera", "microphone"] }
+
+[ios.features.camera]
+product = "ImpastoImagePickerCamera"
+registrar = "CameraFeature"
+dependency_features = { "@impasto/permissions" = ["camera", "microphone"] }
+usage_description_keys = ["NSCameraUsageDescription", "NSMicrophoneUsageDescription"]

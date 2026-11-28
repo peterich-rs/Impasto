@@ -19,6 +19,13 @@ impasto-permissions = { path = "../../../packages/permissions/rust" }
 impasto-share = { path = "../../../packages/share/rust" }
 impasto-system-info = { path = "../../../packages/system-info/rust" }
 impasto-websocket = { path = "../../../packages/websocket/rust" }
+impasto-crypto = { path = "../../../packages/crypto/rust" }
+impasto-sqlite = { path = "../../../packages/sqlite/rust" }
+impasto-intl = { path = "../../../packages/intl/rust" }
+impasto-biometrics = { path = "../../../packages/biometrics/rust" }
+impasto-image-picker = { path = "../../../packages/image-picker/rust" }
+impasto-geolocator = { path = "../../../packages/geolocator/rust" }
+impasto-notifications = { path = "../../../packages/notifications/rust" }
 
 [lints]
 workspace = true

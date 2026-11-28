@@ -14,5 +14,12 @@ pub fn register(registrar: &mut impasto::PluginRegistrar) {
     impasto_permissions::register(registrar);
     impasto_share::register(registrar);
     impasto_system_info::register(registrar);
+    impasto_crypto::register(registrar);
+    impasto_sqlite::register(registrar);
+    impasto_intl::register(registrar);
+    impasto_biometrics::register(registrar);
+    impasto_image_picker::register(registrar);
+    impasto_geolocator::register(registrar);
+    impasto_notifications::register(registrar);
     impasto_websocket::register(registrar);
 }

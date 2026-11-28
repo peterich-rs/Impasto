@@ -110,7 +110,7 @@ test("HttpClient normalizes ArrayBuffer chunks and throws HttpError on 4xx/5xx",
   await advanceFrames();
   assert.equal(seenRequest?.url, "https://api.example.test/items?page=2");
   assert.equal(seenRequest?.method, "POST");
-  assert.deepEqual(JSON.parse(new TextDecoder().decode(seenRequest?.body)), { name: "box" });
+  assert.deepEqual(JSON.parse(typeof seenRequest?.body === "string" ? seenRequest.body : new TextDecoder().decode(seenRequest?.body ?? undefined)), { name: "box" });
 
   await assert.rejects(
     () => client.get("/err"),
@@ -202,4 +202,49 @@ test("createLatest aborts the previous request when a newer one starts", async (
   assert.equal(seen[1].aborted, false);
   latest.abort();
   assert.equal(seen[1].aborted, true);
+});
+
+test("HTTP retry replays idempotent bytes, runs interceptors once and reports progress", async () => {
+  let attempts = 0;
+  let intercepted = 0;
+  let lastLoaded = 0;
+  const client = createClient(mockTransport(function* (request) {
+    attempts++;
+    assert.deepEqual(request.headers, [["x-session", "active"]]);
+    yield { type: "head", url: request.url, status: attempts === 1 ? 503 : 200, redirected: false, headers: [] };
+    if (attempts === 2) {
+      yield { type: "downloadProgress", loaded: 2, total: 2 };
+      yield { type: "chunk", data: new Uint8Array([111, 107]) };
+    }
+  }), { retry: { maxRetries: 1, baseDelayMs: 0, jitter: false } });
+  client.interceptors.request.use(request => {
+    intercepted++;
+    return { ...request, headers: { "X-Session": "active" } };
+  });
+  const result = await client.send("https://example.test", {
+    onDownloadProgress: progress => { lastLoaded = progress.loaded; },
+  });
+  assert.equal(await result.text(), "ok");
+  assert.equal(attempts, 2);
+  assert.equal(intercepted, 1);
+  assert.equal(lastLoaded, 2);
+});
+
+test("scripted HTTP download streams progress and commits the headless file", async () => {
+  const { mockHttp } = await import("./testing.ts");
+  const filesystem = await import("@impasto/file-system");
+  const mock = mockHttp([{ status: 429, headers: { "Retry-After": "0" } }, { chunks: ["hel", "lo"] }],
+    { retry: { maxRetries: 1, baseDelayMs: 0, jitter: false } });
+  const destinationPath = "http-mock-test.txt";
+  try {
+    let loaded = 0;
+    const result = await mock.client.downloadToFile("https://example.test/file", {
+      destinationPath,
+      onDownloadProgress: event => { loaded = event.loaded; },
+    });
+    assert.equal(result.bytesWritten, 5);
+    assert.equal(loaded, 5);
+    assert.equal(await filesystem.readText(destinationPath, "cache"), "hello");
+    assert.equal(mock.requests.length, 2);
+  } finally { await filesystem.delete(destinationPath, { scope: "cache" }).catch(() => undefined); }
 });

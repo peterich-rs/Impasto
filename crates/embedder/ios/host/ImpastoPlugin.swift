@@ -15,6 +15,7 @@ public protocol ImpastoPlugin: AnyObject {
     var identifier: String { get }
     func installed(in host: ImpastoHost)
     func attached(to controller: ImpastoViewController)
+    func sceneConnected(_ options: UIScene.ConnectionOptions)
     func detached()
     func sceneActivityChanged(_ activity: ImpastoSceneActivity)
     func handle(_ request: ImpastoNativeRequest) -> Bool
@@ -27,6 +28,7 @@ public protocol ImpastoPlugin: AnyObject {
 public extension ImpastoPlugin {
     func installed(in host: ImpastoHost) {}
     func attached(to controller: ImpastoViewController) {}
+    func sceneConnected(_ options: UIScene.ConnectionOptions) {}
     func detached() {}
     func sceneActivityChanged(_ activity: ImpastoSceneActivity) {}
     func handle(_ request: ImpastoNativeRequest) -> Bool { false }

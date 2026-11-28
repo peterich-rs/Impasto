@@ -23,6 +23,20 @@ pub(crate) use resolution::{crate_name, discover, plugin_crate, valid_package_na
 #[serde(deny_unknown_fields)]
 pub struct Local {
     pub path: PathBuf,
+    #[serde(default)]
+    features: BTreeSet<String>,
+    #[serde(default)]
+    optional_features: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Local {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            features: BTreeSet::new(),
+            optional_features: BTreeMap::new(),
+        }
+    }
 }
 
 pub struct Dependency {
@@ -71,6 +85,8 @@ struct PlatformProject {
     package: Option<String>,
     module: Option<String>,
     plugin_class: Option<String>,
+    prepare: Option<String>,
+    dependency_features: BTreeMap<String, BTreeSet<String>>,
     usage_description_keys: BTreeSet<String>,
     required_entitlements: BTreeSet<String>,
     permissions: BTreeMap<String, Vec<String>>,
@@ -87,6 +103,8 @@ struct PlatformFeature {
     usage_description_keys: BTreeSet<String>,
     required_entitlements: BTreeSet<String>,
     infer_permissions: BTreeSet<String>,
+    dependency_features: BTreeMap<String, BTreeSet<String>>,
+    background_modes: BTreeSet<String>,
     default: bool,
 }
 
@@ -121,6 +139,10 @@ pub struct NativeProject {
     pub gradle_module: String,
     pub module: String,
     pub plugin_class: Option<String>,
+    #[serde(default)]
+    pub prepare: Option<String>,
+    #[serde(default)]
+    pub background_modes: BTreeSet<String>,
     #[serde(default)]
     pub features: Option<BTreeSet<String>>,
     #[serde(default)]
@@ -529,6 +551,7 @@ pub(crate) fn cargo_package(root: &Path) -> Result<(PathBuf, String)> {
 #[derive(Default)]
 struct Resolved {
     crates: Vec<(PathBuf, String)>,
+    rust_features: BTreeMap<String, BTreeSet<String>>,
     allowed: BTreeMap<String, BTreeSet<String>>,
     installed: BTreeMap<String, PathBuf>,
     entries: BTreeMap<String, PathBuf>,
@@ -630,6 +653,68 @@ targets = ["ios", "android"]
             ),
         )?;
         Ok(root)
+    }
+
+    #[test]
+    fn phase_three_features_enable_the_required_native_inputs() -> Result<()> {
+        let project = permissions_app(
+            r#"
+"@impasto/biometrics" = "builtin"
+"@impasto/geolocator" = "builtin"
+"@impasto/notifications" = "builtin"
+"@impasto/sqlite" = "builtin"
+
+[plugins."@impasto/permissions"]
+enabled = []
+
+[plugins."@impasto/geolocator"]
+enabled = ["background"]
+
+[plugins."@impasto/notifications"]
+enabled = ["exactAlarm"]
+
+[plugins."@impasto/sqlite"]
+enabled = ["sqlcipher"]
+
+[ios.usage_descriptions]
+NSFaceIDUsageDescription = "Use Face ID to unlock the app."
+NSLocationWhenInUseUsageDescription = "Show your position while moving."
+NSLocationAlwaysAndWhenInUseUsageDescription = "Record your trip in the background."
+"#,
+        )?;
+        let app = App::load(project.path())?;
+        let ios = resolution::resolve(&app, "ios")?;
+        assert_eq!(
+            ios.rust_features["impasto-sqlite"],
+            BTreeSet::from(["sqlcipher".to_owned()])
+        );
+        assert!(
+            ios.platform
+                .projects
+                .iter()
+                .any(|project| project.background_modes.contains("location"))
+        );
+        assert!(
+            ios.platform
+                .projects
+                .iter()
+                .any(|project| project.prepare.as_deref() == Some("prepareLaunch"))
+        );
+        let android = resolution::resolve(&app, "android")?;
+        for name in [
+            "ACCESS_FINE_LOCATION",
+            "ACCESS_BACKGROUND_LOCATION",
+            "POST_NOTIFICATIONS",
+            "SCHEDULE_EXACT_ALARM",
+        ] {
+            assert!(
+                android
+                    .platform
+                    .android_permissions
+                    .contains(&format!("android.permission.{name}"))
+            );
+        }
+        Ok(())
     }
 
     #[test]

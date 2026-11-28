@@ -32,6 +32,7 @@ struct Manifest {
 pub(crate) struct PluginOptions {
     pub enabled: Option<BTreeSet<String>>,
     pub android_bluetooth_never_for_location: bool,
+    pub locales: Option<BTreeSet<String>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -301,9 +302,7 @@ impl App {
         let native = root
             .join("rust/Cargo.toml")
             .is_file()
-            .then(|| crate::plugins::Local {
-                path: "rust".into(),
-            });
+            .then(|| crate::plugins::Local::new("rust".into()));
         Ok(Self {
             assets: root.join(manifest.assets.unwrap_or_else(|| PathBuf::from("assets"))),
             root,

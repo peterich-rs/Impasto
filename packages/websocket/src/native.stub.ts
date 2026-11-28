@@ -16,3 +16,9 @@ export function events(
 }
 
 export const WebSocket = { open, events };
+
+export function isWebsocketHostAvailable(): boolean { return false; }
+
+export function watchOnline(_signal?: AbortSignal): ReadableStream<{ isConnected: boolean }> {
+  return new ReadableStream({ start(controller) { controller.close(); } });
+}

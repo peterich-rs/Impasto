@@ -165,3 +165,26 @@ test("WHATWG WebSocket compat class validates inputs and dispatches lifecycle ev
 
   assert.deepEqual(seen, ["open", "msg:world", "close:1000:true"]);
 });
+
+test("reconnecting WebSocket retries an abnormal close and stops on a clean close", async () => {
+  const { ReconnectingWebSocket } = await import("./reconnect.ts");
+  const { transport, lastHandle } = mockWebSocketTransport();
+  let attempts = 0;
+  const client = new ReconnectingWebSocket((url, options) => {
+    attempts++;
+    const socket = connectWith(transport, url, options);
+    lastHandle().pushEvent({ type: "open", protocol: "chat" });
+    return socket;
+  }, "wss://example.test", { reconnect: { baseDelayMs: 0, jitter: false } });
+  const status = client.watchStatus().getReader();
+  try {
+    assert.equal((await status.read()).value, "connecting");
+    assert.equal((await status.read()).value, "open");
+    lastHandle().pushEvent({ type: "close", code: 1006, reason: "interrupted", clean: false });
+    assert.equal((await status.read()).value, "reconnecting");
+    assert.equal((await status.read()).value, "open");
+    lastHandle().pushEvent({ type: "close", code: 1000, reason: "done", clean: true });
+    assert.equal((await status.read()).value, "closed");
+    assert.equal(attempts, 2);
+  } finally { await status.cancel(); }
+});

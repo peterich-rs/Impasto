@@ -31,6 +31,7 @@ javascript = { workspace = true, features = ["runtime"] }
 bundler = { path = "../bundler" }
 testing = { path = "../testing" }
 impasto-bundled-plugins = { path = "../embedder/bundled" }
+impasto-intl = { path = "../../packages/intl/rust", features = ["datagen"] }
 base64 = "0.22"
 oxc_sourcemap = "9"
 flate2 = "1"
