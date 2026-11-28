@@ -1953,10 +1953,12 @@ version = "0.1.0"
 dependencies = [
  "futures-channel",
  "futures-core",
+ "http",
  "impasto-macros",
  "javascript",
  "jni 0.22.4",
  "objc2",
+ "openwire",
  "serde",
  "serde_json",
  "tracing",

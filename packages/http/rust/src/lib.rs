@@ -81,6 +81,7 @@ impl NativeHttpRequest {
             });
         }
         Ok(wire::HttpRequest {
+            hops: None,
             method,
             url: self.url,
             headers: self.headers.unwrap_or_default(),
@@ -106,6 +107,7 @@ impl From<wire::HttpError> for HttpError {
 
 fn transport_request(request: HttpRequest, cancel: CancelToken) -> wire::HttpRequest {
     wire::HttpRequest {
+        hops: None,
         method: request.method,
         url: request.url,
         headers: request.headers,
@@ -165,8 +167,24 @@ impl HttpPlugin {
         let transport: Arc<dyn wire::HttpClient> = Arc::new(ios::Http);
         let send = Arc::clone(&transport);
         let stream = Arc::clone(&transport);
+        let diagnostics = ctx.diagnostics_sink();
+        let send_trace = diagnostics.clone();
+        let stream_trace = diagnostics.clone();
         let client = HttpClient::new(ctx.runtime().clone(), move |request, cancel| {
-            let result = send.perform(&transport_request(request, cancel))?;
+            let mut request = transport_request(request, cancel);
+            let mut trace = trace::start(send_trace.as_ref(), &mut request, "rust-http");
+            let result = if trace.is_some() {
+                wire::collect_response(&request, |output| {
+                    send.stream(&request, &mut |piece| {
+                        trace::piece(&mut trace, &piece);
+                        output(piece)
+                    })
+                })
+            } else {
+                send.perform(&request)
+            };
+            trace::finish(trace, &result);
+            let result = result?;
             Ok(HttpResponse {
                 status: result.status,
                 url: result.url,
@@ -176,8 +194,10 @@ impl HttpPlugin {
             })
         })
         .with_stream(move |request, cancel, mut output| {
-            let request = transport_request(request, cancel);
+            let mut request = transport_request(request, cancel);
+            let mut trace = trace::start(stream_trace.as_ref(), &mut request, "rust-http");
             let result = stream.stream(&request, &mut |piece| {
+                trace::piece(&mut trace, &piece);
                 let piece = match piece {
                     HttpPiece::Head {
                         status,
@@ -199,6 +219,7 @@ impl HttpPlugin {
                 };
                 pollster::block_on(output.send(Ok(piece)))
             });
+            trace::finish(trace, &result);
             if let Err(error) = result {
                 let _ = pollster::block_on(output.send(Err(error.into())));
             }
@@ -207,7 +228,7 @@ impl HttpPlugin {
         Ok(Self {
             #[cfg(target_os = "ios")]
             runtime: ctx.runtime().clone(),
-            trace: ctx.diagnostics_sink(),
+            trace: diagnostics,
             #[cfg(not(target_os = "ios"))]
             wire,
         })
@@ -222,11 +243,8 @@ impl HttpPlugin {
         sink: TypedSink<NativeHttpEvent>,
         cancel: CancelToken,
     ) -> Result<(), HttpError> {
-        let request = request.request(cancel)?;
-        let trace = self
-            .trace
-            .as_ref()
-            .map(|sink| trace::RequestTrace::new(Arc::clone(sink), &request));
+        let mut request = request.request(cancel)?;
+        let trace = trace::start(self.trace.as_ref(), &mut request, "fetch");
         let sink = ResponseSink::new(sink, trace);
         #[cfg(target_os = "ios")]
         {

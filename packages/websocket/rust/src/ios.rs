@@ -8,7 +8,7 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-use crate::socket::{WebSocketCommand, WebSocketEvent, WebSocketTransport};
+use crate::socket::{SentObserver, WebSocketCommand, WebSocketEvent, WebSocketTransport};
 use block2::RcBlock;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
@@ -157,17 +157,17 @@ impl Connection {
         unsafe { self.task.receiveMessageWithCompletionHandler(&handler) }
     }
 
-    fn send(&self, text: bool, data: Vec<u8>, sender: &Sender<NativeEvent>) -> Result<(), String> {
+    fn send(&self, text: bool, data: &[u8], sender: &Sender<NativeEvent>) -> Result<(), String> {
         let message = if text {
-            let text = String::from_utf8(data).map_err(|error| error.to_string())?;
+            let text = std::str::from_utf8(data).map_err(|error| error.to_string())?;
             NSURLSessionWebSocketMessage::initWithString(
                 NSURLSessionWebSocketMessage::alloc(),
-                &NSString::from_str(&text),
+                &NSString::from_str(text),
             )
         } else {
             NSURLSessionWebSocketMessage::initWithData(
                 NSURLSessionWebSocketMessage::alloc(),
-                &NSData::with_bytes(&data),
+                &NSData::with_bytes(data),
             )
         };
         let sender = sender.clone();
@@ -202,6 +202,7 @@ impl WebSocketTransport for WebSocket {
         commands: Receiver<WebSocketCommand>,
         active: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(WebSocketEvent) -> bool,
+        mut sent: Option<&mut SentObserver<'_>>,
     ) -> Result<(), String> {
         let (sender, receive) = mpsc::channel();
         let connection = autoreleasepool(|_| Connection::new(url, protocols, sender.clone()))?;
@@ -210,6 +211,7 @@ impl WebSocketTransport for WebSocket {
         // The worker starts another send/receive only after its previous callback.
         // At most those two callbacks and the native lifecycle events can be queued.
         let mut sending: Option<Instant> = None;
+        let mut observed = None;
         while active() {
             if !opened && started.elapsed() >= CONNECT_TIMEOUT {
                 return Err("iOS WebSocket handshake timed out".into());
@@ -220,7 +222,8 @@ impl WebSocketTransport for WebSocket {
             if sending.is_none() {
                 match commands.try_recv() {
                     Ok(WebSocketCommand::Send { text, data }) => {
-                        autoreleasepool(|_| connection.send(text, data, &sender))?;
+                        autoreleasepool(|_| connection.send(text, &data, &sender))?;
+                        observed = sent.is_some().then_some((text, data));
                         sending = Some(Instant::now());
                     }
                     Ok(WebSocketCommand::Close { .. }) | Err(TryRecvError::Disconnected) => {
@@ -246,6 +249,10 @@ impl WebSocketTransport for WebSocket {
                 Ok(NativeEvent::Sent(result)) => {
                     sending = None;
                     result?;
+                    if let (Some(observer), Some((text, bytes))) = (sent.as_mut(), observed.take())
+                    {
+                        observer(text, &bytes);
+                    }
                 }
                 Ok(NativeEvent::Terminal(result)) => {
                     // A native receive may race with the delegate's normal peer-close notice.
@@ -338,6 +345,7 @@ mod tests {
                 };
                 send.send(command).is_ok()
             },
+            None,
         );
         let server = server
             .join()

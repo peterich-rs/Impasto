@@ -31,7 +31,8 @@ use engine::session::Metrics;
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use diagnostics::telemetry::{ScheduleTiming, TelemetryProfile, mono_ns};
 pub use diagnostics::{
-    DiagnosticsHub, FrameSample, LogEntry, LogSource, NetEntry, NetKind, PhaseSample, TelemetryHub,
+    DiagnosticsHub, FrameSample, LogEntry, LogSource, NetEntry, NetKind, NetState, PhaseSample,
+    TelemetryHub,
 };
 pub use engine::session::{FrameTime, Lifecycle};
 pub use error::{BootError, SessionError};

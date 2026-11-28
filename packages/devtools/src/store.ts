@@ -63,10 +63,14 @@ function pull(force = false): void {
     cursors.logs = logLines[logLines.length - 1].seq;
     setLogs((prev) => tailOf(prev, logLines));
   }
-  const netLines = raw.network(cursors.network).entries;
-  if (netLines.length > 0) {
-    cursors.network = netLines[netLines.length - 1].seq;
-    setNetwork((prev) => tailOf(prev, netLines));
+  const netPage = raw.network(cursors.network);
+  cursors.network = netPage.revision;
+  if (netPage.entries.length > 0) {
+    setNetwork((prev) => {
+      const rows = new Map(prev.map((entry) => [entry.seq, entry]));
+      for (const entry of netPage.entries) rows.set(entry.seq, entry);
+      return Array.from(rows.values()).slice(-150);
+    });
   }
 }
 

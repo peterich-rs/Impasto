@@ -146,6 +146,7 @@ struct WebSocketPlugin {
 
 impl WebSocketPlugin {
     fn init(ctx: &PluginContext) -> Result<Self, PluginInitError> {
+        #[cfg(not(target_os = "ios"))]
         let transport = None;
         #[cfg(target_os = "ios")]
         let transport = Some(Arc::new(ios::WebSocket) as Arc<dyn WebSocketTransport>);

@@ -84,7 +84,7 @@ pub struct RedirectHop {
 由于 `OpenWireClient` 与 `images::remote` 均复用全局共享的 `openwire::Client`，绝不能在 `Client` 上存单条全局状态。具体做法：
 1. 实现 `ImpastoEventListenerFactory: openwire::EventListenerFactory` 并注册到 `Client::builder().event_listener_factory(...)`；
 2. 每次构建 `http::Request`（每一跳）时，生成一个每跳专属的 `Arc<Mutex<HopTimingState>>`，写入 `wire_request.extensions_mut().insert(Arc::clone(&hop_state))`；
-3. 若 `openwire::CallContext` 可读取请求扩展（或通过 `EventListenerFactory::create(&CallContext)` 在 `call_start(ctx, request)` 中从 `request.extensions().get::<HopTrackerExtension>()` 提取该 `Arc<Mutex<HopTimingState>>` 并缓存进该次 `Call` 的 `EventListener` 实例），即可在 100% 并发安全的前提下精确关联每一跳！
+3. `EventListenerFactory::create(&Request<RequestBody>)` 从请求扩展取出该跳的状态。HTTP 插件和远程图片共用 SDK 的监听器，每次调用各自持有状态。
 
 ### 3.2 OpenWire 回调 → 9 阶段换算规则
 

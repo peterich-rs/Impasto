@@ -1,6 +1,6 @@
 //! Native async WebSocket runner and platform transport contract.
 
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use http::Uri;
 use impasto::{Bytes as JsBytes, CancelToken, DiagnosticsSink, TypedSink};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::connect_async_with_config;
+use tokio_tungstenite::tungstenite::Error as SocketError;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message, WebSocketConfig};
@@ -52,6 +53,8 @@ pub enum WebSocketEvent {
     Error(String),
 }
 
+pub(crate) type SentObserver<'a> = dyn FnMut(bool, &[u8]) + 'a;
+
 pub trait WebSocketTransport: Send + Sync {
     fn run(
         &self,
@@ -60,6 +63,7 @@ pub trait WebSocketTransport: Send + Sync {
         commands: std_mpsc::Receiver<WebSocketCommand>,
         active: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(WebSocketEvent) -> bool,
+        sent: Option<&mut SentObserver<'_>>,
     ) -> Result<(), String>;
 }
 
@@ -137,8 +141,6 @@ pub struct SocketSession {
     pending_run: Mutex<Option<(SlotTicket, PendingSocketRun)>>,
 }
 
-static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
-
 impl SocketSession {
     pub fn open(
         url: String,
@@ -151,7 +153,7 @@ impl SocketSession {
         validate_subprotocols(&protocols)?;
         let ticket = tracker.acquire()?;
         let (tx, rx) = mpsc::channel(CMD_CHANNEL_CAP);
-        let id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed) + 1;
+        let id = impasto::network::next_token();
 
         Ok(Arc::new(Self {
             id,
@@ -356,6 +358,9 @@ async fn run_socket(
     mut sink: TypedSink<NativeWebSocketEvent>,
     handle: tokio::runtime::Handle,
 ) {
+    let _trace = run.devtools.as_ref().map(|sink| {
+        trace::SocketTrace::start(Arc::clone(sink), shared.id, &run.url, shared.cancel.clone())
+    });
     if let Some(platform) = run.transport.take() {
         run_blocking_transport(platform, run, shared, sink, handle).await;
         return;
@@ -479,7 +484,7 @@ async fn run_native_async(
 
         enum Step {
             Cancel,
-            Incoming(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
+            Incoming(Option<Result<Message, SocketError>>),
             Command(Option<QueuedCommand>),
             CloseTimeout,
         }
@@ -544,7 +549,24 @@ async fn run_native_async(
                             Ok(Message::Binary(Bytes::from(data)))
                         };
                         match msg {
-                            Ok(msg) => ws_tx.send(msg).await.map_err(|e| e.to_string()),
+                            Ok(msg) => {
+                                let observed = devtools.is_some().then(|| msg.clone());
+                                let result =
+                                    ws_tx.send(msg).await.map_err(|error| error.to_string());
+                                if result.is_ok()
+                                    && let (Some(sink), Some(message)) =
+                                        (devtools.as_deref(), observed)
+                                {
+                                    trace::outbound(
+                                        sink,
+                                        shared.id,
+                                        &url,
+                                        text,
+                                        &message.into_data(),
+                                    );
+                                }
+                                result
+                            }
                             Err(err) => Err(err),
                         }
                     }
@@ -707,6 +729,14 @@ async fn run_blocking_transport(
     let emit_sink_cancel = shared.sink_cancel.clone();
 
     let join = handle.spawn_blocking(move || {
+        let mut record_sent = |text, bytes: &[u8]| {
+            if let Some(diagnostics) = devtools.as_deref() {
+                trace::outbound(diagnostics, shared.id, &url, text, bytes);
+            }
+        };
+        let observe = devtools
+            .is_some()
+            .then_some(&mut record_sent as &mut SentObserver<'_>);
         let outcome = transport.run(
             &url,
             &protocols,
@@ -731,6 +761,7 @@ async fn run_blocking_transport(
                 sink.send_blocking(encode_event(event), BLOCKING_SEND_TIMEOUT)
                     .is_ok()
             },
+            observe,
         );
         shared.mark_closed();
         if let Err(message) = outcome

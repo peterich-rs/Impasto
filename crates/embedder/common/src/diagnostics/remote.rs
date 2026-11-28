@@ -34,6 +34,7 @@ use tokio_tungstenite::{
 };
 
 use super::hub::{CaptureOptions, TraceCapture};
+use super::net_bodies::BodySide;
 use super::remote_stream::Subscription;
 use super::telemetry::TelemetryProfile;
 use super::timeline::{FieldValue, TraceDetail};
@@ -323,6 +324,8 @@ async fn serve(stream: TcpStream, agent: Arc<Agent>) {
             Capability::BinaryFrames,
             Capability::ViewRepaintTracker,
             Capability::RemoteOverlay,
+            Capability::NetworkTimings,
+            Capability::NetworkBodies,
         ]);
         json!({"version": PROTOCOL_VERSION_V2, "capabilities": capabilities, "session": agent.info()})
     } else {
@@ -675,6 +678,27 @@ fn request_v2(
             pending.spawn(ui_reply(id, binary_kind, done));
             return None;
         }
+        "net.get_body" => {
+            let Some(token) = network_token(params) else {
+                return Some(fail(-32602, "expected network token"));
+            };
+            let side = match (params["side"].as_str(), params["frame_seq"].as_u64()) {
+                (_, Some(frame)) => BodySide::Socket(frame),
+                (Some("request"), _) => BodySide::Request,
+                (None | Some("response"), _) => BodySide::Response,
+                _ => return Some(fail(-32602, "invalid body side")),
+            };
+            match hub.net_body(token, side) {
+                Some(body) => binary(id, BinaryMsgType::NetBody, &body),
+                None => fail(-32003, "body unavailable"),
+            }
+        }
+        "net.get_ws_frames" => {
+            let Some(token) = network_token(params) else {
+                return Some(fail(-32602, "expected network token"));
+            };
+            ok(json!(hub.ws_updates(token, params["since"].as_u64())))
+        }
         "trace.start" => {
             let Some(options) = capture_options(params) else {
                 return Some(fail(-32602, "invalid trace options"));
@@ -730,6 +754,12 @@ fn request_v2(
         },
         _ => fail(-32601, "unknown method"),
     })
+}
+
+fn network_token(params: &Value) -> Option<u64> {
+    params["token"]
+        .as_u64()
+        .or_else(|| params["token"].as_str()?.parse().ok())
 }
 
 #[derive(Default)]

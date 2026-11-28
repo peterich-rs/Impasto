@@ -1,6 +1,7 @@
 //! Ring buffers with a monotonic revision per channel. Producers are the
 //! UI, raster and IO queues, external network callbacks and the log hook.
 
+use super::net_bodies::{BodySide, NetBodyPool};
 use super::telemetry::{ScheduleTiming, TelemetryProfile};
 use super::timeline::{CapturedSpan, SpanLoss, TimelineRecording, TraceDetail};
 use std::path::PathBuf;
@@ -68,10 +69,27 @@ pub struct DiagError {
     pub frame: Option<u64>,
 }
 
-/// One HTTP call or socket lifecycle step.
-#[derive(Clone, Debug)]
+/// One HTTP transfer or WebSocket connection.
+#[derive(Clone, Debug, Default)]
 pub struct NetEntry {
     pub seq: u64,
+    pub(crate) changed_at: u64,
+    pub initiator: String,
+    pub state: NetState,
+    pub final_url: Option<String>,
+    pub redirected: bool,
+    pub head_elapsed_ms: Option<f64>,
+    pub timing: Option<impasto::network::NetworkTiming>,
+    pub connection: Option<impasto::network::ConnectionMeta>,
+    pub redirects: Vec<impasto::network::RedirectHop>,
+    pub request_body_truncated: bool,
+    pub response_body_truncated: bool,
+    pub request_body_evicted: bool,
+    pub response_body_evicted: bool,
+    pub ws_sent: u64,
+    pub ws_received: u64,
+    pub ws_bytes_sent: u64,
+    pub ws_bytes_received: u64,
     pub at_ms: f64,
     pub kind: NetKind,
     pub token: u64,
@@ -87,11 +105,36 @@ pub struct NetEntry {
     pub done_ms: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NetKind {
+    #[default]
     Http,
     Stream,
     Socket,
+}
+
+/// State of a transfer at the latest channel revision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetState {
+    #[default]
+    Pending,
+    Streaming,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct WsFrame {
+    pub seq: u64,
+    pub token: u64,
+    pub at_ms: f64,
+    pub direction: String,
+    pub opcode: String,
+    pub bytes_len: u64,
+    pub preview: Vec<u8>,
+    pub error: Option<String>,
 }
 
 impl NetKind {
@@ -312,7 +355,12 @@ macro_rules! seq_field {
 
 seq_field!(LogEntry);
 seq_field!(DiagError);
-seq_field!(NetEntry);
+impl SeqField for NetEntry {
+    fn cursor(&self) -> u64 {
+        self.changed_at
+    }
+}
+seq_field!(WsFrame);
 impl SeqField for FrameSample {
     fn cursor(&self) -> u64 {
         self.changed_at
@@ -352,6 +400,8 @@ pub struct TelemetryHub {
     pub(crate) logs: Mutex<Ring<LogEntry>>,
     pub(crate) errors: Mutex<Ring<DiagError>>,
     pub(crate) network: Mutex<Ring<NetEntry>>,
+    net_bodies: Mutex<NetBodyPool>,
+    ws_frames: Mutex<Ring<WsFrame>>,
     pub(crate) frames: Mutex<Ring<FrameSample>>,
     /// Bumped by any channel so a reader can skip the whole pull.
     revision: AtomicU64,
@@ -411,6 +461,8 @@ impl TelemetryHub {
             logs: Mutex::new(Ring::new(LOG_CAP)),
             errors: Mutex::new(Ring::new(ERROR_CAP)),
             network: Mutex::new(Ring::new(NET_CAP)),
+            net_bodies: Mutex::default(),
+            ws_frames: Mutex::new(Ring::new(1024)),
             frames: Mutex::new(Ring::new(FRAME_CAP)),
             revision: AtomicU64::new(1),
             flags: Mutex::new(DevtoolsFlags::default()),
@@ -517,12 +569,95 @@ impl TelemetryHub {
         self.bump();
     }
 
-    pub(crate) fn record_net(&self, mut entry: NetEntry) {
+    pub(super) fn record_net(&self, mut entry: NetEntry) {
         lock(&self.network).push(|seq| {
             entry.seq = seq;
+            entry.changed_at = seq;
             entry
         });
         self.bump();
+    }
+
+    pub(super) fn update_net(&self, token: u64, update: impl FnOnce(&mut NetEntry)) {
+        let mut network = lock(&self.network);
+        if let Some(index) = network.buf.iter().rposition(|entry| entry.token == token) {
+            network.seq = network.seq.saturating_add(1);
+            let seq = network.seq;
+            let entry = &mut network.buf[index];
+            update(entry);
+            entry.changed_at = seq;
+            self.bump();
+        }
+    }
+
+    pub(super) fn note_body(&self, token: u64, side: BodySide, body: Vec<u8>) {
+        let evicted = lock(&self.net_bodies).insert((token, side), body);
+        for (token, side) in evicted {
+            match side {
+                BodySide::Request => {
+                    self.update_net(token, |entry| entry.request_body_evicted = true)
+                }
+                BodySide::Response => {
+                    self.update_net(token, |entry| entry.response_body_evicted = true)
+                }
+                BodySide::Socket(_) => {}
+            }
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn net_body(&self, token: u64, side: BodySide) -> Option<Arc<[u8]>> {
+        lock(&self.net_bodies).get((token, side))
+    }
+
+    pub(super) fn record_ws(&self, mut frame: WsFrame, body: Option<Vec<u8>>) {
+        let mut frames = lock(&self.ws_frames);
+        let token = frame.token;
+        let mut occurrences = 0;
+        if let Some(index) = frames
+            .buf
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, entry)| {
+                if entry.token == token {
+                    occurrences += 1;
+                }
+                (occurrences == 200).then_some(index)
+            })
+            && let Some(oldest) = frames.buf.remove(index)
+        {
+            frames.discarded_through = frames.discarded_through.max(oldest.seq);
+        }
+        frames.push(|seq| {
+            frame.seq = seq;
+            frame
+        });
+        let seq = frames.seq;
+        drop(frames);
+        if let Some(body) = body {
+            self.note_body(token, BodySide::Socket(seq), body);
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn ws_updates(
+        &self,
+        token: u64,
+        since: Option<u64>,
+    ) -> devtools_protocol::ChannelUpdate<WsFrame> {
+        let frames = lock(&self.ws_frames);
+        let reset =
+            since.is_none_or(|since| since < frames.discarded_through || since > frames.seq);
+        devtools_protocol::ChannelUpdate {
+            revision: frames.seq,
+            reset,
+            entries: frames
+                .tail(if reset { 0 } else { since.unwrap_or_default() })
+                .filter(|frame| frame.token == token)
+                .cloned()
+                .collect(),
+        }
     }
 
     /// Returns the current logs revision and entries newer than the supplied cursor.
@@ -887,9 +1022,16 @@ pub type DiagnosticsHub = TelemetryHub;
 
 impl impasto::DiagnosticsSink for TelemetryHub {
     fn record(&self, source: &str, event: &str, payload: impasto::abi::PluginValue) {
-        if event == "network" {
-            super::plugin_record::network(self, source, payload);
-            return;
+        match event {
+            "network" | "network.start" | "network.head" | "network.finish" => {
+                super::plugin_record::network(self, source, event, payload);
+                return;
+            }
+            "network.ws_frame" => {
+                super::plugin_record::websocket(self, payload);
+                return;
+            }
+            _ => {}
         }
         self.push_log(LogEntry {
             seq: 0,
@@ -1162,6 +1304,7 @@ mod tests {
             response_preview: Some(b"hi".to_vec()),
             error: None,
             done_ms: Some(2.0),
+            ..Default::default()
         });
         let entry = lock(&hub.network).tail(0).next().cloned().unwrap();
         assert_eq!(entry.seq, 1);

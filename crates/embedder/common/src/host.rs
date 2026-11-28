@@ -858,16 +858,18 @@ fn run_boot(
         let inbox = Arc::clone(inbox);
         let upload = Arc::clone(&upload);
         let io = Arc::clone(&runners.io);
+        let telemetry = telemetry.clone();
         move |request| {
             let decoder = Arc::clone(&decoder);
             let inbox = Arc::clone(&inbox);
             let upload = Arc::clone(&upload);
+            let telemetry = telemetry.clone();
             let request_id = request.generation;
             tracing::event!(name: "image_requested", target: "impasto::io", tracing::Level::DEBUG,
                 trace_event = true, request_id);
             io.post(Box::new(move || {
                 let _job = tracing::debug_span!(target: "impasto::io", "image_job", request_id, queue = "io").entered();
-                let result = decode_one(decoder.as_ref(), &request, &upload);
+                let result = decode_one(decoder.as_ref(), &request, &upload, telemetry.as_ref());
                 tracing::event!(name: "image_ready", target: "impasto::io", tracing::Level::DEBUG,
                     trace_event = true, request_id);
                 inbox.post(Command::ImageReady(result));
@@ -914,13 +916,14 @@ fn decode_one(
     decoder: &dyn ImageDecoder,
     request: &ImageRequest,
     upload: &Mutex<Option<raster::TextureFactory>>,
+    telemetry: Option<&Arc<TelemetryHub>>,
 ) -> ImageReady {
     let result = if request.source.starts_with("https://") {
         let body = {
             let _span =
                 tracing::debug_span!(target: "impasto::io", "image_fetch", request_id = request.generation)
                     .entered();
-            images::remote::fetch(&request.source)
+            images::remote::fetch(&request.source, telemetry)
         };
         let _span =
             tracing::debug_span!(target: "impasto::io", "image_decode", request_id = request.generation)

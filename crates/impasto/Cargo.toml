@@ -5,7 +5,12 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+network-observation = ["dep:openwire", "dep:http"]
+
 [dependencies]
+openwire = { version = "0.1.2", default-features = false, optional = true }
+http = { version = "1", optional = true }
 javascript.workspace = true
 impasto-macros = { path = "../impasto-macros" }
 futures-channel = { version = "0.3", features = ["sink"] }

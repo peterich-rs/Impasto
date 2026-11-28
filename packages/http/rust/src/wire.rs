@@ -3,9 +3,9 @@
 #[cfg(target_os = "ios")]
 use std::time::Duration;
 
-use crate::trace::RequestTrace;
 use crate::{HttpError as PublicError, NativeHttpEvent};
 use impasto::abi::StreamSendError;
+use impasto::network::{HopLog, RequestTrace};
 use impasto::{Bytes as JsBytes, CancelToken, ImpastoType, TypedSendError, TypedSink};
 
 #[cfg(not(target_os = "ios"))]
@@ -27,6 +27,7 @@ pub enum RedirectMode {
 
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
+    pub hops: Option<HopLog>,
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
@@ -148,13 +149,13 @@ impl ResponseSink {
         redirected: bool,
         headers: &[(String, String)],
     ) -> Result<(), HttpError> {
+        if let Some(trace) = &mut self.trace {
+            trace.head(status, url, redirected, headers);
+        }
         self.stream
             .send(Self::head(status, url, redirected, headers))
             .await
             .map_err(Self::map_send_error)?;
-        if let Some(trace) = &mut self.trace {
-            trace.head(status, headers);
-        }
         Ok(())
     }
 
@@ -182,15 +183,15 @@ impl ResponseSink {
         redirected: bool,
         headers: &[(String, String)],
     ) -> Result<(), HttpError> {
+        if let Some(trace) = &mut self.trace {
+            trace.head(status, url, redirected, headers);
+        }
         self.stream
             .send_blocking(
                 Self::head(status, url, redirected, headers),
                 BLOCKING_SEND_TIMEOUT,
             )
             .map_err(Self::map_send_error)?;
-        if let Some(trace) = &mut self.trace {
-            trace.head(status, headers);
-        }
         Ok(())
     }
 
@@ -214,7 +215,12 @@ impl ResponseSink {
 
     fn complete(mut self, result: Result<(), HttpError>) -> Result<(), PublicError> {
         if let Some(trace) = self.trace.take() {
-            trace.finish(result.as_ref().err().map(|error| error.message.as_str()));
+            trace.finish(
+                result.as_ref().err().map(|error| error.message.as_str()),
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.kind == HttpFailure::Canceled),
+            );
         }
         result.map_err(PublicError::from)
     }
@@ -240,6 +246,40 @@ pub(crate) trait HttpClient: Send + Sync + 'static {
         sink(HttpPiece::Chunk(&response.body, true));
         Ok(())
     }
+}
+
+pub(crate) fn collect_response(
+    request: &HttpRequest,
+    stream: impl FnOnce(&mut dyn FnMut(HttpPiece<'_>) -> bool) -> Result<(), HttpError>,
+) -> Result<HttpResponse, HttpError> {
+    let mut response = HttpResponse {
+        status: 0,
+        url: request.url.clone(),
+        redirected: false,
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    stream(&mut |piece| {
+        match piece {
+            HttpPiece::Head {
+                status,
+                url,
+                redirected,
+                headers,
+            } => {
+                response.status = status;
+                response.url = url.to_owned();
+                response.redirected = redirected;
+                response.headers = headers.to_vec();
+            }
+            HttpPiece::Chunk(bytes, _) => response.body.extend_from_slice(bytes),
+        }
+        true
+    })?;
+    if response.status == 0 {
+        return Err(HttpError::new(HttpFailure::Network, "no HTTP response"));
+    }
+    Ok(response)
 }
 
 #[cfg(target_os = "ios")]

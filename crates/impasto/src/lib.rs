@@ -1,7 +1,10 @@
 //! Rust API for modules linked into an Impasto application.
 
+extern crate self as impasto;
+
 mod context;
 mod diagnostics;
+pub mod network;
 pub mod os;
 mod os_channel;
 mod os_events;
