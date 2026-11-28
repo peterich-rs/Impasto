@@ -630,7 +630,15 @@ fn request_v2(
             });
             return None;
         }
+        "view.layout_issues" if params["inspect"].as_bool() != Some(true) => {
+            match serde_json::from_str::<Value>(&hub.layout_report()) {
+                Ok(report) if report["issues"].is_array() => ok(report),
+                Ok(report) if report.is_array() => ok(json!({"issues": report})),
+                _ => fail(-32603, "invalid layout report"),
+            }
+        }
         "view.snapshot"
+        | "view.layout_issues"
         | "view.probe"
         | "view.set_overlay"
         | "view.repaint_leaderboard"
@@ -651,6 +659,7 @@ fn request_v2(
                     )
                     .unwrap_or(512),
                 },
+                "view.layout_issues" => DevtoolsQuery::ViewLayoutIssues,
                 "view.probe" => {
                     #[expect(
                         clippy::cast_possible_truncation,

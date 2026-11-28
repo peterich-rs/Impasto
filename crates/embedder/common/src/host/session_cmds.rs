@@ -285,6 +285,7 @@ fn devtools(runtime: &mut UiHost, query: crate::command::DevtoolsQuery) -> Resul
             return Ok(b"true".to_vec());
         }
 
+        DevtoolsQuery::ViewLayoutIssues => session_call(|| value = session.inspect_layout_issues()),
         DevtoolsQuery::ViewSnapshot { max_nodes } => {
             session_call(|| value = session.inspector_snapshot_limited(max_nodes))
         }

@@ -117,6 +117,7 @@ pub(crate) fn register_device(
     package: &str,
     config: (u16, String),
     project_root: &Path,
+    bundle: &Path,
 ) -> Result<String> {
     let prefix = match kind {
         DeviceKind::Android => "android",
@@ -137,6 +138,10 @@ pub(crate) fn register_device(
             remote_port: config.0,
             token: config.1,
             project_root: project_root.to_owned(),
+            source_map: ["app.sym", "app.js.map"]
+                .into_iter()
+                .map(|name| bundle.join(name))
+                .find(|path| path.is_file()),
         },
     )?;
     file.flush()?;
