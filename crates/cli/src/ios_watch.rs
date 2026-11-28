@@ -7,7 +7,9 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+use anyhow::{Result, bail};
 use dev_protocol::{Frame, Kind, Receipt};
 
 use super::{RunDevice, build_artifact, bundle_id};
