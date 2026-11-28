@@ -4,7 +4,8 @@ use super::FrameSample;
 
 pub(super) fn record(frame: &FrameSample) -> FrameRecord {
     let timing = frame.schedule;
-    let render = frame.raster.render;
+    let raster = &frame.raster;
+    let render = raster.render;
     let phase = frame.phases;
     FrameRecord {
         id: frame.number,
@@ -96,6 +97,20 @@ pub(super) fn record(frame: &FrameSample) -> FrameRecord {
                     .collect()
             }),
         },
+        picture_prepare_ms: raster.picture_prepare.as_secs_f64() * 1_000.0,
+        glyph_prepare_ms: raster.glyph_prepare.as_secs_f64() * 1_000.0,
+        compose_ms: raster.compose.as_secs_f64() * 1_000.0,
+        encode_ms: raster.encode.as_secs_f64() * 1_000.0,
+        raster_flush_ms: raster.flush.as_secs_f64() * 1_000.0,
+        queue_submit_ms: raster.queue_submit.as_secs_f64() * 1_000.0,
+        acquire_ms: raster.acquire.as_secs_f64() * 1_000.0,
+        atlas_misses: raster.atlas.misses,
+        atlas_evictions: raster.atlas.evictions,
+        atlas_bytes: raster.atlas.bytes as u64,
+        image_resident_bytes: raster.image_upload.resident_bytes,
+        offscreen_peak_bytes: render.offscreen_peak_bytes,
+        offscreen_passes: render.offscreen_passes,
+        direct_present: render.direct_present,
         runtime_sample: frame.runtime.map(|sample| RuntimeSample {
             promises: sample.promises,
             timers: sample.timers,

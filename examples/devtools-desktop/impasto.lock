@@ -1,11 +1,13 @@
 version = 2
 roots = [
+    "@impasto/clipboard",
     "@impasto/file-system",
     "@impasto/solid-renderer",
     "@impasto/solid-ui",
 ]
 
 [graph]
+"@impasto/clipboard" = []
 "@impasto/file-system" = []
 "@impasto/solid-renderer" = []
 "@impasto/solid-ui" = []

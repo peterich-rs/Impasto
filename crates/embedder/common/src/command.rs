@@ -57,6 +57,7 @@ pub enum DevtoolsQuery {
     ClearSampler {
         owner: u64,
     },
+    ViewLayoutIssues,
     ViewSnapshot {
         max_nodes: usize,
     },

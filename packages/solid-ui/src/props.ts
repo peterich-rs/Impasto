@@ -98,6 +98,8 @@ export interface FieldProps extends ElementProps {
   placeholder?: string;
   onChange?: (value: string) => void;
   onSubmit?: (value: string) => void;
+  /** Return true to handle this key before the field edits text. */
+  onKeyDown?: (key: string) => boolean;
   multiline?: boolean;
   keyboard?: KeyboardName;
   action?: ActionName;

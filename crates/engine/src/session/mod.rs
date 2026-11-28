@@ -391,6 +391,11 @@ pub trait Session {
         self.inspector_snapshot()
     }
 
+    /// Scans the last completed layout for overflow on the owning UI queue.
+    fn inspect_layout_issues(&mut self) -> Option<String> {
+        None
+    }
+
     /// Returns the hit-test route at a point in scene coordinates.
     fn inspector_probe(&self, _x: f32, _y: f32) -> Option<String> {
         None

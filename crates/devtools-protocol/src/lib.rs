@@ -102,7 +102,7 @@ pub struct SessionInfo {
 }
 
 /// Private local registration written by a live agent.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalSessionEntry {
     pub pid: u32,
@@ -118,7 +118,7 @@ pub struct LocalSessionEntry {
 }
 
 /// Private registration for a device whose agent is reached over a tunnel.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSessionEntry {
     pub device_kind: DeviceKind,
@@ -127,6 +127,8 @@ pub struct DeviceSessionEntry {
     pub remote_port: u16,
     pub token: String,
     pub project_root: PathBuf,
+    #[serde(default)]
+    pub source_map: Option<PathBuf>,
 }
 
 /// Device transport selected by the CLI.
@@ -145,4 +147,19 @@ pub struct OverlayConfig {
     pub pick_mode: bool,
     pub repaint_rainbow: bool,
     pub layout_scan: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_device_registrations_default_to_no_source_map() -> Result<(), serde_json::Error> {
+        let wire = r#"{"deviceKind":"android","serial":"emulator-5554","package":"dev.impasto",
+            "remotePort":8765,"token":"test","projectRoot":"/project"}"#;
+        let entry: DeviceSessionEntry = serde_json::from_str(wire)?;
+        assert_eq!(entry.serial, "emulator-5554");
+        assert_eq!(entry.source_map, None);
+        Ok(())
+    }
 }

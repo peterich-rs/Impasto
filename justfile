@@ -124,3 +124,13 @@ cli-dist:
 # Identical gallery click and wheel scenarios before/after the native toolchain.
 toolchain-baseline *args: gallery-dist
     python3 "{{root}}/tools/toolchain-baseline.py" {{args}}
+
+# Check the standalone macOS DevTools client and its generated native bindings.
+devtools-desktop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    app="{{root}}/examples/devtools-desktop"
+    cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- --project "$app" sync --platform macos
+    CARGO_TARGET_DIR="{{root}}/target/devtools-core" cargo clippy --manifest-path "$app/rust/Cargo.toml" --config "$app/.impasto/cargo/.cargo/config.toml" --config "$app/.impasto/cargo/Cargo.toml" --all-targets -- -D warnings
+    CARGO_TARGET_DIR="{{root}}/target/devtools-core" cargo test --manifest-path "$app/rust/Cargo.toml" --config "$app/.impasto/cargo/.cargo/config.toml" --config "$app/.impasto/cargo/Cargo.toml"
+    cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- --project "$app" analyze --platform macos --deny-warnings

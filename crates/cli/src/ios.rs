@@ -933,6 +933,7 @@ impl RunDevice {
                         &package,
                         config,
                         &app.root,
+                        application,
                     )
                 })
                 .transpose()?,

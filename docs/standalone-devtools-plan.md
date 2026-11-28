@@ -3,21 +3,33 @@
 本文档定义 Impasto 独立进程外开发者工具（**Impasto DevTools**）的产品规划、基本交互与视觉规范、工具链改造以及桌面自举应用实现方案，覆盖帧处理流水线、JS Runtime、View 级重绘、全链路网络与资源性能等全维度可观测能力。
 
 > **适用范围与前提**
-> - **目标平台边界**：当前框架原生支持 `macos`、`ios`、`android`（尚未支持 Web/WASM 及 Windows/Linux 桌面端）。因此本期独立 DevTools 以 **macOS 原生独立桌面应用**（位于拟新建的 `examples/devtools-desktop/`，基于 Impasto 框架自身与 `@impasto/solid-ui` 自举实现）为唯一客户端载体；Web/跨平台桌面载体暂不纳入本期范围。
+> - **目标平台边界**：当前框架原生支持 `macos`、`ios`、`android`（尚未支持 Web/WASM 及 Windows/Linux 桌面端）。因此本期独立 DevTools 以 **macOS 原生独立桌面应用**（位于 `examples/devtools-desktop/`，基于 Impasto 框架自身与 `@impasto/solid-ui` 自举实现）为唯一客户端载体；Web/跨平台桌面载体暂不纳入本期范围。
 > - **架构兼容前提**：共享协议与 DevTools Rust Core 层均保持平台无关设计；当后续框架补齐 Web 或其他桌面端 `embedder` 时，可在不重写协议与核心逻辑的前提下直接复用。
 > - **前置基线**：本规划建立在 [性能基线与遥测](telemetry-and-p1-plan.md)、[光栅管线与宿主调度](wgpu-rendering-pipeline.md) 与 [Rust 业务与原生插件](rust-plugins-and-native-modules.md) 的现有机制之上，并严格遵守仓库的依赖隔离（`just boundaries`）、单主力渲染路径与零 `unsafe`/`unwrap` 规则。
 
-### 前置改造细化实现方案索引
+### 分阶段细化实现方案索引
 
-针对第 1.2 节识别的 5 项核心缺口，各模块的详细数据结构、插桩点、边界护栏与验证清单已拆分为以下独立落地文档：
+#### Stage 1：5 项前置基础改造（已落地）
 
-| 前置改造模块 | 详细实现方案文档 | 覆盖核心范围 |
+针对第 1.2 节识别的 5 项核心缺口，以下前置基础改造与 `examples/devtools-desktop/` 初始骨架均已完成落地：
+
+| 前置改造模块 | 详细实现方案文档 | 覆盖核心范围 | 状态 |
+|---|---|---|---|
+| 1. 共享协议与零摩擦发现 | [devtools-protocol-and-discovery.md](devtools-protocol-and-discovery.md) | `crates/devtools-protocol` · JSON-RPC v2 + Binary Frame · UI 双向桥 · 本机/USB 自动发现与 CLI 联动 | 已落地 |
+| 2. View 重绘追踪与远程 Overlay | [devtools-engine-repaint-and-overlay.md](devtools-engine-repaint-and-overlay.md) | `RepaintTracker`（4 种绘制路径与位图频次）· 单帧重绘 View 清单 · Highlight/Pick/Repaint Rainbow | 已落地 |
+| 3. 全链路网络采集 | [devtools-network-full-tracing.md](devtools-network-full-tracing.md) | OpenWire `EventListener` · iOS `NSURLSession` Metrics · WebSocket 双向帧 · 远程图片 · `NetBodyPool` | 已落地 |
+| 4. JS Runtime 可观测性 | [devtools-js-runtime-observability.md](devtools-js-runtime-observability.md) | QuickJS `JSMemoryUsage` 细分 · Timers/Promises · 主动 GC · 可调采样器 · 离线 SourceMap 符号化 | 已落地 |
+| 5. macOS 桌面自举底座 | [devtools-macos-desktop-foundation.md](devtools-macos-desktop-foundation.md) | 窗口尺寸配置与记忆 · `"Monospace"` 字体注册 · `CursorStyle`→`NSCursor` · 文件面板补强 · `NSMenu` | 已落地 |
+
+#### Stage 2：`examples/devtools-desktop` 桌面工作台
+
+[桌面应用](../examples/devtools-desktop/app.toml) 使用协议 v2 连接目标进程，也可以打开归档离线回放。使用 `impasto devtools` 启动，使用 `just devtools-desktop` 验证桌面端。下列文档保留第二阶段的设计与验收范围。
+
+| 实现模块 | 详细实现方案文档 | 覆盖核心范围 |
 |---|---|---|
-| 1. 共享协议与零摩擦发现 | [devtools-protocol-and-discovery.md](devtools-protocol-and-discovery.md) | `crates/devtools-protocol` · JSON-RPC v2 + Binary Frame · UI 双向桥 · 本机/USB 自动发现与 CLI 联动 |
-| 2. View 重绘追踪与远程 Overlay | [devtools-engine-repaint-and-overlay.md](devtools-engine-repaint-and-overlay.md) | `RepaintTracker`（4 种绘制路径与位图频次）· 单帧重绘 View 清单 · Highlight/Pick/Repaint Rainbow |
-| 3. 全链路网络采集 | [devtools-network-full-tracing.md](devtools-network-full-tracing.md) | OpenWire `EventListener` · iOS `NSURLSession` Metrics · WebSocket 双向帧 · 远程图片 · `NetBodyPool` |
-| 4. JS Runtime 可观测性 | [devtools-js-runtime-observability.md](devtools-js-runtime-observability.md) | QuickJS `JSMemoryUsage` 细分 · Timers/Promises · 主动 GC · 可调采样器 · 离线 SourceMap 符号化 |
-| 5. macOS 桌面自举底座 | [devtools-macos-desktop-foundation.md](devtools-macos-desktop-foundation.md) | 窗口尺寸配置与记忆 · `"Monospace"` 字体注册 · `CursorStyle`→`NSCursor` · 文件面板补强 · `NSMenu` |
+| 1. 工程、协议微补丁与 Rust Core | [devtools-desktop-rust-core.md](devtools-desktop-rust-core.md) | 3 处向后兼容协议微补丁 · `@app/devtools-core` 全双工 WS v2 引擎 · 6 大有界时序库 · 5 大分析器 · Viewport Projection 二进制缓冲协议与导出契约 |
+| 2. 视觉、工作台壳与 Canvas 图表 | [devtools-desktop-ui-and-charts.md](devtools-desktop-ui-and-charts.md) | Engineering Precision 双主题色板与 `ColorBucket` · 矢量图标集 · 5 区域 `SplitPane` 主壳与快捷键 · 6 类 `Canvas` 批量绘制图表与虚拟化列表规范 |
+| 3. 六大页面详设与分阶段验收 | [devtools-desktop-pages-and-delivery.md](devtools-desktop-pages-and-delivery.md) | 跨面板 `NavigationIntent` 因果深链 · 6 大诊断页面完整交互与检查器 · M0–M3 分阶段排期 · Rust/UI/自举视觉验收清单 |
 
 ---
 

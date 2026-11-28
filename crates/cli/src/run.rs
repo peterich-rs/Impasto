@@ -243,6 +243,7 @@ impl Android {
                 &package,
                 config,
                 &app.root,
+                &app.root.join("build/android/bundle/debug"),
             )?;
             if attach {
                 crate::devtools::launch_native(Some(&id))?;

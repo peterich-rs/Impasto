@@ -73,6 +73,34 @@ pub struct FrameRecord {
     pub atlas_upload_bytes: u64,
     pub gpu: GpuTiming,
     pub runtime_sample: Option<RuntimeSample>,
+    #[serde(default)]
+    pub picture_prepare_ms: f64,
+    #[serde(default)]
+    pub glyph_prepare_ms: f64,
+    #[serde(default)]
+    pub compose_ms: f64,
+    #[serde(default)]
+    pub encode_ms: f64,
+    #[serde(default)]
+    pub raster_flush_ms: f64,
+    #[serde(default)]
+    pub queue_submit_ms: f64,
+    #[serde(default)]
+    pub acquire_ms: f64,
+    #[serde(default)]
+    pub atlas_misses: u32,
+    #[serde(default)]
+    pub atlas_evictions: u32,
+    #[serde(default)]
+    pub atlas_bytes: u64,
+    #[serde(default)]
+    pub image_resident_bytes: u64,
+    #[serde(default)]
+    pub offscreen_peak_bytes: u64,
+    #[serde(default)]
+    pub offscreen_passes: u32,
+    #[serde(default)]
+    pub direct_present: bool,
 }
 
 /// Cause and optional node that blocked a compositor-only frame.
@@ -113,4 +141,47 @@ pub struct RuntimeSample {
     pub queued_events: usize,
     pub queued_bytes: usize,
     pub heap_bytes: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_frames_default_raster_and_resource_details() -> Result<(), serde_json::Error> {
+        let frame = FrameRecord {
+            id: 7,
+            flush_ms: 1.25,
+            raster_flush_ms: 0.4,
+            ..FrameRecord::default()
+        };
+        let mut wire = serde_json::to_value(frame)?;
+        if let Some(fields) = wire.as_object_mut() {
+            for name in [
+                "picture_prepare_ms",
+                "glyph_prepare_ms",
+                "compose_ms",
+                "encode_ms",
+                "raster_flush_ms",
+                "queue_submit_ms",
+                "acquire_ms",
+                "atlas_misses",
+                "atlas_evictions",
+                "atlas_bytes",
+                "image_resident_bytes",
+                "offscreen_peak_bytes",
+                "offscreen_passes",
+                "direct_present",
+            ] {
+                fields.remove(name);
+            }
+        }
+        let old: FrameRecord = serde_json::from_value(wire)?;
+        assert_eq!(old.id, 7);
+        assert_eq!(old.flush_ms, 1.25);
+        assert_eq!(old.raster_flush_ms, 0.0);
+        assert_eq!(old.atlas_bytes, 0);
+        assert!(!old.direct_present);
+        Ok(())
+    }
 }
