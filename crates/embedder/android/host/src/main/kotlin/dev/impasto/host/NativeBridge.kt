@@ -34,7 +34,10 @@ internal object NativeBridge {
     external fun nativeReleaseWindow(handle: Long, keepPluginState: Boolean)
     external fun nativeAttachWindow(handle: Long, view: ImpastoView): Boolean
     external fun nativeSavedState(handle: Long): String?
-    external fun nativeUpdateSource(handle: Long, revision: String, source: ByteArray)
+    external fun nativePrepareDevelopment(token: String, caches: String, verbose: Boolean): Boolean
+    external fun nativeStartDevelopment(handle: Long, packageName: String): Int
+    external fun nativeStopDevelopment(handle: Long)
+    external fun nativeDevelopmentFile(handle: Long, revision: Long)
     external fun nativeHardwareTexture(handle: Long, name: String, width: Int, height: Int, lease: Any): Boolean
     external fun nativeExternalTexture(handle: Long, name: String, width: Int, height: Int, pixels: ByteArray?)
 

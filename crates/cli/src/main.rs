@@ -7,8 +7,11 @@ mod build;
 mod clean;
 mod create;
 mod dependencies;
+mod dev;
+mod devices;
 mod devtools;
 mod distribute;
+mod doctor;
 mod ios;
 mod local_registry;
 mod packages;
@@ -20,6 +23,9 @@ mod sync;
 mod test;
 mod toolchain;
 mod typescript;
+#[cfg(target_os = "macos")]
+mod usbmuxd;
+mod watch;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -72,13 +78,20 @@ enum Command {
         /// Print one frame's script time, run_updates count, and set_* count.
         #[arg(long)]
         trace: bool,
-        /// Enable component hot updates for the running debug app.
-        #[arg(long, conflicts_with = "release")]
+        /// Launch once without starting a development session.
+        #[arg(long, conflicts_with = "watch")]
+        no_watch: bool,
+        /// Compatibility alias for the default watch behavior.
+        #[arg(long, hide = true, conflicts_with = "release")]
         watch: bool,
         /// Open Impasto DevTools attached to the launched debug app.
         #[arg(long, conflicts_with = "release")]
         devtools: bool,
     },
+    /// List macOS, Android, and iOS development targets.
+    Devices,
+    /// Inspect the local framework development tools.
+    Doctor,
     /// Pack a release artifact. Defaults to release; `--debug` keeps ESM.
     Build {
         /// `bundle`, `apk`, `appbundle`, `aar`, `ios`, `ios-archive`, `ipa`, `ios-xcframework`, or `macos`.
@@ -243,16 +256,25 @@ fn main() -> ExitCode {
             release,
             verbose,
             trace,
-            watch,
+            no_watch,
             devtools,
+            watch: _,
         } => finish(run::run(run::RunOptions {
             device,
             release,
             verbose,
             trace,
-            watch,
+            no_watch,
             devtools,
         })),
+        Command::Devices => {
+            devices::run();
+            ExitCode::SUCCESS
+        }
+        Command::Doctor => {
+            doctor::run();
+            ExitCode::SUCCESS
+        }
         Command::Build {
             target,
             platform,

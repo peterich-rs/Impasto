@@ -39,8 +39,6 @@ pub(crate) enum Event {
     PlatformViews = 11,
     CompositorLayers = 12,
     ComposedFrame = 13,
-    #[cfg(debug_assertions)]
-    SourceUpdated = 14,
     ServiceRequest = 20,
     RestorationChanged = 21,
     BackUnhandled = 22,
@@ -220,14 +218,6 @@ impl Services for HostServices {
         self.events
             .send(Event::PlatformViews, surface.0, Some(&message));
     }
-
-    #[cfg(debug_assertions)]
-    fn source_updated(&self, revision: &str, status: Result<(), &str>) {
-        if let Ok(revision) = revision.parse() {
-            self.events
-                .send(Event::SourceUpdated, revision, status.err());
-        }
-    }
 }
 
 pub struct ImpastoIOSHost {
@@ -242,6 +232,8 @@ pub struct ImpastoIOSHost {
     platform: impasto::os::NativeChannel,
     native_events: impasto::os::NativeEventChannel,
     compositor: Arc<compositor::Compositor>,
+    #[cfg(debug_assertions)]
+    development: Option<IosDevelopment>,
 }
 
 pub struct ImpastoIOSWindowGroup(WindowSession);
@@ -254,6 +246,9 @@ impl ImpastoIOSHost {
         window_group: WindowSession,
         events: Arc<Events>,
     ) -> Result<Self, BootError> {
+        #[cfg(debug_assertions)]
+        let development =
+            DevelopmentConfig::read().map_err(|error| BootError::Platform(error.to_string()))?;
         let gate = Arc::new(SurfaceGate::default());
         let layers = Arc::new(Mutex::new(HashMap::new()));
         let clock = Arc::new(DisplayLink {
@@ -364,6 +359,11 @@ impl ImpastoIOSHost {
                 events.send(Event::Closed, 0, None);
             },
         )?;
+        #[cfg(debug_assertions)]
+        let development = development
+            .map(|config| config.start(&link))
+            .transpose()
+            .map_err(|error| BootError::Platform(error.to_string()))?;
         Ok(Self {
             link,
             clock,
@@ -374,6 +374,8 @@ impl ImpastoIOSHost {
             platform,
             native_events,
             compositor,
+            #[cfg(debug_assertions)]
+            development,
         })
     }
 
@@ -951,25 +953,143 @@ pub unsafe extern "C" fn impasto_ios_texture_unregister(
 }
 
 #[cfg(debug_assertions)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn impasto_ios_update_source(
-    host: *mut ImpastoIOSHost,
-    revision: u64,
-    bytes: *const u8,
-    length: usize,
-) -> bool {
-    with_host(host, |host| {
-        // SAFETY: bytes is the caller's readable buffer for length bytes.
-        let Some(source) = (unsafe { input::copy_text(bytes, length) }) else {
-            return false;
+static DEVELOPMENT_WINDOW: AtomicBool = AtomicBool::new(false);
+
+#[cfg(debug_assertions)]
+struct DevelopmentWindow;
+
+#[cfg(debug_assertions)]
+impl Drop for DevelopmentWindow {
+    fn drop(&mut self) {
+        DEVELOPMENT_WINDOW.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(debug_assertions)]
+struct DevelopmentConfig {
+    state: Arc<embedder::dev_channel::Development>,
+    directory: PathBuf,
+    id: String,
+    address: Option<std::net::SocketAddrV4>,
+    port: Option<u16>,
+    files: bool,
+    window: DevelopmentWindow,
+}
+
+#[cfg(debug_assertions)]
+struct IosDevelopment {
+    state: Arc<embedder::dev_channel::Development>,
+    directory: PathBuf,
+    files: bool,
+    _server: Option<embedder::dev_channel::Server>,
+    _window: DevelopmentWindow,
+}
+
+#[cfg(debug_assertions)]
+impl DevelopmentConfig {
+    fn read() -> std::io::Result<Option<Self>> {
+        use objc2_foundation::NSSearchPathDirectory;
+        let (Ok(token), Ok(id)) = (
+            std::env::var("IMPASTO_DEV_SESSION"),
+            std::env::var("IMPASTO_DEV_APP_ID"),
+        ) else {
+            return Ok(None);
         };
-        if source.is_empty() {
-            return false;
+        if DEVELOPMENT_WINDOW.swap(true, Ordering::AcqRel) {
+            return Ok(None);
         }
-        host.link.post(Command::UpdateSource {
-            revision: revision.to_string(),
-            source,
-        });
-        true
-    })
+        let window = DevelopmentWindow;
+        let caches = PathBuf::from(
+            bundle::sandbox_directory(NSSearchPathDirectory::CachesDirectory)
+                .map_err(|error| std::io::Error::other(error.to_string()))?,
+        );
+        let state = embedder::dev_channel::prepare(
+            token.clone(),
+            &caches,
+            embedder::dev_channel::Logging {
+                terminal: false,
+                verbose: std::env::var("IMPASTO_DEV_VERBOSE").as_deref() == Ok("1"),
+            },
+        )?;
+        let root = caches.join("ImpastoUpdates");
+        let directory = root.join(&token);
+        std::fs::create_dir_all(&directory)?;
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if entry.path() != directory && entry.file_name().len() == 64 {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let address = std::env::var("IMPASTO_DEV_ADDR")
+            .ok()
+            .and_then(|value| value.parse().ok());
+        let port = std::env::var("IMPASTO_DEV_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok());
+        let files = std::env::var("IMPASTO_DEV_FILES").as_deref() == Ok("1");
+        Ok(Some(Self {
+            state,
+            directory,
+            id,
+            address,
+            port,
+            files,
+            window,
+        }))
+    }
+
+    fn start(self, link: &Link) -> std::io::Result<IosDevelopment> {
+        use embedder::dev_channel::Server;
+
+        let server = if let Some(address) = self.address {
+            Some(Server::connect_tcp(
+                Arc::clone(&self.state),
+                link.poster(),
+                self.id,
+                address,
+            )?)
+        } else if let Some(port) = self.port {
+            let listen = |port| {
+                Server::listen_tcp(
+                    Arc::clone(&self.state),
+                    link.poster(),
+                    self.id.clone(),
+                    port,
+                )
+            };
+            let (server, bound) = match listen(port) {
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => listen(0)?,
+                result => result?,
+            };
+            std::fs::write(self.directory.join("port"), bound.to_string())?;
+            Some(server)
+        } else {
+            None
+        };
+        Ok(IosDevelopment {
+            state: self.state,
+            directory: self.directory,
+            files: self.files,
+            _server: server,
+            _window: self.window,
+        })
+    }
+}
+
+/// Submits a request noticed by the Swift file watcher on a Wi-Fi development session.
+#[cfg(debug_assertions)]
+#[unsafe(no_mangle)]
+pub extern "C" fn impasto_ios_development_file(host: *mut ImpastoIOSHost, revision: u64) {
+    with_host(host, |host| {
+        if let Some(development) = &host.development
+            && development.files
+        {
+            development.state.serve_file(
+                host.link.poster(),
+                development.directory.clone(),
+                revision,
+            );
+        }
+    });
 }

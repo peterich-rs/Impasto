@@ -37,6 +37,10 @@ pub struct LayoutIssue {
 /// Debug-only state on [`Tree`]. All fields default off/empty.
 #[derive(Default)]
 pub(crate) struct DebugState {
+    #[cfg(debug_assertions)]
+    pub(super) dev_error: Option<super::DevErrorOverlay>,
+    #[cfg(debug_assertions)]
+    pub(super) dev_error_pointer: Option<crate::input::PointerId>,
     pub(super) repaint: Option<Box<super::repaint::RepaintTracker>>,
     pub(super) overlay: super::repaint::RemoteOverlayState,
     pub(crate) scan_overflow: bool,

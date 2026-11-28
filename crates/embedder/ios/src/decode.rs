@@ -19,8 +19,6 @@ use objc2_image_io::{
     kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceThumbnailMaxPixelSize,
 };
 
-const EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
-
 pub(super) struct Decoder {
     root: PathBuf,
 }
@@ -50,26 +48,23 @@ impl ImageDecoder for Decoder {
         scale_bucket: u8,
         target: Option<embedder::DecodeTarget>,
     ) -> Result<ImageHandle, ImageError> {
-        let relative = source.strip_prefix("asset:").ok_or(ImageError::Missing)?;
-        let relative =
-            engine::session::document_relative(relative).map_err(|_| ImageError::Missing)?;
-        let densities = match scale_bucket {
-            3 => ["@3x", "@2x", ""],
-            2 => ["@2x", "@3x", ""],
-            _ => ["", "@2x", "@3x"],
-        };
-        for density in densities {
-            for extension in EXTENSIONS {
-                let path = self.root.join(format!("{relative}{density}.{extension}"));
-                match fs::read(&path) {
-                    Ok(bytes) => return self.decode_bytes_sized(source, &bytes, target),
-                    Err(error) if error.kind() == ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(ImageError::Failed(format!(
-                            "读取 {} 失败。{error}",
-                            path.display()
-                        )));
-                    }
+        for relative in embedder::asset_image_candidates(source, scale_bucket) {
+            #[cfg(debug_assertions)]
+            let path = match embedder::dev_channel::asset_override(&relative) {
+                embedder::dev_channel::AssetOverride::File(path) => path,
+                embedder::dev_channel::AssetOverride::Removed => continue,
+                embedder::dev_channel::AssetOverride::Packaged => self.root.join(&relative),
+            };
+            #[cfg(not(debug_assertions))]
+            let path = self.root.join(relative);
+            match fs::read(&path) {
+                Ok(bytes) => return self.decode_bytes_sized(source, &bytes, target),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ImageError::Failed(format!(
+                        "读取 {} 失败。{error}",
+                        path.display()
+                    )));
                 }
             }
         }

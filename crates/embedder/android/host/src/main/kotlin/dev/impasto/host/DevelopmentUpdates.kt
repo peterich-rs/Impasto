@@ -2,30 +2,21 @@ package dev.impasto.host
 
 import android.net.LocalServerSocket
 import android.net.LocalSocket
-import android.os.SystemClock
 import java.io.Closeable
-import java.io.DataInputStream
-import java.io.DataOutputStream
-import java.io.File
 import java.io.IOException
+import java.net.InetAddress
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
-/** A debug-only local socket forwarded by ADB. The kernel checks the peer UID. */
-internal class DevelopmentUpdates(
-    packageName: String,
-    private val directory: File,
-    private val submit: (String, ByteArray, (Boolean) -> Unit) -> Unit,
-) : Closeable {
-    private val server = LocalServerSocket("impasto-hot-v1-$packageName")
+/** Relays an authenticated ADB peer into the Rust development endpoint. */
+internal class DevelopmentUpdates(packageName: String, private val port: Int) : Closeable {
+    private val server = LocalServerSocket("impasto-dev-v2-$packageName")
     private val closed = AtomicBoolean(false)
     @Volatile private var client: LocalSocket? = null
+    @Volatile private var endpoint: Socket? = null
 
     init {
-        Thread(::listen, "impasto-development-updates").apply {
-            isDaemon = true
-            start()
-        }
+        background("impasto-development-adb", ::listen)
     }
 
     private fun listen() {
@@ -38,9 +29,11 @@ internal class DevelopmentUpdates(
             socket.use {
                 client = socket
                 try {
-                    if (!closed.get() && socket.peerCredentials.uid in ADB_UIDS) serve(socket)
+                    if (!closed.get() && socket.peerCredentials.uid in ADB_UIDS) {
+                        relay(socket)
+                    }
                 } catch (_: IOException) {
-                    // The CLI can reconnect after closing or rebooting the device.
+                    // EOF wakes both halves. ADB can then open a fresh stream.
                 } finally {
                     client = null
                 }
@@ -48,44 +41,40 @@ internal class DevelopmentUpdates(
         }
     }
 
-    private fun serve(socket: LocalSocket) {
-        val input = DataInputStream(socket.inputStream.buffered())
-        val output = DataOutputStream(socket.outputStream)
-        output.writeByte(1)
-        while (!closed.get()) {
-            val revision = input.readLong().toULong().toString()
-            val length = input.readInt()
-            if (length !in 1..MAX_SOURCE_BYTES) return
-            val source = ByteArray(length)
-            input.readFully(source)
-            val submitted = AtomicReference<Boolean>()
-            submit(revision, source, submitted::set)
-            val receipt = File(directory, "v1-$revision.result")
-            val deadline = SystemClock.elapsedRealtime() + 2_000
-            while (!closed.get() && submitted.get() != false &&
-                !receipt.isFile && SystemClock.elapsedRealtime() < deadline) {
-                Thread.sleep(1)
+    private fun relay(client: LocalSocket) {
+        Socket(InetAddress.getByName("127.0.0.1"), port).use { target ->
+            endpoint = target
+            target.tcpNoDelay = true
+            if (closed.get()) return
+            val upload = background("impasto-development-adb-input") {
+                try {
+                    client.inputStream.copyTo(target.getOutputStream())
+                } catch (_: IOException) {
+                    // Either side may close during a transfer.
+                } finally {
+                    runCatching { target.close() }
+                }
             }
-            val result = when {
-                submitted.get() == false -> ByteArray(0)
-                receipt.isFile && receipt.length() in 1..MAX_RECEIPT_BYTES ->
-                    receipt.readBytes().also { receipt.delete() }
-                else -> "error\nThe UI did not confirm the source update".toByteArray()
+            try {
+                target.getInputStream().copyTo(client.outputStream)
+            } finally {
+                runCatching { client.close() }
+                upload.join()
+                endpoint = null
             }
-            output.writeInt(result.size)
-            output.write(result)
         }
     }
 
     override fun close() {
         if (closed.getAndSet(true)) return
         runCatching { client?.close() }
+        runCatching { endpoint?.close() }
         runCatching { server.close() }
     }
 
     private companion object {
         val ADB_UIDS = setOf(0, 2000) // root and Android's shell user
-        const val MAX_SOURCE_BYTES = 16 * 1024 * 1024
-        const val MAX_RECEIPT_BYTES = 1024L * 1024
+        fun background(name: String, run: () -> Unit): Thread =
+            Thread({ run() }, name).apply { isDaemon = true; start() }
     }
 }

@@ -10,7 +10,6 @@ import android.os.FileObserver
 import android.util.Log
 import java.io.File
 import java.io.IOException
-import java.util.concurrent.Executors
 import androidx.fragment.app.FragmentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
@@ -22,11 +21,10 @@ open class ImpastoActivity : FragmentActivity() {
     protected open fun registerPlugins(host: ImpastoHost) {}
 
     private var deliveredUrl: String? = null
-    private var submitted = false
-    private var update: String? = null
     private var updateObserver: FileObserver? = null
     private var developmentUpdates: DevelopmentUpdates? = null
     @Volatile private var updateHandle: Long? = null
+    private var developmentEnabled = false
 
     private fun isDebuggable() = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
 
@@ -47,6 +45,14 @@ open class ImpastoActivity : FragmentActivity() {
         deliveredUrl = launchUrl
         @Suppress("DEPRECATION")
         val retained = lastCustomNonConfigurationInstance as? ImpastoSession
+        developmentEnabled = if (isDebuggable()) {
+            val session = runCatching { File(filesDir, "impasto-debug/session").readLines() }.getOrNull()
+            val token = session?.getOrNull(0)
+            token != null && TOKEN.matches(token) &&
+                NativeBridge.nativePrepareDevelopment(token, cacheDir.path, session?.getOrNull(1) == "1")
+        } else {
+            false
+        }
         val attached = ImpastoHost.attach(
             this, this,
             script = intent?.getStringExtra("script"),
@@ -57,10 +63,8 @@ open class ImpastoActivity : FragmentActivity() {
             renderer = renderer ?: ImpastoHost.Renderer.AUTO,
             onStartupFailure = { finish() },
             onFirstFrameSubmitted = {
-                submitted = true
-                updateHandle = host?.view?.handle
                 reportFullyDrawn()
-                submitUpdate()
+                startDevelopment()
             },
             onExit = ::finish,
             restorationId = "main",
@@ -76,13 +80,10 @@ open class ImpastoActivity : FragmentActivity() {
         host = attached
         registerPlugins(attached)
         setContentView(attached.view)
-        watchUpdates()
-        receiveUpdate(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (receiveUpdate(intent)) return
         setIntent(intent)
         deliveredUrl = intent.dataString
         host?.let { if (!it.dispatchNewIntent(intent)) it.launchUrl(intent.dataString) }
@@ -104,71 +105,32 @@ open class ImpastoActivity : FragmentActivity() {
         }
     }
 
-    private fun receiveUpdate(intent: Intent?): Boolean {
-        if (!isDebuggable()) return false
-        val revision = intent?.getStringExtra(DEBUG_UPDATE) ?: return false
-        return receiveUpdate(revision)
-    }
-
-    private fun receiveUpdate(revision: String): Boolean {
-        if (!REVISION.matches(revision)) return false
-        update = revision
-        submitUpdate()
-        return true
-    }
-
     @Suppress("DEPRECATION") // The path constructor also supports devices below API 29.
-    private fun watchUpdates() {
-        if (!isDebuggable()) return
-        val directory = File(filesDir, "impasto-debug")
-        if (!directory.isDirectory && !directory.mkdirs()) return
-        val watcher = object : FileObserver(directory.path, FileObserver.MOVED_TO) {
-            override fun onEvent(event: Int, path: String?) {
-                if (path == null || !path.startsWith("v1-") || !path.endsWith(".js")) return
-                val revision = path.removePrefix("v1-").removeSuffix(".js")
-                runOnUiThread {
-                    if (updateObserver === this) receiveUpdate(revision)
-                }
-            }
-        }
-        updateObserver = watcher
-        watcher.startWatching()
-        developmentUpdates = try {
-            DevelopmentUpdates(packageName, directory) { revision, source, accepted ->
-                val handle = updateHandle
-                accepted(handle != null)
-                if (handle != null) NativeBridge.nativeUpdateSource(handle, revision, source)
-            }
-        } catch (error: IOException) {
-            Log.w("Impasto", "Could not open debug source socket", error)
-            null
-        }
-    }
-
-    private fun submitUpdate() {
-        if (!submitted) return
+    private fun startDevelopment() {
+        if (!developmentEnabled || updateHandle != null) return
         val handle = host?.view?.handle ?: return
-        val revision = update ?: return
-        update = null
-        val dir = File(filesDir, "impasto-debug")
-        updateReader.execute {
-            val file = File(dir, "v1-$revision.js")
-            if (!file.isFile) return@execute
-            try {
-                val length = file.length()
-                if (length !in 1..MAX_SOURCE_BYTES) throw IOException("invalid source size")
-                val bytes = ByteArray(length.toInt())
-                file.inputStream().use {
-                    java.io.DataInputStream(it).readFully(bytes)
-                    if (it.read() != -1) throw IOException("source size changed")
-                }
-                file.delete()
-                NativeBridge.nativeUpdateSource(handle, revision, bytes)
+        updateHandle = handle
+        val port = NativeBridge.nativeStartDevelopment(handle, packageName)
+        if (port != 0) {
+            developmentUpdates = try {
+                DevelopmentUpdates(packageName, port)
             } catch (error: IOException) {
-                Log.e("Impasto", "Could not read debug source update", error)
-                File(dir, "v1-$revision.result").writeText("error\nunreadable update")
+                Log.w("Impasto", "Could not open the ADB development socket", error)
+                null
             }
         }
+        val directory = File(filesDir, "impasto-debug")
+        fun submit(path: String) {
+            if (!path.startsWith("request-")) return
+            val revision = path.removePrefix("request-").toLongOrNull() ?: return
+            updateHandle?.let { NativeBridge.nativeDevelopmentFile(it, revision) }
+        }
+        updateObserver = object : FileObserver(directory.path, FileObserver.MOVED_TO) {
+            override fun onEvent(event: Int, path: String?) {
+                if (path != null) submit(path)
+            }
+        }.also { it.startWatching() }
+        directory.list()?.forEach(::submit)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -204,8 +166,10 @@ open class ImpastoActivity : FragmentActivity() {
             ?.retainSessionForRecreation()
 
     override fun onDestroy() {
+        val handle = updateHandle
         updateHandle = null
         developmentUpdates?.close()
+        if (handle != null) NativeBridge.nativeStopDevelopment(handle)
         developmentUpdates = null
         updateObserver?.stopWatching()
         updateObserver = null
@@ -215,10 +179,7 @@ open class ImpastoActivity : FragmentActivity() {
     }
 
     private companion object {
-        const val DEBUG_UPDATE = "impasto.debug.update"
-        const val MAX_SOURCE_BYTES = 16L * 1024 * 1024
-        val REVISION = Regex("[0-9]{1,20}")
-        val updateReader = Executors.newSingleThreadExecutor()
+        val TOKEN = Regex("[a-f0-9]{64}")
         const val DELIVERED_URL = "dev.impasto.delivered_url"
     }
 }

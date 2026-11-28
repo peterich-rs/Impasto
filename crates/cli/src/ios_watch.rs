@@ -1,423 +1,282 @@
-//! Explicitly enabled updates over the app container's development channel.
+//! iOS development transport selection and devicectl file fallback.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
-};
+use std::fs;
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use dev_protocol::{Frame, Kind, Receipt};
 
-use super::{RunDevice, build_artifact, bundle_id, delivery::session_id, require_output};
+use super::{RunDevice, build_artifact, bundle_id};
 use crate::{
     app::App,
-    build::{BuildOptions, bundle_update},
-    run::{Snapshot, files, script_only, set_watch_changes, snapshot_path},
+    build::BuildOptions,
+    dev::{self, Delivery, Event, FileDelivery, Running, Stream, Target},
     toolchain,
 };
 
-const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_UPDATE_BYTES: usize = 16 * 1024 * 1024;
-const WATCH_INTERVAL: Duration = Duration::from_millis(10);
-const ACK_TIMEOUT: Duration = Duration::from_secs(12);
-
-struct DevelopmentSession {
-    token: String,
-    output: PathBuf,
-    package: String,
-    revision: u64,
-    plugin_manifest: Option<Vec<u8>>,
-    source: Option<String>,
-    local_channel: Option<PathBuf>,
+pub(super) struct Launch<'a> {
+    pub(super) token: &'a str,
+    pub(super) address: Option<SocketAddrV4>,
+    pub(super) port: Option<u16>,
+    pub(super) files: bool,
+    pub(super) verbose: bool,
 }
 
-impl DevelopmentSession {
-    fn launch(app: &App, options: &BuildOptions, device: &RunDevice, attach: bool) -> Result<Self> {
-        let token = session_id()?;
-        let output = app.root.join("build/ios/development").join(&token);
-        fs::create_dir_all(&output)?;
-        let built = build_artifact(app, options, device.platform())?;
-        let source = fs::read_to_string(built.path.join("app.js")).ok();
-        let mut session = Self {
-            token,
-            output,
-            package: bundle_id(app),
-            revision: 0,
-            plugin_manifest: built.plugin_manifest,
-            source,
-            local_channel: None,
+impl Target for RunDevice {
+    fn platform(&self) -> &'static str {
+        "ios"
+    }
+
+    fn extra_inputs(&self, app: &App) -> Result<Vec<PathBuf>> {
+        let mut paths = [&app.ios.privacy_manifest, &app.ios.launch_storyboard]
+            .into_iter()
+            .flatten()
+            .map(|file| app.root.join(file))
+            .collect::<Vec<_>>();
+        let framework = toolchain::framework()?;
+        if framework == app.root || app.root.starts_with(framework.join("examples")) {
+            paths.extend(
+                [
+                    "crates/embedder/ios/src",
+                    "crates/embedder/ios/host",
+                    "crates/embedder/ios/include",
+                    "crates/embedder/ios/template",
+                    "crates/embedder/common/src",
+                ]
+                .into_iter()
+                .map(|path| framework.join(path))
+                .filter(|path| path.is_dir()),
+            );
+        }
+        Ok(paths)
+    }
+
+    fn launch(
+        &self,
+        app: &App,
+        options: &BuildOptions,
+        events: &mpsc::Sender<Event>,
+        attach: bool,
+    ) -> Result<Running> {
+        let artifact = build_artifact(app, options, self.platform())?;
+        let token = dev::token()?;
+        let package = bundle_id(app);
+        let mut launch = Launch {
+            token: &token,
+            address: None,
+            port: None,
+            files: false,
+            verbose: options.verbose,
         };
-        device.install_and_launch(&built.path, app, options, Some(&session.token), attach)?;
-        if let Channel::Local(path) = session.channel(device)? {
-            session.local_channel = Some(path);
-        }
-        Ok(session)
-    }
-
-    fn update(&mut self, app: &App, options: &BuildOptions, device: &RunDevice) -> Result<()> {
-        let source = bundle_update(app, options, "ios", self.plugin_manifest.as_deref())?;
-        let patch = self
-            .source
-            .as_deref()
-            .and_then(|before| bundler::delta(before, &source));
-        self.send_source(device, patch.as_deref().unwrap_or(&source))?;
-        self.source = Some(source);
-        Ok(())
-    }
-
-    fn send_source(&mut self, device: &RunDevice, source: &str) -> Result<()> {
-        if source.len() > MAX_SOURCE_BYTES {
-            bail!("调试脚本超过 {MAX_SOURCE_BYTES} 字节");
-        }
-        self.revision = self.revision.checked_add(1).context("iOS 更新序号用尽")?;
-        let data = serde_json::to_vec(&Update {
-            token: &self.token,
-            revision: self.revision,
-            source,
-        })?;
-        if data.len() > MAX_UPDATE_BYTES {
-            bail!("调试更新传输包超过 {MAX_UPDATE_BYTES} 字节");
-        }
-        let path = self.output.join("update.json");
-        fs::write(&path, data)?;
-
-        if self.local_channel.is_some() {
-            return self.send_and_wait(device, &path);
-        }
-        loop {
-            await_connection(device);
-            match self.send_and_wait(device, &path) {
-                Ok(()) => return Ok(()),
-                Err(_) if !device.connected() => continue,
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn send_and_wait(&self, device: &RunDevice, path: &Path) -> Result<()> {
-        let channel = self.channel(device)?;
-        let deadline = Instant::now() + ACK_TIMEOUT;
-        while !channel.ready(&self.token)? {
-            if Instant::now() > deadline {
-                bail!("iOS 应用未建立调试会话，请确认其正在前台运行");
-            }
-            channel.pause();
-        }
-        channel.write_update(path)?;
-        let deadline = Instant::now() + ACK_TIMEOUT;
-        loop {
-            if let Some(bytes) = channel.read("receipt.json")?
-                && let Ok(receipt) = serde_json::from_slice::<Receipt>(&bytes)
-                && receipt.token == self.token
-                && receipt.revision == self.revision
-            {
-                if let Some(error) = receipt.error {
-                    bail!(
-                        "iOS 调试更新 {} 被拒绝，保留上一次运行版本。{error}",
-                        self.revision
-                    );
-                }
-                eprintln!("impasto: iOS 调试更新 {} 已应用", self.revision);
-                return Ok(());
-            }
-            if Instant::now() > deadline {
-                bail!(
-                    "iOS 应用未确认调试更新 {}，请确认其正在前台运行",
-                    self.revision
-                );
-            }
-            channel.pause();
-        }
-    }
-
-    fn channel<'a>(&'a self, device: &'a RunDevice) -> Result<Channel<'a>> {
-        if let Some(path) = &self.local_channel {
-            return Ok(Channel::Local(path.clone()));
-        }
-        let remote = format!("Library/Caches/ImpastoUpdates/{}", self.token);
-        match device {
-            RunDevice::Simulator(device) => {
-                let output = Command::new("xcrun")
-                    .args([
-                        "simctl",
-                        "get_app_container",
-                        &device.udid,
-                        &self.package,
-                        "data",
-                    ])
-                    .output()?;
-                let data = PathBuf::from(require_output(output, "读取 iOS 模拟器应用容器")?.trim());
-                Ok(Channel::Local(data.join(remote)))
-            }
-            RunDevice::Physical(udid) => Ok(Channel::Remote {
-                udid,
-                package: &self.package,
-                directory: remote,
-                local: &self.output,
-            }),
-        }
-    }
-}
-
-impl RunDevice {
-    fn connected(&self) -> bool {
-        let mut probe = Command::new("xcrun");
-        match self {
-            Self::Simulator(device) => {
-                probe.args(["simctl", "getenv", &device.udid, "HOME"]);
+        let channel = match self {
+            Self::Simulator(_) => {
+                let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
+                let std::net::SocketAddr::V4(address) = listener.local_addr()? else {
+                    bail!("无效的模拟器调试地址");
+                };
+                launch.address = Some(address);
+                Delivery::Socket(dev::Channel::start(
+                    move || {
+                        listener
+                            .accept()
+                            .map(|(socket, _)| Stream::Tcp(socket))
+                            .map_err(Into::into)
+                    },
+                    Some(Box::new(move || {
+                        let _ = TcpStream::connect(address);
+                    })),
+                    token.clone(),
+                    package,
+                    events.clone(),
+                )?)
             }
             Self::Physical(udid) => {
-                probe.args([
-                    "devicectl",
-                    "device",
-                    "info",
-                    "details",
-                    "--device",
-                    udid,
-                    "--timeout",
-                    "3",
-                ]);
+                let files = Files::new(udid.clone(), package.clone(), token.clone())?;
+                #[cfg(target_os = "macos")]
+                if let Some(usb_id) = self.usb_identifier(udid) {
+                    let port = 20_000 + u16::from_str_radix(&token[..4], 16)? % 30_000;
+                    launch.port = Some(port);
+                    let app_id = package.clone();
+                    let relaunch = udid.clone();
+                    let relaunch_package = package;
+                    let relaunch_token = token.clone();
+                    let verbose = options.verbose;
+                    let mut attempts = 0;
+                    let mut current_port = port;
+                    let channel = dev::Channel::start(
+                        move || {
+                            let device = crate::usbmuxd::devices()?
+                                .into_iter()
+                                .find(|device| crate::usbmuxd::matches(device, &usb_id))
+                                .context("iOS USB 设备未连接")?;
+                            match crate::usbmuxd::connect(device.id, current_port) {
+                                Ok(stream) => {
+                                    attempts = 0;
+                                    Ok(Stream::Unix(stream))
+                                }
+                                Err(error) => {
+                                    attempts += 1;
+                                    if attempts % 4 == 0
+                                        && let Ok(Some(bytes)) = files.read("port")
+                                        && let Ok(value) = std::str::from_utf8(&bytes)
+                                        && let Ok(port) = value.trim().parse()
+                                    {
+                                        current_port = port;
+                                    }
+                                    if attempts % 16 == 0 {
+                                        let _ = super::launch_physical(
+                                            &relaunch,
+                                            &relaunch_package,
+                                            &Launch {
+                                                token: &relaunch_token,
+                                                address: None,
+                                                port: Some(port),
+                                                files: false,
+                                                verbose,
+                                            },
+                                        )
+                                        .output();
+                                    }
+                                    Err(error)
+                                }
+                            }
+                        },
+                        None,
+                        token.clone(),
+                        app_id,
+                        events.clone(),
+                    )?;
+                    self.install_and_launch(&artifact.path, app, options, Some(&launch), attach)?;
+                    return Ok(running(artifact, Delivery::Socket(channel)));
+                }
+
+                eprintln!("impasto: iOS 使用 devicectl 文件调试通道");
+                launch.files = true;
+                Delivery::Files(Box::new(files))
             }
-        }
-        probe
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-}
-
-fn await_connection(device: &RunDevice) {
-    if !device.connected() {
-        eprintln!("impasto: iOS 设备已断开，等待重新连接");
-        loop {
-            thread::sleep(Duration::from_secs(1));
-            if device.connected() {
-                eprintln!("impasto: iOS 设备已重新连接");
-                break;
-            }
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct Update<'a> {
-    token: &'a str,
-    revision: u64,
-    source: &'a str,
-}
-
-#[derive(Deserialize)]
-struct Receipt {
-    token: String,
-    revision: u64,
-    error: Option<String>,
-}
-
-enum Channel<'a> {
-    Local(PathBuf),
-    Remote {
-        udid: &'a str,
-        package: &'a str,
-        directory: String,
-        local: &'a Path,
-    },
-}
-
-impl Channel<'_> {
-    fn pause(&self) {
-        let interval = match self {
-            Self::Local(_) => Duration::from_millis(5),
-            Self::Remote { .. } => Duration::from_millis(250),
         };
-        thread::sleep(interval);
+        self.install_and_launch(&artifact.path, app, options, Some(&launch), attach)?;
+        Ok(running(artifact, channel))
     }
+}
 
-    fn ready(&self, token: &str) -> Result<bool> {
-        Ok(self
-            .read("ready")?
-            .is_some_and(|bytes| bytes == token.as_bytes()))
+fn running(artifact: crate::build::PlatformArtifact, channel: Delivery) -> Running {
+    Running {
+        manifest: artifact.plugin_manifest,
+        source: fs::read_to_string(artifact.path.join("app.js")).ok(),
+        channel,
+        child: None,
     }
+}
 
-    fn write_update(&self, path: &Path) -> Result<()> {
-        match self {
-            Self::Local(directory) => {
-                let staging = directory.join("upload.json");
-                fs::copy(path, &staging)?;
-                fs::rename(staging, directory.join("update.json"))?;
-            }
-            Self::Remote {
-                udid,
-                package,
-                directory,
-                ..
-            } => {
-                let mut command = copy_command(udid, package, "to");
-                command.arg("--source").arg(path);
-                command
-                    .arg("--destination")
-                    .arg(format!("{directory}/update.json"));
-                toolchain::run(command, "发送 iOS 真机调试更新")?;
-            }
+#[cfg(target_os = "macos")]
+impl RunDevice {
+    fn usb_identifier(&self, udid: &str) -> Option<String> {
+        let devices = crate::usbmuxd::devices().ok()?;
+        if let Some(device) = devices
+            .iter()
+            .find(|device| crate::usbmuxd::matches(device, udid))
+        {
+            return Some(device.serial.clone());
         }
-        Ok(())
+        // CoreDevice also accepts its own UUID. Resolve it to the hardware UDID.
+        let device = super::physical_devices().ok()?.into_iter().find(|device| {
+            device.identifier.eq_ignore_ascii_case(udid) || device.udid.eq_ignore_ascii_case(udid)
+        })?;
+        devices
+            .iter()
+            .find(|connected| crate::usbmuxd::matches(connected, &device.udid))
+            .map(|connected| connected.serial.clone())
+    }
+}
+
+struct Files {
+    udid: String,
+    package: String,
+    token: String,
+    directory: tempfile::TempDir,
+    last_log: u64,
+}
+
+impl Files {
+    fn new(udid: String, package: String, token: String) -> Result<Self> {
+        Ok(Self {
+            udid,
+            package,
+            token,
+            directory: tempfile::tempdir()?,
+            last_log: 0,
+        })
+    }
+
+    fn copy(&self, direction: &str) -> Command {
+        let mut command = Command::new("xcrun");
+        command.args([
+            "devicectl",
+            "device",
+            "copy",
+            direction,
+            "--device",
+            &self.udid,
+            "--domain-type",
+            "appDataContainer",
+            "--domain-identifier",
+            &self.package,
+            "--timeout",
+            "3",
+        ]);
+        command
+    }
+
+    fn remote(&self, file: &str) -> String {
+        format!("Library/Caches/ImpastoUpdates/{}/{file}", self.token)
+    }
+
+    fn send(&self, local: &std::path::Path, remote: &str) -> Result<()> {
+        let mut copy = self.copy("to");
+        copy.arg("--source")
+            .arg(local)
+            .args(["--destination", &self.remote(remote)]);
+        toolchain::run(copy, "发送 iOS 文件调试请求")
     }
 
     fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        match self {
-            Self::Local(directory) => read_file(&directory.join(name)),
-            Self::Remote {
-                udid,
-                package,
-                directory,
-                local,
-            } => {
-                let path = local.join(name);
-                // Avoid a stale local receipt when devicectl reports missing remote data.
-                match fs::remove_file(&path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-                let mut command = copy_command(udid, package, "from");
-                command.args(["--source", &format!("{directory}/{name}")]);
-                command.arg("--destination").arg(&path);
-                let output = command.output().context("启动 devicectl 文件接收")?;
-                if output.status.success() {
-                    read_file(&path)
-                } else {
-                    Ok(None)
-                }
+        let path = self.directory.path().join("download");
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        let output = self
+            .copy("from")
+            .args(["--source", &self.remote(name)])
+            .arg("--destination")
+            .arg(&path)
+            .output()?;
+        if output.status.success() {
+            return Ok(Some(fs::read(path)?));
+        }
+        Ok(None)
+    }
+}
+
+impl FileDelivery for Files {
+    fn exchange(&mut self, frame: &Frame, reply: Kind) -> Result<Receipt> {
+        let path = self.directory.path().join("upload");
+        fs::write(&path, dev::file_request(&self.token, frame)?)?;
+        self.send(&path, &format!("request-{}", frame.seq))?;
+        fs::write(&path, [])?;
+        self.send(&path, &format!("ready-{}", frame.seq))?;
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let name = format!("reply-{}", frame.seq);
+        while Instant::now() < deadline {
+            if let Some(bytes) = self.read(&name)? {
+                return dev::file_receipt(&bytes, frame.seq, reply, &mut self.last_log);
             }
+            std::thread::sleep(Duration::from_millis(250));
         }
-    }
-}
-
-fn copy_command(udid: &str, package: &str, direction: &str) -> Command {
-    let mut command = Command::new("xcrun");
-    command.args([
-        "devicectl",
-        "device",
-        "copy",
-        direction,
-        "--device",
-        udid,
-        "--domain-type",
-        "appDataContainer",
-        "--domain-identifier",
-        package,
-        "--timeout",
-        "3",
-    ]);
-    command
-}
-
-fn read_file(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct AppSnapshot {
-    written: Snapshot,
-    native: Snapshot,
-}
-
-impl AppSnapshot {
-    fn read(app: &App) -> Result<Self> {
-        let mut native = Snapshot::new();
-        for file in [&app.ios.privacy_manifest, &app.ios.launch_storyboard]
-            .into_iter()
-            .flatten()
-        {
-            snapshot_path(&app.root.join(file), &mut native)?;
-        }
-        let framework = toolchain::framework()?;
-        for directory in [
-            "Cargo.toml",
-            "Cargo.lock",
-            "crates/embedder/ios/Cargo.toml",
-            "crates/embedder/ios/host",
-            "crates/embedder/ios/include",
-            "crates/embedder/ios/src",
-            "crates/embedder/ios/template",
-            "crates/embedder/common/Cargo.toml",
-            "crates/embedder/common/src",
-        ] {
-            snapshot_path(&framework.join(directory), &mut native)?;
-        }
-        Ok(Self {
-            written: files(app)?,
-            native,
-        })
-    }
-}
-
-pub(super) fn run(
-    mut app: App,
-    options: &BuildOptions,
-    device: RunDevice,
-    attach: bool,
-) -> Result<()> {
-    let mut session = DevelopmentSession::launch(&app, options, &device, attach)?;
-    let mut snapshot = AppSnapshot::read(&app)?;
-    let mut installed = snapshot.clone();
-    eprintln!("impasto: 正在监听 iOS 应用文件。Ctrl-C 退出");
-    loop {
-        thread::sleep(WATCH_INTERVAL);
-        let next = AppSnapshot::read(&app)?;
-        if next == snapshot {
-            continue;
-        }
-        let source_only =
-            installed.native == next.native && script_only(&app, &installed.written, &next.written);
-        snapshot = next;
-        if !source_only {
-            app = match App::current() {
-                Ok(app) => app,
-                Err(error) => {
-                    eprintln!("impasto: 应用配置无效，等待修正。{error:#}");
-                    continue;
-                }
-            };
-            snapshot = AppSnapshot::read(&app)?;
-        }
-        let result = deploy(&mut session, &app, options, &device, &installed, &snapshot);
-        match result {
-            Ok(()) => installed = snapshot.clone(),
-            Err(error) => eprintln!("impasto: iOS 更新未完成。{error:#}"),
-        }
-    }
-}
-
-fn deploy(
-    session: &mut DevelopmentSession,
-    app: &App,
-    options: &BuildOptions,
-    device: &RunDevice,
-    installed: &AppSnapshot,
-    current: &AppSnapshot,
-) -> Result<()> {
-    if installed.native == current.native && script_only(app, &installed.written, &current.written)
-    {
-        set_watch_changes(options, &installed.written, &current.written);
-        return session.update(app, options, device);
-    }
-    await_connection(device);
-    loop {
-        match DevelopmentSession::launch(app, options, device, false) {
-            Ok(next) => {
-                *session = next;
-                return Ok(());
-            }
-            Err(_) if !device.connected() => await_connection(device),
-            Err(error) => return Err(error),
-        }
+        bail!("iOS 设备未确认调试请求 {}", frame.seq)
     }
 }

@@ -483,6 +483,10 @@ pub extern "system" fn JNI_OnLoad(_: *mut std::ffi::c_void, _: *mut std::ffi::c_
         let syn::Item::Fn(function) = item else {
             continue;
         };
+        let conditions = function
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"));
         let mut signature = function.sig;
         let name = &signature.ident;
         if !name.to_string().starts_with("Java_") {
@@ -504,6 +508,7 @@ pub extern "system" fn JNI_OnLoad(_: *mut std::ffi::c_void, _: *mut std::ffi::c_
             source,
             "{}",
             quote! {
+                #(#conditions)*
                 #[unsafe(no_mangle)]
                 pub #signature { host::app_jni::#name(#(#params),*) }
             }

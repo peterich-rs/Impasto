@@ -195,10 +195,7 @@ impl WatchLinker {
             && previous == options
             && let Some(changed) = changed
             && !changed.is_empty()
-            && changed
-                .iter()
-                .all(|path| linker.modules.contains(path) && !linker.config_inputs.contains(path))
-            && let Ok(changed) = linker.with_folded_dependents(changed)
+            && let Ok(changed) = linker.changed_modules(changed)
             && let Ok(bundle) = runtime.block_on(linker.link(Some(changed)))
         {
             self.current = Some((options, linker));
@@ -226,9 +223,24 @@ struct Linker {
     hot_externals: Arc<Mutex<BTreeSet<String>>>,
     modules: BTreeSet<PathBuf>,
     scanned: Arc<Mutex<BTreeSet<PathBuf>>>,
-    config_inputs: BTreeSet<PathBuf>,
+    root: PathBuf,
+    config: Arc<Mutex<LinkedConfig>>,
+    config_consumers: Arc<Mutex<BTreeMap<PathBuf, ConfigUse>>>,
     folded: Arc<Mutex<FoldedInputs>>,
     module_pools: Arc<Mutex<ModulePools>>,
+}
+
+#[derive(Debug)]
+struct LinkedConfig {
+    locales: Arc<crate::i18n::Locales>,
+    locales_source: String,
+    theme: Arc<crate::ThemeTokens>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ConfigUse {
+    locales: bool,
+    theme: bool,
 }
 
 impl Linker {
@@ -248,18 +260,14 @@ impl Linker {
             );
         }
         let tsconfig = root.join("tsconfig.json");
-        let locales = Arc::new(crate::i18n::Locales::load(&root)?);
+        let locales = crate::i18n::Locales::load(&root)?;
+        let linked_config = Arc::new(Mutex::new(LinkedConfig {
+            locales_source: locales.source()?,
+            locales: Arc::new(locales),
+            theme: Arc::new(crate::ThemeTokens::load(&root)?),
+        }));
+        let config_consumers = Arc::new(Mutex::new(BTreeMap::new()));
         let scanned = Arc::new(Mutex::new(BTreeSet::new()));
-        let theme = crate::ThemeTokens::load(&root)?;
-        let config_inputs = locales
-            .inputs
-            .iter()
-            .cloned()
-            .chain([root.join("app.toml"), root.join("src/theme.ts")])
-            .filter(|path| path.is_file())
-            .collect();
-        let mut virtual_modules = options.virtual_modules.clone();
-        virtual_modules.insert(crate::i18n::MODULE.to_owned(), locales.source()?);
         let assets = root.join("assets");
         let mut config = BundlerOptions {
             input: Some(vec![InputItem {
@@ -324,14 +332,14 @@ impl Linker {
             vec![Pluginable::new_shared(ImpastoPlugin {
                 packages,
                 assets,
-                root,
+                root: root.clone(),
                 framework: options.framework.canonicalize()?,
                 manifest: options.plugins.clone(),
                 externals: options.externals.clone(),
-                virtual_modules,
+                virtual_modules: options.virtual_modules.clone(),
                 scanned: Arc::clone(&scanned),
-                locales: Arc::clone(&locales),
-                theme,
+                config: Arc::clone(&linked_config),
+                config_consumers: Arc::clone(&config_consumers),
                 release: options.release,
                 folded: Arc::clone(&folded),
                 module_pools: Arc::clone(&module_pools),
@@ -354,23 +362,80 @@ impl Linker {
             hot_externals,
             modules: BTreeSet::new(),
             scanned,
-            config_inputs,
+            root,
+            config: linked_config,
+            config_consumers,
             folded,
             module_pools,
         })
     }
 
-    fn with_folded_dependents(&self, changed: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    fn changed_modules(&self, changed: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        let locale_root = self.root.join("locales");
+        let theme_file = self.root.join("src/theme.ts");
+        let locales_changed = changed.iter().any(|path| path.starts_with(&locale_root));
+        let theme_changed = changed.contains(&theme_file);
+        let mut changed = changed
+            .into_iter()
+            .filter(|path| !path.starts_with(&locale_root))
+            .collect::<BTreeSet<_>>();
+
         let folded = self
             .folded
             .lock()
             .map_err(|_| anyhow::anyhow!("folded inputs unavailable"))?;
-        let changed = changed.into_iter().collect::<BTreeSet<_>>();
-        let mut all = changed.clone();
-        for (importer, sources) in folded.iter() {
-            if !sources.is_disjoint(&changed) {
-                all.insert(importer.clone());
+        if changed.iter().any(|path| {
+            path != &theme_file
+                && (!path.is_file()
+                    || (!self.modules.contains(path)
+                        && !folded.values().any(|inputs| inputs.contains(path))))
+        }) || (changed.contains(&theme_file)
+            && self.modules.contains(&theme_file)
+            && !theme_file.is_file())
+        {
+            bail!("the set of source modules changed");
+        }
+
+        let mut all = folded
+            .iter()
+            .filter_map(|(importer, sources)| {
+                (!sources.is_disjoint(&changed)).then_some(importer.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        if !self.modules.contains(&theme_file) {
+            changed.remove(&theme_file);
+        }
+        all.extend(
+            changed
+                .into_iter()
+                .filter(|path| self.modules.contains(path)),
+        );
+        drop(folded);
+        if locales_changed || theme_changed {
+            let mut config = self
+                .config
+                .lock()
+                .map_err(|_| anyhow::anyhow!("link configuration unavailable"))?;
+            if locales_changed {
+                let locales = crate::i18n::Locales::load(&self.root)?;
+                config.locales_source = locales.source()?;
+                config.locales = Arc::new(locales);
+                let virtual_module = PathBuf::from(format!("\0{}", crate::i18n::MODULE));
+                if self.modules.contains(&virtual_module) {
+                    all.insert(virtual_module);
+                }
             }
+            if theme_changed {
+                config.theme = Arc::new(crate::ThemeTokens::load(&self.root)?);
+            }
+            let consumers = self
+                .config_consumers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("configuration consumers unavailable"))?;
+            all.extend(consumers.iter().filter_map(|(path, usage)| {
+                ((locales_changed && usage.locales) || (theme_changed && usage.theme))
+                    .then_some(path.clone())
+            }));
         }
         Ok(all.into_iter().collect())
     }
@@ -412,7 +477,6 @@ impl Linker {
             })
             .flatten()
             .map(|id| PathBuf::from(id.as_str()))
-            .chain(self.config_inputs.iter().cloned())
             .collect();
         self.modules.extend(
             self.scanned
@@ -421,12 +485,27 @@ impl Linker {
                 .iter()
                 .cloned(),
         );
+        let mut inputs = self.modules.clone();
+        inputs.extend(
+            self.config
+                .lock()
+                .map_err(|_| anyhow::anyhow!("link configuration unavailable"))?
+                .locales
+                .inputs
+                .iter()
+                .cloned(),
+        );
+        inputs.extend(
+            [self.root.join("src/theme.ts"), self.root.join("app.toml")]
+                .into_iter()
+                .filter(|path| path.is_file()),
+        );
         {
             let folded = self
                 .folded
                 .lock()
                 .map_err(|_| anyhow::anyhow!("folded inputs unavailable"))?;
-            self.modules.extend(folded.values().flatten().cloned());
+            inputs.extend(folded.values().flatten().cloned());
         }
         let warnings = self
             .warnings
@@ -453,11 +532,24 @@ impl Linker {
                 .hot_externals
                 .lock()
                 .map_err(|_| anyhow::anyhow!("external modules unavailable"))?;
+            let externals = output
+                .assets
+                .iter()
+                .filter_map(|asset| match asset {
+                    Output::Chunk(chunk) => {
+                        Some(chunk.imports.iter().chain(&chunk.dynamic_imports))
+                    }
+                    Output::Asset(_) => None,
+                })
+                .flatten()
+                .filter(|name| externals.contains(name.as_str()))
+                .map(ToString::to_string)
+                .collect::<BTreeSet<_>>();
             return Ok(Bundle {
                 code: crate::hot::script(&output.assets, &metadata, &externals)?,
                 warnings,
                 source_map: None,
-                inputs: self.modules.clone(),
+                inputs,
                 chunks: BTreeMap::new(),
                 entry_native_use: BTreeMap::new(),
                 entry_imports: Vec::new(),
@@ -536,7 +628,7 @@ impl Linker {
             warnings,
             source_map: entry.source_map,
             native_use,
-            inputs: self.modules.clone(),
+            inputs,
             chunks,
             entry_native_use: entry.native_use,
             entry_imports: entry.imports,
@@ -623,8 +715,8 @@ struct ImpastoPlugin {
     externals: BTreeSet<String>,
     virtual_modules: BTreeMap<String, String>,
     scanned: Arc<Mutex<BTreeSet<PathBuf>>>,
-    locales: Arc<crate::i18n::Locales>,
-    theme: crate::ThemeTokens,
+    config: Arc<Mutex<LinkedConfig>>,
+    config_consumers: Arc<Mutex<BTreeMap<PathBuf, ConfigUse>>>,
     release: bool,
     folded: Arc<Mutex<FoldedInputs>>,
     module_pools: Arc<Mutex<ModulePools>>,
@@ -664,6 +756,7 @@ impl Plugin for ImpastoPlugin {
     ) -> HookResolveIdReturn {
         let specifier = args.specifier;
         if specifier.starts_with(crate::pools::PREFIX)
+            || specifier == crate::i18n::MODULE
             || self.virtual_modules.contains_key(specifier)
         {
             return Ok(Some(HookResolveIdOutput::from_id(format!("\0{specifier}"))));
@@ -794,6 +887,19 @@ impl Plugin for ImpastoPlugin {
                 ..Default::default()
             }));
         }
+        if args.id.strip_prefix('\0') == Some(crate::i18n::MODULE) {
+            let source = self
+                .config
+                .lock()
+                .map_err(|_| anyhow::anyhow!("link configuration unavailable"))?
+                .locales_source
+                .clone();
+            return Ok(Some(HookLoadOutput {
+                code: source.into(),
+                module_type: Some(ModuleType::Js),
+                ..Default::default()
+            }));
+        }
         Ok(args
             .id
             .strip_prefix('\0')
@@ -818,6 +924,7 @@ impl Plugin for ImpastoPlugin {
                     && !Path::new(args.id).starts_with(&self.packages)
                     && !Path::new(args.id).starts_with(self.root.join("node_modules"))
                     || args.code.contains("@impasto/i18n")
+                    || args.code.contains(crate::i18n::MODULE)
                     || args.code.contains("createShaderProgram")
                     || (args.code.contains("await")
                         && (args.code.contains("onCleanup")
@@ -844,12 +951,30 @@ impl Plugin for ImpastoPlugin {
             }
             crate::styles::builtin_export(name, &self.packages)
         };
+        let (locales, theme) = {
+            let config = self
+                .config
+                .lock()
+                .map_err(|_| anyhow::anyhow!("link configuration unavailable"))?;
+            (Arc::clone(&config.locales), Arc::clone(&config.theme))
+        };
+        self.config_consumers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("configuration consumers unavailable"))?
+            .insert(
+                PathBuf::from(args.id),
+                ConfigUse {
+                    locales: args.code.contains("@impasto/i18n")
+                        || args.code.contains(crate::i18n::MODULE),
+                    theme: source_type.is_jsx() && Path::new(args.id).starts_with(&self.root),
+                },
+            );
         let link = crate::LinkContext {
             assets: &self.assets,
             root: &self.root,
             framework: &self.framework,
-            locales: &self.locales,
-            theme: &self.theme,
+            locales: &locales,
+            theme: &theme,
             package_entry: &package_entry,
             release: self.release,
             dependencies: &mut dependencies,

@@ -423,11 +423,9 @@ public final class ImpastoHost {
             guard state == .preparing else { return }
             transition(.ready)
 #if DEBUG
-            ImpastoDevelopmentSession.current?.attach(owner: self) { [weak self] revision, source in
-                guard let self, state == .ready, let handle = connection.handle else { return false }
-                return source.withUnsafeBufferPointer {
-                    impasto_ios_update_source(handle, revision, $0.baseAddress, $0.count)
-                }
+            ImpastoDevelopmentSession.current?.attach(owner: self) { [weak self] revision in
+                guard let self, state == .ready, let handle = connection.handle else { return }
+                impasto_ios_development_file(handle, revision)
             }
 #endif
             if let controller {
@@ -499,10 +497,6 @@ public final class ImpastoHost {
             if state == .ready, surface?.id == value {
                 controller?.returnToNativeContainer()
             }
-#if DEBUG
-        case IMPASTO_IOS_EVENT_SOURCE_UPDATED:
-            ImpastoDevelopmentSession.current?.complete(owner: self, revision: value, error: message)
-#endif
         case IMPASTO_IOS_EVENT_CLOSED:
 #if DEBUG
             ImpastoDevelopmentSession.current?.detach(owner: self)

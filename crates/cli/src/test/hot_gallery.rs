@@ -95,7 +95,12 @@ fn gallery_patch_preserves_the_tab_scroll_and_focused_field() -> Result<()> {
     fs::write(&file, next)?;
     linker.set_changes(Some(vec![file]));
     let after = linker.bundle(options())?.code;
-    let patch = bundler::delta(&before, &after).context("Gallery edit generated a full reload")?;
+    let patch = match bundler::delta(&before, &after) {
+        bundler::DeltaOutcome::Patch { code, .. } => code,
+        bundler::DeltaOutcome::FullReload { reason } => {
+            anyhow::bail!("Gallery edit generated a full reload ({reason})")
+        }
+    };
     ensure!(
         session
             .apply_source_patch(&patch)

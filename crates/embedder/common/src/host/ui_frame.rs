@@ -552,11 +552,31 @@ fn run_session(
             again = output.again;
             leave = output.exit;
             let faults = session.take_faults();
+            #[cfg(debug_assertions)]
+            let error_overlay = if crate::dev_channel::current().is_some()
+                && let Some(fault) = faults.last()
+            {
+                let changed = session.set_dev_error(Some(crate::dev_channel::runtime_overlay(
+                    engine::tree::DevErrorCategory::Runtime,
+                    "Script error",
+                    &fault.message,
+                    &fault.stack,
+                )));
+                if changed {
+                    tracing::error!(target: "impasto::script", "{}\n{}", fault.message, fault.stack);
+                }
+                changed
+            } else {
+                false
+            };
+            #[cfg(not(debug_assertions))]
+            let error_overlay = false;
             let plan = fault_followup(runtime.diag_armed, &faults);
             runtime.diag_armed = plan.diag_armed;
             if plan.stop_again {
                 again = false;
             }
+            again |= error_overlay;
             if let Some(hub) = runtime.hub.as_ref() {
                 for fault in &faults {
                     hub.error(

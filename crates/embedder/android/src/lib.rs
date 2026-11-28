@@ -12,15 +12,6 @@
 mod a11y;
 #[cfg_attr(
     not(target_os = "android"),
-    allow(
-        dead_code,
-        reason = "host.rs is the caller and is compiled only for Android"
-    )
-)]
-mod assets;
-
-#[cfg_attr(
-    not(target_os = "android"),
     allow(dead_code, reason = "the JNI host is the only caller")
 )]
 mod insets;

@@ -80,6 +80,8 @@ struct Inner {
     trace: Cell<bool>,
     counters: Cell<bool>,
     /// Script failures waiting for [`crate::session::Session::take_faults`].
+    #[cfg(debug_assertions)]
+    pub(super) dev_fonts: RefCell<std::collections::HashMap<String, String>>,
     pub(super) faults: RefCell<Vec<crate::session::ScriptFault>>,
     /// The reactive graph owns Persistent values and temporary transfer slots.
     pub(super) graph: reactive::Graph,
@@ -118,6 +120,8 @@ impl Inner {
             last_pen: Cell::new(None),
             trace: Cell::new(std::env::var("IMPASTO_TRACE").as_deref() == Ok("1")),
             counters: Cell::new(false),
+            #[cfg(debug_assertions)]
+            dev_fonts: RefCell::default(),
             faults: RefCell::new(Vec::new()),
             graph: reactive::Graph::new(),
             canvas: RefCell::new(CanvasSession::new()),
@@ -786,6 +790,31 @@ impl Session for JsSession {
         if let Err(message) = result {
             self.note_script_error(message);
         }
+    }
+
+    #[cfg(debug_assertions)]
+    fn set_dev_error(&mut self, overlay: Option<crate::tree::DevErrorOverlay>) -> bool {
+        self.inner.tree.borrow_mut().set_dev_error(overlay)
+    }
+
+    #[cfg(debug_assertions)]
+    fn reload_dev_font(&mut self, relative: &str, bytes: Option<Arc<[u8]>>) -> Result<(), String> {
+        let families = self.inner.dev_fonts.borrow();
+        let Some(family) = families.get(relative) else {
+            return Ok(());
+        };
+        let mut tree = self.inner.tree.borrow_mut();
+        let updated = match bytes {
+            Some(bytes) => tree.register_shared_font(family, bytes),
+            None => {
+                tree.unregister_dev_font(family);
+                true
+            }
+        };
+        if !updated {
+            return Err(format!("Could not register updated font {family}"));
+        }
+        Ok(())
     }
 
     fn apply_source_patch(&mut self, source: &str) -> Result<bool, String> {

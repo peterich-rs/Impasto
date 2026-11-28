@@ -1,4 +1,4 @@
-//! Component-only changes that can execute against the live module graph.
+//! Replayable changes that can execute against the live module graph.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -29,6 +29,8 @@ const PATCH: &str = "// impasto:hot-patch/1\n";
 #[derive(Debug, Default)]
 pub(crate) struct ComponentModule {
     boundary: Option<String>,
+    replay: Option<String>,
+    components: BTreeMap<String, String>,
     functions: BTreeMap<String, String>,
     values: BTreeMap<String, Initializer>,
     default: Option<String>,
@@ -38,6 +40,7 @@ pub(crate) struct ComponentModule {
 enum Initializer {
     Component(String),
     Preserve,
+    Pure(String),
 }
 
 pub(crate) fn components(
@@ -55,6 +58,7 @@ pub(crate) fn components(
             | Statement::ExportAllDeclaration(_)
             | Statement::ExportFromDeclaration(_)
             | Statement::ExportNamedDeclaration(_)
+            | Statement::TSGlobalDeclaration(_)
             | Statement::TSInterfaceDeclaration(_)
             | Statement::TSTypeAliasDeclaration(_) => {}
             Statement::FunctionDeclaration(function) => {
@@ -77,7 +81,11 @@ pub(crate) fn components(
                     && has_jsx(expression)
                 {
                     components.push(("default".to_owned(), expression.span(), false));
-                } else {
+                } else if !export
+                    .declaration
+                    .as_expression()
+                    .is_some_and(pure_initializer)
+                {
                     safe = false;
                 }
             }
@@ -86,14 +94,14 @@ pub(crate) fn components(
                     register(function, &mut components);
                 }
                 Declaration::VariableDeclaration(declaration) => {
-                    safe &= initializers(declaration, &mut components, &mut metadata);
+                    safe &= initializers(declaration, source, &mut components, &mut metadata);
                 }
                 Declaration::TSInterfaceDeclaration(_) | Declaration::TSTypeAliasDeclaration(_) => {
                 }
                 _ => safe = false,
             },
             Statement::VariableDeclaration(declaration) => {
-                safe &= initializers(declaration, &mut components, &mut metadata);
+                safe &= initializers(declaration, source, &mut components, &mut metadata);
                 if safe && declaration.kind == VariableDeclarationKind::Const {
                     for item in &declaration.declarations {
                         let BindingPattern::BindingIdentifier(id) = &item.id else {
@@ -185,6 +193,7 @@ pub(crate) fn components(
             span.source_text(source).hash(&mut body);
         }
         let signature = format!("{:016x}", body.finish());
+        metadata.components.insert(name.clone(), signature.clone());
         if name == "default" {
             metadata.default = Some(signature);
         } else if is_function {
@@ -196,6 +205,36 @@ pub(crate) fn components(
         }
     }
     source.get(start..).hash(&mut rest);
+    metadata.replay = safe.then(|| {
+        let mut effects = DefaultHasher::new();
+        for statement in &program.body {
+            let declaration = match statement {
+                Statement::VariableDeclaration(declaration) => declaration,
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::VariableDeclaration(declaration) => declaration,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            for item in &declaration.declarations {
+                if matches!(
+                    metadata.values.get(&binding_names(item)),
+                    Some(Initializer::Preserve)
+                ) {
+                    item.span.source_text(source).hash(&mut effects);
+                }
+            }
+        }
+        if metadata
+            .values
+            .values()
+            .any(|value| matches!(value, Initializer::Preserve))
+        {
+            format!("{:016x}", effects.finish())
+        } else {
+            String::new()
+        }
+    });
     metadata.boundary = (safe
         && (metadata.default.is_some()
             || !metadata.functions.is_empty()
@@ -242,6 +281,7 @@ fn binding_names(item: &oxc::ast::ast::VariableDeclarator<'_>) -> String {
 
 fn initializers(
     declaration: &VariableDeclaration<'_>,
+    source: &str,
     components: &mut Vec<(String, Span, bool)>,
     metadata: &mut ComponentModule,
 ) -> bool {
@@ -267,12 +307,40 @@ fn initializers(
         if key.is_empty() || await_expression.0 {
             safe = false;
         } else {
-            // A compatible edit has the same initializer source. Keep the first
-            // value so registrations and module-level state survive a patch.
-            metadata.values.insert(key, Initializer::Preserve);
+            let kind = if pure_initializer(value) {
+                let mut hash = DefaultHasher::new();
+                value.span().source_text(source).hash(&mut hash);
+                Initializer::Pure(format!("{:016x}", hash.finish()))
+            } else {
+                Initializer::Preserve
+            };
+            metadata.values.insert(key, kind);
         }
     }
     safe
+}
+
+fn pure_initializer(expression: &Expression<'_>) -> bool {
+    use oxc::ast::ast::{ArrayExpressionElement, ObjectPropertyKind, PropertyKind};
+
+    match expression.get_inner_expression() {
+        Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::RegExpLiteral(_) => true,
+        Expression::ArrayExpression(array) => array.elements.iter().all(|element| match element {
+            ArrayExpressionElement::Elision(_) => true,
+            _ => element.as_expression().is_some_and(pure_initializer),
+        }),
+        Expression::ObjectExpression(object) => object.properties.iter().all(|property| {
+            matches!(property, ObjectPropertyKind::ObjectProperty(property)
+                if !property.computed && property.kind == PropertyKind::Init
+                    && pure_initializer(&property.value))
+        }),
+        _ => false,
+    }
 }
 
 fn component_name(name: &str) -> bool {
@@ -325,7 +393,7 @@ impl ComponentModule {
         code: &mut String,
         map: &mut oxc_sourcemap::SourceMap<'static>,
     ) {
-        if self.boundary.is_none() {
+        if self.replay.is_none() {
             return;
         }
         if !self.values.is_empty() || self.default.is_some() {
@@ -361,7 +429,12 @@ impl ComponentModule {
                             "globalThis.__impasto_hot.component({id:?}, {name:?}, {signature:?}, ("
                         ),
                         Some(Initializer::Preserve) => {
-                            format!("globalThis.__impasto_hot.keep({id:?}, {name:?}, () => (")
+                            format!("globalThis.__impasto_hot.keep({id:?}, {name:?}, null, () => (")
+                        }
+                        Some(Initializer::Pure(signature)) => {
+                            format!(
+                                "globalThis.__impasto_hot.keep({id:?}, {name:?}, {signature:?}, () => ("
+                            )
                         }
                         None => continue,
                     };
@@ -445,6 +518,8 @@ struct Factory<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     map: Option<FactoryMap>,
     boundary: Option<&'a str>,
+    replay: Option<&'a str>,
+    components: Option<&'a BTreeMap<String, String>>,
     dependencies: BTreeMap<&'a str, &'a str>,
 }
 
@@ -489,11 +564,17 @@ pub(crate) fn script(
         if chunk.is_entry {
             entry = Some(filename);
         }
-        let boundary = chunk
-            .module_ids
-            .first()
-            .and_then(|module| metadata.get(module.as_str()))
-            .and_then(|item| item.boundary.as_deref());
+        let module = chunk.module_ids.first().map(|module| module.as_str());
+        let transformed = module.and_then(|module| metadata.get(module));
+        let generated = module.is_some_and(|id| {
+            id.strip_prefix('\0') == Some(crate::i18n::MODULE)
+                || std::path::Path::new(id)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(extension, "png" | "jpg" | "jpeg" | "webp" | "wgsl" | "svg")
+                    })
+        });
         let dependencies = chunk
             .imports
             .iter()
@@ -533,7 +614,11 @@ pub(crate) fn script(
                         mappings: map.mappings,
                     }
                 }),
-                boundary,
+                boundary: transformed.and_then(|item| item.boundary.as_deref()),
+                replay: transformed
+                    .and_then(|item| item.replay.as_deref())
+                    .or(generated.then_some("")),
+                components: transformed.map(|item| &item.components),
                 dependencies,
             },
         );
@@ -551,6 +636,7 @@ pub(crate) fn script(
             .map(|map| (&map.sources, &map.mappings))
             .hash(&mut version);
         factory.boundary.hash(&mut version);
+        factory.replay.hash(&mut version);
         factory.dependencies.hash(&mut version);
     }
     code.push_str(include_str!("hot.js"));
@@ -567,63 +653,244 @@ pub(crate) fn script(
     Ok(code)
 }
 
-/// Returns a component patch for a compatible development bundle pair.
-///
-/// The patch requires the exact version of the previous module graph.
-pub fn delta(previous: &str, next: &str) -> Option<String> {
-    let previous = read_state(previous)?;
-    let next = read_state(next)?;
-    if previous.entry != next.entry || previous.natives.get() != next.natives.get() {
-        return None;
-    }
-    if previous.factories.len() != next.factories.len() {
-        return None;
-    }
-    let mut changed = BTreeMap::new();
-    for (name, replacement) in next.factories {
-        let original = previous.factories.get(&name)?;
-        if original.get() != replacement.get() {
-            let before = serde_json::from_str::<Boundary>(original.get()).ok()?;
-            let after = serde_json::from_str::<Boundary>(replacement.get()).ok()?;
-            if before.body.get() != after.body.get()
-                && (name == next.entry
-                    || before.boundary.is_none()
-                    || before.boundary != after.boundary)
-            {
-                return None;
+/// A development update and the reason it can or cannot reuse the live VM.
+#[derive(Debug)]
+pub enum DeltaOutcome {
+    Patch {
+        code: String,
+        changed_modules: Vec<String>,
+        updated_components: Vec<String>,
+    },
+    FullReload {
+        reason: ReloadReason,
+    },
+}
+
+/// The compatibility check that required a new script session.
+#[derive(Debug)]
+pub enum ReloadReason {
+    EntryModuleChanged(String),
+    TopLevelSideEffectChanged {
+        module: String,
+        detail: &'static str,
+    },
+    NativeExportsChanged(Vec<String>),
+    SessionNotHotCapable,
+    RuntimePatchRejected(String),
+}
+
+impl std::fmt::Display for ReloadReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EntryModuleChanged(module) => write!(formatter, "entry module {module} changed"),
+            Self::TopLevelSideEffectChanged { module, detail } => {
+                write!(formatter, "{module}: {detail}")
             }
-            changed.insert(name, replacement);
+            Self::NativeExportsChanged(modules) => {
+                write!(formatter, "native imports changed: {}", modules.join(", "))
+            }
+            Self::SessionNotHotCapable => formatter.write_str("live bundle version is unavailable"),
+            Self::RuntimePatchRejected(error) => {
+                write!(
+                    formatter,
+                    "runtime rejected patch: {}",
+                    error.lines().next().unwrap_or_default()
+                )
+            }
         }
     }
+}
+
+/// Compare two development bundles and emit the minimum compatible graph update.
+pub fn delta(previous: &str, next: &str) -> DeltaOutcome {
+    match plan_delta(previous, next) {
+        Ok((code, changed_modules, updated_components)) => DeltaOutcome::Patch {
+            code,
+            changed_modules,
+            updated_components,
+        },
+        Err(reason) => DeltaOutcome::FullReload { reason },
+    }
+}
+
+fn plan_delta(
+    previous: &str,
+    next: &str,
+) -> Result<(String, Vec<String>, Vec<String>), ReloadReason> {
+    let incompatible = || ReloadReason::SessionNotHotCapable;
+    let previous = read_state(previous).ok_or_else(incompatible)?;
+    let next = read_state(next).ok_or_else(incompatible)?;
+    if previous.entry != next.entry {
+        return Err(ReloadReason::EntryModuleChanged(next.entry.to_owned()));
+    }
+    if previous.natives != next.natives {
+        return Err(ReloadReason::NativeExportsChanged(
+            previous
+                .natives
+                .symmetric_difference(&next.natives)
+                .cloned()
+                .collect(),
+        ));
+    }
+
+    let before = read_factories(&previous.factories)?;
+    let after = read_factories(&next.factories)?;
+    let ids = before.keys().chain(after.keys()).collect::<BTreeSet<_>>();
+    let mut factories = BTreeMap::new();
+    let mut removed = Vec::new();
+    let mut changed_modules = Vec::new();
+    let mut replay = BTreeMap::new();
+    let mut importers = BTreeMap::<&str, Vec<&str>>::new();
+    for (id, factory) in &after {
+        for dependency in factory.dependencies.values() {
+            importers.entry(dependency).or_default().push(id);
+        }
+    }
+    let mut queue = Vec::new();
+    for id in ids {
+        let original = previous.factories.get(id).map(|raw| raw.get());
+        let replacement = next.factories.get(id).copied();
+        if original == replacement.map(RawValue::get) {
+            continue;
+        }
+        if let Some(replacement) = replacement {
+            factories.insert(id.as_str(), replacement);
+        } else {
+            removed.push(id.as_str());
+        }
+        let prior = before.get(id);
+        let updated = after.get(id);
+        if matches!((prior, updated), (Some(prior), Some(updated)) if
+            prior.body.get() == updated.body.get() && prior.dependencies == updated.dependencies)
+        {
+            continue;
+        }
+
+        changed_modules.push(id.clone());
+        if id == next.entry {
+            return Err(ReloadReason::EntryModuleChanged(id.clone()));
+        }
+        let compatible = match (prior, updated) {
+            (Some(prior), Some(updated)) => {
+                prior.replay.is_some() && prior.replay == updated.replay
+            }
+            (None, Some(updated)) => updated.replay == Some(""),
+            (Some(_), None) => true,
+            (None, None) => false,
+        };
+        if !compatible {
+            return Err(side_effect(id));
+        }
+        if let Some(updated) = updated {
+            let force = prior.is_none_or(|prior| {
+                prior.boundary != updated.boundary || prior.dependencies != updated.dependencies
+            });
+            replay.insert(id.as_str(), force);
+            if updated.boundary.is_none() {
+                queue.push(id.as_str());
+            }
+        }
+    }
+
+    while let Some(id) = queue.pop() {
+        for importer in importers.get(id).into_iter().flatten().copied() {
+            // An added module is discovered through the import that changed.
+            if !before.contains_key(id) && replay.contains_key(importer) {
+                continue;
+            }
+            if importer == next.entry {
+                return Err(ReloadReason::EntryModuleChanged(importer.to_owned()));
+            }
+            let factory = &after[importer];
+            if factory.replay.is_none()
+                || (id.ends_with(".wgsl")
+                    && factory.replay.is_some_and(|effects| !effects.is_empty()))
+            {
+                // A top-level shader handle retains the registered program.
+                // A candidate VM creates a new one from the changed source.
+                return Err(side_effect(importer));
+            }
+            let seen = replay.insert(importer, true).is_some();
+            if !seen && factory.boundary.is_none() {
+                queue.push(importer);
+            }
+        }
+    }
+    let mut updated = BTreeSet::new();
+    for (id, force) in &replay {
+        let Some(components) = &after[*id].components else {
+            continue;
+        };
+        let prior = before
+            .get(*id)
+            .and_then(|factory| factory.components.as_ref());
+        for (name, signature) in components {
+            if *force || prior.and_then(|names| names.get(name)) != Some(signature) {
+                updated.insert(name.clone());
+            }
+        }
+    }
+    let updated_components = updated.into_iter().collect();
     let patch = serde_json::to_string(&Patch {
         from: previous.version,
         to: next.version,
-        factories: changed,
+        factories,
+        removed,
+        replay,
     })
-    .ok()?;
-    Some(format!("{PATCH}{patch}"))
+    .map_err(|_| incompatible())?;
+    Ok((
+        format!("{PATCH}{patch}"),
+        changed_modules,
+        updated_components,
+    ))
+}
+
+fn read_factories<'a>(
+    factories: &BTreeMap<String, &'a RawValue>,
+) -> Result<BTreeMap<String, FactoryView<'a>>, ReloadReason> {
+    factories
+        .iter()
+        .map(|(id, raw)| {
+            let factory =
+                serde_json::from_str(raw.get()).map_err(|_| ReloadReason::SessionNotHotCapable)?;
+            Ok((id.clone(), factory))
+        })
+        .collect()
+}
+
+fn side_effect(module: &str) -> ReloadReason {
+    ReloadReason::TopLevelSideEffectChanged {
+        module: module.to_owned(),
+        detail: "top-level code cannot be replayed safely",
+    }
 }
 
 #[derive(Deserialize)]
 struct StateView<'a> {
     entry: &'a str,
     version: &'a str,
-    natives: &'a RawValue,
+    natives: BTreeSet<String>,
     #[serde(borrow)]
     factories: BTreeMap<String, &'a RawValue>,
 }
 
 #[derive(Deserialize)]
-struct Boundary<'a> {
+struct FactoryView<'a> {
     body: &'a RawValue,
     boundary: Option<&'a str>,
+    replay: Option<&'a str>,
+    components: Option<BTreeMap<String, String>>,
+    dependencies: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
 struct Patch<'a> {
     from: &'a str,
     to: &'a str,
-    factories: BTreeMap<String, &'a RawValue>,
+    factories: BTreeMap<&'a str, &'a RawValue>,
+    removed: Vec<&'a str>,
+    replay: BTreeMap<&'a str, bool>,
 }
 
 fn read_state(source: &str) -> Option<StateView<'_>> {

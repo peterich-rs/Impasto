@@ -69,6 +69,11 @@ impl Poster {
         self.inbox.post_devtools(command)
     }
 
+    #[cfg(debug_assertions)]
+    pub(crate) fn post_development(&self, command: Command) -> bool {
+        self.inbox.post_development(command)
+    }
+
     /// Delete one image cache key and arm a single frame so the next paint requests it again.
     pub fn reload_image(&self, source: &str) {
         self.inbox.post(Command::ReloadImage(source.to_owned()));
@@ -1453,24 +1458,19 @@ fn open_ui(
     })
 }
 
-fn update_source(runtime: &mut UiHost, revision: &str, source: &str) {
-    let Some(session) = runtime.session.as_mut() else {
-        return;
-    };
-    match session.apply_source_patch(source) {
-        Ok(false) => {}
-        Ok(true) => {
-            arm(runtime);
-            runtime.services.borrow().source_updated(revision, Ok(()));
-            return;
+#[cfg(debug_assertions)]
+fn update_source(runtime: &mut UiHost, patch: bool, source: &str) -> Result<&'static str, String> {
+    let session = runtime
+        .session
+        .as_mut()
+        .ok_or("the UI session is unavailable")?;
+    if patch {
+        if !session.apply_source_patch(source)? {
+            return Err("the running script has no hot module graph".to_owned());
         }
-        Err(error) => {
-            runtime
-                .services
-                .borrow()
-                .source_updated(revision, Err(&error));
-            return;
-        }
+        session.set_dev_error(None);
+        arm(runtime);
+        return Ok("patched");
     }
     let restoration = runtime.services.borrow().restoration();
     let staged = restoration.as_ref().map(crate::Restoration::stage_update);
@@ -1508,13 +1508,70 @@ fn update_source(runtime: &mut UiHost, revision: &str, source: &str) {
         drop(services);
         arm(runtime);
     }
-    runtime.services.borrow().source_updated(
-        revision,
-        match &result {
-            Ok(()) => Ok(()),
-            Err(error) => Err(error.as_str()),
-        },
-    );
+    result.map(|()| "reloaded")
+}
+
+#[cfg(debug_assertions)]
+fn development(
+    runtime: &mut UiHost,
+    action: crate::dev_channel::Action,
+) -> Result<&'static str, String> {
+    use crate::dev_channel::{Action, runtime_overlay};
+    use engine::tree::DevErrorCategory;
+
+    match action {
+        Action::Source { patch, code } => {
+            let result = update_source(runtime, patch, &code);
+            if let Err(error) = &result {
+                let category = if patch {
+                    DevErrorCategory::HmrRejected
+                } else {
+                    DevErrorCategory::Runtime
+                };
+                tracing::error!(target: "impasto::script", "{error}");
+                if let Some(session) = &mut runtime.session {
+                    session.set_dev_error(Some(runtime_overlay(
+                        category,
+                        "Script update failed",
+                        error,
+                        "",
+                    )));
+                }
+                arm(runtime);
+            }
+            result
+        }
+        Action::Image(path) => {
+            let (stem, extension) = path.rsplit_once('.').unwrap_or((&path, ""));
+            let base = stem
+                .strip_suffix("@2x")
+                .or_else(|| stem.strip_suffix("@3x"))
+                .unwrap_or(stem);
+            let _ = cache_cmds::handle(runtime, Command::ReloadImage(format!("asset:{base}")));
+            let _ = cache_cmds::handle(
+                runtime,
+                Command::ReloadImage(format!("asset:{base}.{extension}")),
+            );
+            if base != stem {
+                let _ = cache_cmds::handle(runtime, Command::ReloadImage(format!("asset:{path}")));
+            }
+            Ok("asset")
+        }
+        Action::Font { path, bytes } => {
+            if let Some(session) = &mut runtime.session {
+                session.reload_dev_font(&path, bytes)?;
+            }
+            arm(runtime);
+            Ok("asset")
+        }
+        Action::Overlay(error) => {
+            if let Some(session) = &mut runtime.session {
+                session.set_dev_error(error);
+            }
+            arm(runtime);
+            Ok("overlay")
+        }
+    }
 }
 
 fn publish_back_ownership(runtime: &mut UiHost) {
@@ -1649,8 +1706,9 @@ fn dispatch_command(
         command @ Command::Devtools { .. } => session_cmds::handle(runtime, command),
         Command::Shutdown => Ok(true),
         Command::Deadline { .. } => Ok(false),
-        Command::UpdateSource { revision, source } => {
-            update_source(runtime, &revision, &source);
+        #[cfg(debug_assertions)]
+        Command::Development { action, reply } => {
+            let _ = reply.try_send(development(runtime, action));
             Ok(false)
         }
         command @ (Command::SurfaceDestroyed { .. }

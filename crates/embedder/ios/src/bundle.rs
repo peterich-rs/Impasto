@@ -173,7 +173,7 @@ fn is_enabled(enabled: &[String], name: &str) -> bool {
     enabled.iter().any(|item| item == name)
 }
 
-fn sandbox_directory(directory: NSSearchPathDirectory) -> Result<String, BootError> {
+pub(crate) fn sandbox_directory(directory: NSSearchPathDirectory) -> Result<String, BootError> {
     let url = NSFileManager::defaultManager()
         .URLForDirectory_inDomain_appropriateForURL_create_error(
             directory,

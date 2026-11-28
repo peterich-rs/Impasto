@@ -28,7 +28,6 @@ enum {
     IMPASTO_IOS_EVENT_PLATFORM_VIEWS = 11,
     IMPASTO_IOS_EVENT_COMPOSITOR_LAYERS = 12,
     IMPASTO_IOS_EVENT_COMPOSED_FRAME = 13,
-    IMPASTO_IOS_EVENT_SOURCE_UPDATED = 14,
     IMPASTO_IOS_EVENT_SERVICE_REQUEST = 20,
     IMPASTO_IOS_EVENT_RESTORATION_CHANGED = 21,
     IMPASTO_IOS_EVENT_BACK_UNHANDLED = 22,
@@ -59,8 +58,7 @@ bool impasto_ios_service_pending(ImpastoIOSHost *host, uint64_t request);
 bool impasto_ios_service_result(ImpastoIOSHost *host, uint64_t request, uint32_t status,
                                 const char *payload);
 bool impasto_ios_service_event(ImpastoIOSHost *host, const char *topic, const char *payload);
-bool impasto_ios_update_source(ImpastoIOSHost *host, uint64_t revision,
-                               const uint8_t *bytes, size_t length);
+void impasto_ios_development_file(ImpastoIOSHost *host, uint64_t revision);
 bool impasto_ios_compositor_layers(ImpastoIOSHost *host, uint64_t surface,
                                    const void *const *layers, size_t count);
 void impasto_ios_compositor_finish(ImpastoIOSHost *host, uint64_t surface,

@@ -61,7 +61,9 @@ cargo run -p cli -- create my-app
 cd my-app
 
 # 以下假设 impasto 已加入 PATH（run 默认 debug ESM，build 默认 release QuickJS 字节码）
-impasto run                         # 在 macOS 启动（可用 -d android / -d ios 指定设备）
+impasto run                         # 在 macOS 启动调试会话，保存后自动刷新
+impasto devices                     # 列出 Android 和 iOS 目标及启动命令
+impasto doctor                      # 检查本机开发环境
 impasto build bundle --platform macos --analyze-size
 impasto build macos                 # 生成 macOS .app
 impasto build apk --debug           # 生成 Android APK（另支持 appbundle / aar）
@@ -74,11 +76,11 @@ impasto test --watch -k "payment"   # 监听相关文件并按用例名过滤
 
 应用源码放在 `src/`，应用内 Rust crate 放在 `rust/`。用 Android Studio 打开 `android/`，用 Xcode 打开 `ios/Runner.xcodeproj` 或 `macos/Runner.xcodeproj`。CLI 将插件聚合代码、类型和平台链接配置写入 `.impasto/`。新应用在 `app.toml` 的 `[dependencies]` 中声明依赖。使用 `impasto add @impasto/http` 添加内置插件，也可使用本地 `path` 或 HTTPS Git 标签。Git 依赖的提交记录在 `impasto.lock`。 [Rust 业务与原生插件](docs/rust-plugins-and-native-modules.md)
 
-从仓库根目录运行 Gallery 时，执行 `cargo run -p cli -- --project examples/gallery-solid run`。在应用目录中可直接执行 `impasto run`。
+从仓库根目录运行 Gallery 时，执行 `cargo run -p cli -- --project examples/gallery-solid run`。在应用目录中可直接执行 `impasto run`，用 `-d android`、`-d ios` 或 `-d ios:<UDID>` 选择移动设备。调试会话会自动应用兼容的脚本与资产更新，将设备日志输出到终端，并在设备上显示构建或脚本错误。原生或平台工程变更会重新构建和部署。使用 `--no-watch` 单次启动调试版本，或用 `--release` 启动发布版本。
 
 应用的 TSX 由 Oxc 降级并由 Rolldown 链接。显式导入 PascalCase JSX 组件，例如 `import { View } from "@impasto/solid-ui"`。Release 构建生成 `app.bin` 和 `app.sym`。字面量 `import()` 对应的字节码按需从 `app.bin` 加载。路由可用 `lazy: () => import("./settings.tsx")` 加载默认导出的组件。用 `impasto symbolicate <app.sym> --stack <堆栈>` 解析带模块名的 QuickJS 调用栈。`--analyze-size` 生成 `bundle-size.json`，列出实际分包大小、按模块分摊的字节码大小与共享样式池归因。用 `--size-json <路径>` 指定报告位置。
 
-`impasto analyze` 首次运行会安装并校验固定版本的原生 TypeScript 7。可使用 `--tsc` 或 `IMPASTO_TSC` 指定已有的原生检查器。`--all-targets` 检查应用声明的各平台，`--deny-warnings` 将项目编译警告视为错误。CLI 发布包附带检查器、框架源码和 DevTools Wasm 编译器。调试时用 `impasto run --watch` 生成 Inspector 源码位置，在独立客户端用 `impasto devtools --source-root <项目路径> --editor cursor` 指定编辑器和本地源码。将 `bundle-size.json` 导入独立客户端的 Bundle size 面板可查看模块体积图。
+`impasto analyze` 首次运行会安装并校验固定版本的原生 TypeScript 7。可使用 `--tsc` 或 `IMPASTO_TSC` 指定已有的原生检查器。`--all-targets` 检查应用声明的各平台，`--deny-warnings` 将项目编译警告视为错误。CLI 发布包附带检查器、框架源码和 DevTools Wasm 编译器。调试时默认生成 Inspector 源码位置，在独立客户端用 `impasto devtools --source-root <项目路径> --editor cursor` 指定编辑器和本地源码。将 `bundle-size.json` 导入独立客户端的 Bundle size 面板可查看模块体积图。
 
 `impasto test` 发现 `src/` 与 `tests/` 中的 `*.test.ts` 和 `*.test.tsx`。从 `impasto:test` 导入 `test`、`screen` 与 `fire`，用 `await screen.mount(...)` 挂载组件，再等待查询或输入驱动。用 `clock.install()` 接管会话时间，再用 `await clock.advance(ms)` 驱动定时器和帧。测试宿主提供隔离的临时目录，支持链接应用自己的 Rust 插件。`just solid` 和 `just solid-app` 分别运行框架包和 Gallery 的无头测试。
 

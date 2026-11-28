@@ -108,9 +108,10 @@ pub enum Command {
     /// A URL that arrived after the session exists. The render thread calls `Session::set_launch_url`.
     LaunchUrl(String),
     /// Staged UTF-8 debug update sent by the driver.
-    UpdateSource {
-        revision: String,
-        source: String,
+    #[cfg(debug_assertions)]
+    Development {
+        action: crate::dev_channel::Action,
+        reply: std::sync::mpsc::SyncSender<Result<&'static str, String>>,
     },
     SurfaceReady(SurfaceTarget),
     SurfaceChanged {
@@ -177,7 +178,8 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         | Command::AutofillEnabled(_)
         | Command::SemanticsAction(_) => "semantics",
         Command::LaunchUrl(_) => "launch",
-        Command::UpdateSource { .. } => "source update",
+        #[cfg(debug_assertions)]
+        Command::Development { .. } => "development update",
         Command::SurfaceReady(_)
         | Command::SurfaceChanged { .. }
         | Command::SurfaceDestroyed { .. } => "surface",

@@ -9,7 +9,6 @@ use std::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
 pub(crate) struct Options {
@@ -131,30 +130,24 @@ fn run_project(
     let mut inputs = Inputs::new();
     let mut known = entries(root, app, single.as_deref())?;
     let mut selected = known.clone();
-    let snapshot = |inputs: &Inputs| {
-        let mut paths = BTreeMap::new();
-        for name in [
-            "src",
-            "tests",
-            "assets",
-            "locales",
-            "tsconfig.json",
-            "app.toml",
-        ] {
-            crate::run::snapshot_path(&root.join(name), &mut paths)?;
-        }
-        if app.is_none() {
-            crate::run::snapshot_path(&root.join("packages"), &mut paths)?;
-        }
-        for path in inputs.values().flatten() {
-            crate::run::snapshot_path(path, &mut paths)?;
-        }
-        Ok::<_, anyhow::Error>(paths)
+    let scope = |inputs: &Inputs| {
+        let mut scope = crate::watch::Scope::new(
+            root,
+            if app.is_some() {
+                &["src", "tests", "assets", "locales"]
+            } else {
+                &["src", "tests", "assets", "locales", "packages"]
+            },
+            &["tsconfig.json", "app.toml"],
+        );
+        scope.extend(inputs.values().flatten().chain(single.iter()));
+        scope
     };
-    let mut previous = if options.watch {
-        snapshot(&inputs)?
+    let mut watch = if options.watch {
+        let (events, rx) = crate::dev::events()?;
+        Some((crate::watch::ProjectWatch::new(scope(&inputs), events)?, rx))
     } else {
-        BTreeMap::new()
+        None
     };
     loop {
         if let Err(error) = run_sources(
@@ -177,26 +170,25 @@ fn run_project(
             }
             eprintln!("{error:#}");
         }
-        if !options.watch {
+        let Some((watcher, events)) = &mut watch else {
             return Ok(());
-        }
-        for (path, stamp) in snapshot(&inputs)? {
-            previous.entry(path).or_insert(stamp);
-        }
+        };
+        watcher.set_scope(scope(&inputs))?;
 
         selected.clear();
         while selected.is_empty() {
-            std::thread::sleep(Duration::from_millis(20));
-            let current = snapshot(&inputs)?;
-            if current == previous {
+            let changed = match events.recv()? {
+                crate::dev::Event::Files(batch) => watcher.reconcile(batch)?,
+                crate::dev::Event::Warning(message) => {
+                    eprintln!("impasto: {message}");
+                    continue;
+                }
+                crate::dev::Event::Shutdown => return Ok(()),
+                _ => continue,
+            };
+            if changed.is_empty() {
                 continue;
             }
-            let changed = current
-                .iter()
-                .filter(|(path, stamp)| previous.get(*path) != Some(*stamp))
-                .map(|(path, _)| path)
-                .chain(previous.keys().filter(|path| !current.contains_key(*path)))
-                .collect::<BTreeSet<_>>();
             let rescan_all = changed.iter().any(|path| {
                 path.starts_with(root.join("locales"))
                     || path.file_name().is_some_and(|name| {
@@ -213,13 +205,12 @@ fn run_project(
                             || changed.contains(entry)
                             || inputs
                                 .get(*entry)
-                                .is_none_or(|deps| changed.iter().any(|path| deps.contains(*path)))
+                                .is_none_or(|deps| changed.iter().any(|path| deps.contains(path)))
                     })
                     .cloned(),
             );
             known = all;
-            changes = changed.into_iter().cloned().collect();
-            previous = current;
+            changes = changed;
         }
     }
 }

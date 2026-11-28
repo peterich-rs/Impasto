@@ -37,7 +37,7 @@ Perfetto 中的 `js_stack_sample` 同时保留生成栈和 `js_source_stack`。�
 
 ## 热更新与原生契约
 
-macOS、iOS 和 Android 的 `impasto run --watch` 共用 Session 更新协议。监听期间，Rolldown 保留模块图并对已知源文件使用增量扫描。组件函数和默认导出的箭头组件发生兼容变更时，只传输变化的模块工厂和源码映射。只在同模块组件中使用的辅助函数参与对应组件签名，修改辅助函数会更新依赖它的组件。兼容更新复用模块级初始化值，未改动的子树继续使用原有的 Signal、Context、路由和原生节点。热更新直接在内存中生成补丁。依赖图或入口初始化变动会触发候选 Session 校验。开发工厂保留对应版本的行列映射，`console.trace`、错误页和 DevTools 日志可以显示原始 TSX 位置。
+macOS、iOS 和 Android 的 `impasto run` 共用 Session 更新协议。监听期间，Rolldown 保留模块图并对已知源文件使用增量扫描。组件函数和默认导出的箭头组件发生兼容变更时，只传输变化的模块工厂和源码映射。只在同模块组件中使用的辅助函数参与对应组件签名，修改辅助函数会更新依赖它的组件。兼容更新复用模块级初始化值，未改动的子树继续使用原有的 Signal、Context、路由和原生节点。热更新直接在内存中生成补丁。纯模块变更会沿依赖关系传到组件边界，入口初始化或不可重放的顶层副作用变更会触发候选 Session 校验。开发工厂保留对应版本的行列映射，`console.trace`、错误页和 DevTools 日志可以显示原始 TSX 位置。
 
 正式平台构建按链接后存活的原生引用省略未用插件的注册和平台工程，同时保留依赖闭包及无 JavaScript 导出的平台插件。对只使用具名导出的宏模块，Rust 编译时移除未使用的方法绑定。对象、事件和命名空间导入保留完整导出。Android 按 `plugin.toml` 中的 `[android.permissions]` 规则生成权限清单。方法范围不可静态确定的对象或命名空间，以及由 Rust 直接调用的依赖，保留关联权限。应用直接声明的权限由应用管理。
 
@@ -96,7 +96,7 @@ Gallery 的热更新回归通过真实 QuickJS Session 打开自选 Tab，滚动
 cargo test -p cli --bin impasto gallery_patch_preserves_the_tab_scroll_and_focused_field
 ```
 
-使用发布版 CLI 在三端分别运行 Gallery `impasto run --watch`，每端连续保存搜索页标题的字号和文案十次，计量从保存到 CLI 收到宿主应用确认的时间。
+使用发布版 CLI 在三端分别运行 Gallery `impasto run`，每端连续保存搜索页标题的字号和文案十次，计量从保存到 CLI 收到宿主应用确认的时间。
 
 | 宿主 | 中位数 | 最大值 | 低于 100 ms |
 |---|---:|---:|---:|

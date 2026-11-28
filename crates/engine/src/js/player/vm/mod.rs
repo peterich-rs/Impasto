@@ -365,18 +365,9 @@ pub(in crate::js::player) struct JsVm {
 }
 impl JsVm {
     pub(super) fn apply_source_patch(&self, source: &str) -> Result<bool, String> {
-        let delta = source.strip_prefix("// impasto:hot-patch/1\n");
-        if delta.is_none() && !source.starts_with("// impasto:hot/1\n") {
+        let Some(state) = source.strip_prefix("// impasto:hot-patch/1\n") else {
             return Ok(false);
-        }
-        let state = delta
-            .or_else(|| {
-                source
-                    .split_once("\n// impasto:hot-state\n")
-                    .and_then(|(_, state)| state.split_once("\n// impasto:hot-state-end\n"))
-                    .map(|(state, _)| state)
-            })
-            .ok_or_else(|| "missing development module state".to_owned())?;
+        };
         let _budget = self.host.budget("source patch", 0);
         let applied = self.host.with(|ctx| {
             let hot = ctx.globals().get::<_, Option<Object>>("__impasto_hot");
@@ -384,13 +375,13 @@ impl JsVm {
                 let Some(hot) = hot else {
                     return Ok(false);
                 };
-                let update: Function = hot.get(if delta.is_some() { "patch" } else { "update" })?;
+                let update: Function = hot.get("patch")?;
                 let state = ctx.json_parse(state)?;
                 update.call((rquickjs::function::This(hot), state))
             });
             result.map_err(|error| self.host.stash_fault(&ctx, "source patch", error))
         })?;
-        if delta.is_some() && !applied {
+        if !applied {
             return Err("development patch does not match the running module graph".to_owned());
         }
         Ok(applied)

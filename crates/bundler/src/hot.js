@@ -37,16 +37,19 @@ function start(state, natives) {
   };
 
   function load(id) {
-    if (modules.has(id)) return modules.get(id).exports;
-    const factory = state.factories[id];
+    const staged = pending?.modules;
+    if (staged?.has(id)) return staged.get(id).exports;
+    if (!pending?.replay.has(id) && modules.has(id)) return modules.get(id).exports;
+    const factory = (pending?.next ?? state).factories[id];
     if (!factory) throw new Error(`Unknown development module ${id}`);
+    const owner = staged ?? modules;
     const module = { exports: {} };
-    modules.set(id, module);
+    owner.set(id, module);
     try {
       execute(factory, id, module);
       return module.exports;
     } catch (error) {
-      modules.delete(id);
+      owner.delete(id);
       throw error;
     }
   }
@@ -59,29 +62,46 @@ function start(state, natives) {
         : name;
       return load(factory.dependencies[name] ?? filename);
     };
-    remember(factory);
-    compileHotFactory(factory.location, factory.body)(module, module.exports, require);
+    if (pending) pending.maps.push(factory);
+    else remember(factory);
+    const parent = pending?.executing;
+    if (pending) pending.executing = id;
+    try {
+      compileHotFactory(factory.location, factory.body)(module, module.exports, require);
+    } finally {
+      if (pending) pending.executing = parent;
+    }
   }
 
   globalThis.__impasto_hot = {
     symbolize,
-    keep(module, name, init) {
+    keep(module, name, signature, init) {
       const key = JSON.stringify([module, name]);
-      if (!kept.has(key)) kept.set(key, init());
-      return kept.get(key);
+      const entry = pending?.kept.get(key) ?? kept.get(key);
+      if (entry?.signature === signature) return entry.value;
+      if (pending && signature === null) {
+        throw new Error(`Cannot initialize module state during HMR: ${name}`);
+      }
+      const value = init();
+      (pending?.kept ?? kept).set(key, { signature, value });
+      return value;
     },
     component(module, name, signature, implementation) {
       const key = JSON.stringify([module, name]);
       const prior = components.get(key);
-      if (pending) {
-        if (!prior) throw new Error(`Unknown mounted component ${name}`);
-        if (prior.signature !== signature) pending.set(prior, { signature, implementation });
+      if (pending && prior) {
+        if (prior.signature !== signature || pending.replay.get(pending.executing)) {
+          pending.signals.set(prior, { signature, implementation });
+        }
         return prior.proxy;
       }
+      const existing = pending?.components.get(key);
+      if (existing) return existing.proxy;
       const [read, write] = createSignal(implementation);
       const proxy = (...args) => untrack(read)(...args);
       const record = { signature, proxy, read, write };
-      components.set(key, record);
+      if (pending) pending.components.set(key, record);
+      else components.set(key, record);
       records.set(proxy, record);
       return proxy;
     },
@@ -92,51 +112,45 @@ function start(state, natives) {
     },
     patch(patch) {
       if (patch.from !== state.version) return false;
-      return this.update({
-        ...state,
-        version: patch.to,
-        factories: { ...state.factories, ...patch.factories },
-      });
-    },
-    update(next) {
-      const priorIds = Object.keys(state.factories);
-      const nextIds = Object.keys(next.factories);
-      if (next.entry !== state.entry || priorIds.length !== nextIds.length ||
-          JSON.stringify(next.natives) !== JSON.stringify(state.natives)) return false;
-      const changed = [];
-      for (const id of nextIds) {
-        const before = state.factories[id];
-        const after = next.factories[id];
-        if (!before) return false;
-        if (before.body !== after.body) {
-          if (id === state.entry || !before.boundary || before.boundary !== after.boundary) return false;
-          changed.push(id);
-        }
-      }
-      const staged = new Map();
+      const factories = { ...state.factories, ...patch.factories };
+      for (const id of patch.removed ?? []) delete factories[id];
+      const next = { ...state, factories, version: patch.to };
+      const staged = {
+        next,
+        replay: new Map(Object.entries(patch.replay ?? {})),
+        modules: new Map(),
+        kept: new Map(),
+        components: new Map(),
+        signals: new Map(),
+        maps: [],
+      };
       pending = staged;
       try {
-        for (const id of changed) {
-          if (modules.has(id)) execute(next.factories[id], id, { exports: {} });
+        for (const id of staged.replay.keys()) {
+          if (modules.has(id)) load(id);
         }
-      } catch (_error) {
-        return false;
+      } catch (error) {
+        for (const factory of staged.maps) remember(factory);
+        throw error;
       } finally {
         pending = undefined;
       }
-      for (const [record, change] of staged) {
+      for (const id of patch.removed ?? []) modules.delete(id);
+      for (const [id, module] of staged.modules) modules.set(id, module);
+      for (const [key, entry] of staged.kept) kept.set(key, entry);
+      for (const [key, record] of staged.components) components.set(key, record);
+      for (const factory of staged.maps) remember(factory);
+      for (const id of Object.keys(patch.factories)) {
+        if (!staged.modules.has(id) && modules.has(id)) remember(factories[id]);
+      }
+      state = next;
+      for (const [record, change] of staged.signals) {
         record.signature = change.signature;
         record.write(() => change.implementation);
       }
-      for (const id of nextIds) {
-        if (state.factories[id].body === next.factories[id].body &&
-            state.factories[id].map !== next.factories[id].map && modules.has(id)) {
-          remember(next.factories[id]);
-        }
-      }
-      state = next;
       return true;
     },
+
   };
   load(state.entry);
 }

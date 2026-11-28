@@ -345,10 +345,15 @@ fn prepare_application(
         &glue.join(format!("{configuration}.{sdk}.xcconfig")),
         &sdk_settings,
     )?;
+    let swift_debug = if options.debug {
+        "SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEBUG\n"
+    } else {
+        ""
+    };
     plugins::write(
         &glue.join(format!("{configuration}.xcconfig")),
         &format!(
-            "DEVELOPMENT_TEAM = {team}\nTARGETED_DEVICE_FAMILY = {families}\n{signing}{domains}#include? \"{configuration}.iphoneos.xcconfig\"\n#include? \"{configuration}.iphonesimulator.xcconfig\"\n",
+            "DEVELOPMENT_TEAM = {team}\nTARGETED_DEVICE_FAMILY = {families}\n{signing}{domains}{swift_debug}#include? \"{configuration}.iphoneos.xcconfig\"\n#include? \"{configuration}.iphonesimulator.xcconfig\"\n",
         ),
     )?;
     let background_modes = native
@@ -711,14 +716,88 @@ struct SimulatorList {
 }
 
 #[derive(Deserialize)]
-struct Simulator {
-    udid: String,
-    state: String,
+pub(crate) struct Simulator {
+    pub(crate) udid: String,
+    pub(crate) state: String,
+    #[cfg(target_os = "macos")]
+    pub(crate) name: String,
 }
 
 enum RunDevice {
     Physical(String),
     Simulator(Simulator),
+}
+
+pub(crate) fn simulators() -> Result<Vec<Simulator>> {
+    let output = Command::new("xcrun")
+        .args(["simctl", "list", "devices", "available", "--json"])
+        .output()
+        .context("启动 simctl")?;
+    let list: SimulatorList =
+        serde_json::from_str(&require_output(output, "读取可用 iOS 模拟器")?)?;
+    Ok(list
+        .devices
+        .into_iter()
+        .rev()
+        .filter(|(runtime, _)| runtime.starts_with("com.apple.CoreSimulator.SimRuntime.iOS-"))
+        .flat_map(|(_, devices)| devices)
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub(crate) struct PhysicalDevice {
+    pub(crate) identifier: String,
+    pub(crate) udid: String,
+    pub(crate) name: String,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn physical_devices() -> Result<Vec<PhysicalDevice>> {
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("devices.json");
+    let output = Command::new("xcrun")
+        .args([
+            "devicectl",
+            "list",
+            "devices",
+            "--timeout",
+            "3",
+            "--json-output",
+        ])
+        .arg(&path)
+        .output()
+        .context("启动 devicectl")?;
+    require_output(output, "枚举 iOS 真机")?;
+    let data: Value = serde_json::from_slice(&fs::read(path)?)?;
+    let devices = data["result"]["devices"]
+        .as_array()
+        .context("devicectl 设备列表不存在")?;
+    Ok(devices
+        .iter()
+        .filter_map(|device| {
+            let platform = device
+                .pointer("/hardwareProperties/platform")
+                .and_then(Value::as_str);
+            if platform.is_some_and(|platform| !matches!(platform, "iOS" | "iPadOS")) {
+                return None;
+            }
+            let identifier = device["identifier"].as_str()?.to_owned();
+            Some(PhysicalDevice {
+                udid: device
+                    .pointer("/hardwareProperties/udid")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                name: device
+                    .pointer("/deviceProperties/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&identifier)
+                    .to_owned(),
+                identifier,
+            })
+        })
+        .collect())
 }
 
 fn choose_device(requested: Option<&str>) -> Result<RunDevice> {
@@ -731,18 +810,7 @@ fn choose_device(requested: Option<&str>) -> Result<RunDevice> {
     {
         bail!("请使用 -d ios:<UDID> 选择有效的 iOS 设备");
     }
-    let output = Command::new("xcrun")
-        .args(["simctl", "list", "devices", "available", "--json"])
-        .output()
-        .context("启动 simctl")?;
-    let list: SimulatorList =
-        serde_json::from_str(&require_output(output, "读取可用 iOS 模拟器")?)?;
-    let mut simulators = list
-        .devices
-        .into_iter()
-        .rev()
-        .filter(|(runtime, _)| runtime.starts_with("com.apple.CoreSimulator.SimRuntime.iOS-"))
-        .flat_map(|(_, devices)| devices);
+    let mut simulators = simulators()?.into_iter();
     if let Some(id) = requested {
         if let Some(device) = simulators.find(|device| device.udid.eq_ignore_ascii_case(id)) {
             return Ok(RunDevice::Simulator(device));
@@ -790,7 +858,7 @@ impl RunDevice {
         application: &Path,
         app: &App,
         options: &BuildOptions,
-        development_token: Option<&str>,
+        development: Option<&watch::Launch<'_>>,
         attach: bool,
     ) -> Result<()> {
         let package = bundle_id(app);
@@ -830,32 +898,21 @@ impl RunDevice {
             Self::Simulator(device) => {
                 install.args(["simctl", "install", &device.udid]);
                 launch.args(["simctl", "launch", "--terminate-running-process"]);
-                if !attach && development_token.is_none() && (options.verbose || options.trace) {
-                    launch.arg("--console");
-                }
-                if let Some(token) = development_token {
-                    launch.env("SIMCTL_CHILD_IMPASTO_DEV_SESSION", token);
+                if let Some(session) = development {
+                    launch.env("SIMCTL_CHILD_IMPASTO_DEV_SESSION", session.token);
+                    if let Some(address) = session.address {
+                        launch.env("SIMCTL_CHILD_IMPASTO_DEV_ADDR", address.to_string());
+                    }
+                    launch.env("SIMCTL_CHILD_IMPASTO_DEV_APP_ID", &package);
+                    if session.verbose {
+                        launch.env("SIMCTL_CHILD_IMPASTO_DEV_VERBOSE", "1");
+                    }
                 }
                 launch.args([&device.udid, &package]);
             }
             Self::Physical(udid) => {
                 install.args(["devicectl", "device", "install", "app", "--device", udid]);
-                launch.args([
-                    "devicectl",
-                    "device",
-                    "process",
-                    "launch",
-                    "--device",
-                    udid,
-                    "--terminate-existing",
-                ]);
-                if !attach && development_token.is_none() && (options.verbose || options.trace) {
-                    launch.arg("--console");
-                }
-                if let Some(token) = development_token {
-                    launch.env("DEVICECTL_CHILD_IMPASTO_DEV_SESSION", token);
-                }
-                launch.arg(&package);
+                launch = configure_physical(launch, udid, &package, development, true);
             }
         }
         install.arg(application);
@@ -901,6 +958,45 @@ impl RunDevice {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn launch_physical(udid: &str, package: &str, development: &watch::Launch<'_>) -> Command {
+    configure_physical(
+        Command::new("xcrun"),
+        udid,
+        package,
+        Some(development),
+        false,
+    )
+}
+
+fn configure_physical(
+    mut launch: Command,
+    udid: &str,
+    package: &str,
+    development: Option<&watch::Launch<'_>>,
+    terminate: bool,
+) -> Command {
+    launch.args(["devicectl", "device", "process", "launch", "--device", udid]);
+    if terminate {
+        launch.arg("--terminate-existing");
+    }
+    if let Some(session) = development {
+        launch.env("DEVICECTL_CHILD_IMPASTO_DEV_SESSION", session.token);
+        launch.env("DEVICECTL_CHILD_IMPASTO_DEV_APP_ID", package);
+        if let Some(port) = session.port {
+            launch.env("DEVICECTL_CHILD_IMPASTO_DEV_PORT", port.to_string());
+        }
+        if session.verbose {
+            launch.env("DEVICECTL_CHILD_IMPASTO_DEV_VERBOSE", "1");
+        }
+        if session.files {
+            launch.env("DEVICECTL_CHILD_IMPASTO_DEV_FILES", "1");
+        }
+    }
+    launch.arg(package);
+    launch
+}
+
 pub(crate) fn run(
     app: App,
     options: &BuildOptions,
@@ -912,7 +1008,7 @@ pub(crate) fn run(
     let device = choose_device(requested)?;
     device.ready()?;
     if watch {
-        return watch::run(app, options, device, attach);
+        return crate::dev::run(&device, app, options, attach);
     }
     let path = build(&app, options, device.platform())?;
     device.install_and_launch(&path, &app, options, None, attach)

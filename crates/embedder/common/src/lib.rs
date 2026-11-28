@@ -2,6 +2,8 @@
 //! the raster, the session, and the surface.
 
 mod command;
+#[cfg(debug_assertions)]
+pub mod dev_channel;
 mod diagnostics;
 mod error;
 mod exec;
@@ -41,7 +43,8 @@ pub use host::{
     DropWait, Link, Poster, console_log, start, start_async, start_async_with_exit, start_on,
 };
 pub use images::{
-    DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady, read_packaged_file,
+    DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady, asset_image_candidates,
+    read_packaged_file,
 };
 pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok, unpremultiply_rgba};
 #[cfg(target_os = "android")]
@@ -129,7 +132,6 @@ pub trait Services: Send {
     fn window_session(&self) -> WindowSession {
         WindowSession::default()
     }
-    fn source_updated(&self, _revision: &str, _result: Result<(), &str>) {}
     fn unhandled_back(&self) {
         self.request_exit();
     }
