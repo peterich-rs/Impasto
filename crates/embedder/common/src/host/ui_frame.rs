@@ -33,14 +33,14 @@ pub(super) fn on_frame(
     let raster_admitted =
         prefetch_generation.is_some() || runtime.frames.has_room(FramePipeline::DEPTH);
     if !raster_admitted && runtime.input.is_paused() {
-        skipped_frame("queue_full");
+        note_admission_failure(runtime, schedule, time.interval_ms, "queue_full");
         return Ok(end_frame(runtime, false, false));
     }
     if prefetch_generation.is_none() && runtime.try_surface {
         surface_cmds::retry(runtime, acks)?;
     }
     if runtime.active_surface.is_none() {
-        skipped_frame("no_surface");
+        note_admission_failure(runtime, schedule, time.interval_ms, "no_surface");
         return Ok(end_frame(runtime, false, false));
     }
     runtime.frame_number = next_frame_number();
@@ -233,6 +233,28 @@ fn post_raster_frame(
     Ok(())
 }
 
+fn note_admission_failure(
+    runtime: &UiHost,
+    schedule: Option<ScheduleTiming>,
+    budget_ms: f64,
+    reason: &'static str,
+) {
+    skipped_frame(reason);
+    if let (Some(hub), Some(mut schedule)) = (&runtime.telemetry, schedule)
+        && hub.collects_frames()
+    {
+        schedule.ui_done_ns = mono_ns();
+        schedule.skip_reason = Some(reason);
+        hub.push_frame(crate::diagnostics::FrameSample {
+            number: next_frame_number(),
+            at_ms: crate::timing::mono_ms(),
+            budget_ms,
+            schedule,
+            ..Default::default()
+        });
+    }
+}
+
 pub(super) fn skipped_frame(status: &'static str) {
     tracing::event!(name: "frame_skipped", target: "impasto::frame", tracing::Level::DEBUG,
         trace_event = true, queue = "ui", status);
@@ -356,6 +378,7 @@ fn frame_schedule(
             vsync_ns,
             ui_start_ns,
             topology: Some(runtime.queue_placement),
+            in_flight_depth: u32::try_from(runtime.frames.in_flight).ok(),
             budget_ns: ms_to_ns(time.interval_ms),
             ..ScheduleTiming::default()
         }

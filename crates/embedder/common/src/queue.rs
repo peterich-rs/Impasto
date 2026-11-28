@@ -65,6 +65,20 @@ impl Inbox {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn post_devtools(&self, command: Command) -> bool {
+        const QUERY_LIMIT: usize = 32;
+        self.post_if(command, |state| {
+            state
+                .commands
+                .iter()
+                .filter(|command| matches!(command, Command::Devtools { .. }))
+                .take(QUERY_LIMIT)
+                .count()
+                < QUERY_LIMIT
+        })
+    }
+
     pub(crate) fn post_plugin_event(&self, event: impasto::abi::HostEvent) -> bool {
         let bytes = event
             .module

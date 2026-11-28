@@ -43,7 +43,21 @@ impl SurfaceTarget {
     }
 }
 
+/// Diagnostics queries that must run on the owning UI queue.
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+#[derive(Debug)]
+pub enum DevtoolsQuery {
+    ViewSnapshot { max_nodes: usize },
+    ViewProbe { x: f32, y: f32 },
+    SetLayoutScan(bool),
+}
+
 pub enum Command {
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    Devtools {
+        query: DevtoolsQuery,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
+    },
     Pointer(PointerEvent),
     #[doc(hidden)]
     PointerMoves {
@@ -151,6 +165,8 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         Command::Io(IoEvent::Plugin { .. }) => "plugin",
         Command::Io(IoEvent::NativeStream { .. }) => "native stream",
         Command::Io(IoEvent::Host(_)) => "host event",
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        Command::Devtools { .. } => "devtools",
         Command::Wake | Command::Deadline { .. } => "wake",
         Command::CommitCompositorState { .. } => "animation handoff",
         Command::PrefetchCompositorWindow { .. } => "list prefetch",

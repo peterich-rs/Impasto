@@ -119,6 +119,11 @@ pub struct PhaseSample {
     pub semantics_ms: f64,
     pub laywork_ms: f64,
     pub layout_passes: u32,
+    pub nodes_created: u32,
+    pub ffi_batches: u32,
+    pub ffi_calls: u32,
+    pub style_resolves: u32,
+    pub repaint_boundaries_dirtied: u32,
     pub text_reused: u32,
     pub text_shaped: u32,
     pub pointers: u32,
@@ -232,6 +237,7 @@ pub(crate) struct Ring<T> {
     buf: VecDeque<T>,
     cap: usize,
     seq: u64,
+    discarded_through: u64,
 }
 
 impl<T: SeqField> Ring<T> {
@@ -240,13 +246,16 @@ impl<T: SeqField> Ring<T> {
             buf: VecDeque::new(),
             cap,
             seq: 0,
+            discarded_through: 0,
         }
     }
 
     pub(crate) fn push(&mut self, make: impl FnOnce(u64) -> T) {
         self.seq = self.seq.saturating_add(1);
-        if self.buf.len() == self.cap {
-            self.buf.pop_front();
+        if self.buf.len() == self.cap
+            && let Some(oldest) = self.buf.pop_front()
+        {
+            self.discarded_through = self.discarded_through.max(oldest.cursor());
         }
         let seq = self.seq;
         self.buf.push_back(make(seq));
@@ -262,7 +271,25 @@ impl<T: SeqField> Ring<T> {
     }
 
     pub(crate) fn clear(&mut self) {
+        self.seq = self.seq.saturating_add(1);
+        self.discarded_through = self.seq;
         self.buf.clear();
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn updates(&self, since: Option<u64>) -> devtools_protocol::ChannelUpdate<T>
+    where
+        T: Clone,
+    {
+        let reset = since.is_none_or(|cursor| cursor < self.discarded_through || cursor > self.seq);
+        devtools_protocol::ChannelUpdate {
+            revision: self.seq,
+            reset,
+            entries: self
+                .tail(if reset { 0 } else { since.unwrap_or_default() })
+                .cloned()
+                .collect(),
+        }
     }
 }
 
@@ -312,12 +339,26 @@ pub struct TelemetryHub {
     flags: Mutex<DevtoolsFlags>,
     /// Latest window metrics. The platform page reads this.
     metrics: Mutex<engine::session::Metrics>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) refresh_rate: Mutex<Option<f32>>,
     /// Overflow report JSON from the last frame that scanned, or `"[]"`.
     layout_report: Mutex<String>,
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
-    inspector_enabled: AtomicBool,
+    inspector_clients: AtomicU64,
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     inspector: Mutex<Option<(std::time::Instant, Arc<str>)>>,
+}
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+pub(super) struct InspectorClient<'a>(&'a TelemetryHub);
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+impl Drop for InspectorClient<'_> {
+    fn drop(&mut self) {
+        if self.0.inspector_clients.fetch_sub(1, Ordering::Relaxed) == 1 {
+            lock(&self.0.inspector).take();
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -349,17 +390,20 @@ impl TelemetryHub {
             revision: AtomicU64::new(1),
             flags: Mutex::new(DevtoolsFlags::default()),
             metrics: Mutex::new(engine::session::Metrics::new(0.0, 0.0, 1.0)),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            refresh_rate: Mutex::new(None),
             layout_report: Mutex::new("[]".to_owned()),
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
-            inspector_enabled: AtomicBool::new(false),
+            inspector_clients: AtomicU64::new(0),
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
             inspector: Mutex::new(None),
         }
     }
 
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
-    pub(crate) fn enable_inspector(&self) {
-        self.inspector_enabled.store(true, Ordering::Relaxed);
+    pub(super) fn inspect_remote(&self) -> InspectorClient<'_> {
+        self.inspector_clients.fetch_add(1, Ordering::Relaxed);
+        InspectorClient(self)
     }
 
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
@@ -368,7 +412,7 @@ impl TelemetryHub {
         settled: bool,
         snapshot: impl FnOnce() -> Option<String>,
     ) {
-        if !self.inspector_enabled.load(Ordering::Relaxed)
+        if self.inspector_clients.load(Ordering::Relaxed) == 0
             || (!settled
                 && lock(&self.inspector)
                     .as_ref()
@@ -377,7 +421,10 @@ impl TelemetryHub {
             return;
         }
         if let Some(snapshot) = snapshot() {
-            *lock(&self.inspector) = Some((std::time::Instant::now(), snapshot.into()));
+            let mut stored = lock(&self.inspector);
+            if self.inspector_clients.load(Ordering::Relaxed) != 0 {
+                *stored = Some((std::time::Instant::now(), snapshot.into()));
+            }
         }
     }
 
@@ -496,6 +543,7 @@ impl TelemetryHub {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
+        self.bump();
     }
 
     pub fn network_snapshot(&self) -> Vec<NetEntry> {
@@ -511,6 +559,25 @@ impl TelemetryHub {
             }
         }
         self.profile.store(profile as u8, Ordering::Relaxed);
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_refresh_rate(&self, refresh_rate: Option<f32>) {
+        *lock(&self.refresh_rate) = refresh_rate;
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn latest_frame(&self) -> Option<FrameSample> {
+        lock(&self.frames).buf.back().cloned()
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn frame_detail(&self, id: u64) -> Option<FrameSample> {
+        lock(&self.frames)
+            .buf
+            .iter()
+            .find(|frame| frame.number == id)
+            .cloned()
     }
 
     pub(crate) fn collects_frames(&self) -> bool {
@@ -923,10 +990,13 @@ mod tests {
     #[test]
     fn settled_inspector_frames_replace_a_recent_snapshot() {
         let hub = DiagnosticsHub::new();
-        hub.enable_inspector();
+        let client = hub.inspect_remote();
         hub.refresh_inspector(false, || Some("initial".to_owned()));
         hub.refresh_inspector(true, || Some("settled".to_owned()));
         assert_eq!(hub.inspector().as_deref(), Some("settled"));
+        drop(client);
+        hub.refresh_inspector(true, || panic!("disconnected inspection should not run"));
+        assert!(hub.inspector().is_none());
     }
 
     #[test]

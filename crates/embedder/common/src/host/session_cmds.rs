@@ -6,6 +6,13 @@ use crate::error::BootError;
 
 pub(super) fn handle(runtime: &mut UiHost, command: Command) -> Result<bool, BootError> {
     match command {
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        Command::Devtools { query, reply } => {
+            if !reply.is_closed() {
+                let _ = reply.send(devtools(runtime, query));
+            }
+            Ok(false)
+        }
         command @ (Command::Pointer(_)
         | Command::PointerMoves { .. }
         | Command::Input(_)
@@ -75,6 +82,10 @@ fn session(runtime: &mut UiHost, command: Command) -> Result<bool, BootError> {
             }
         }
         Command::WindowDisplay(display) => {
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            if let Some(hub) = &runtime.telemetry {
+                hub.note_refresh_rate(display.refresh_rate);
+            }
             if let Some(session) = runtime.session.as_mut() {
                 session_call(|| session.window_display(display));
                 arm(runtime);
@@ -221,4 +232,29 @@ fn io_done(runtime: &mut UiHost, dispatch: impl FnOnce(&mut dyn engine::session:
             arm(runtime);
         }
     }
+}
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+fn devtools(runtime: &mut UiHost, query: crate::command::DevtoolsQuery) -> Result<Vec<u8>, String> {
+    use crate::command::DevtoolsQuery;
+
+    let session = runtime.session.as_mut().ok_or("session closed")?;
+    let mut value = None;
+    match query {
+        DevtoolsQuery::ViewSnapshot { max_nodes } => {
+            session_call(|| value = session.inspector_snapshot_limited(max_nodes))
+        }
+        DevtoolsQuery::ViewProbe { x, y } => session_call(|| value = session.inspector_probe(x, y)),
+        DevtoolsQuery::SetLayoutScan(layout_scan) => {
+            let hub = runtime.telemetry.as_ref().ok_or("telemetry unavailable")?;
+            let mut flags = hub.flags();
+            flags.layout_scan = layout_scan;
+            hub.set_flags(flags);
+            arm(runtime);
+            return Ok(b"true".to_vec());
+        }
+    };
+    value
+        .map(String::into_bytes)
+        .ok_or_else(|| "query unsupported by this session".to_owned())
 }

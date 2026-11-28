@@ -35,6 +35,10 @@ pub struct ScheduleTiming {
     pub present_done_ns: u64,
     pub budget_ns: u64,
     pub missed_vsync: bool,
+    /// Raster submissions already pending when the UI queue admitted this frame.
+    pub in_flight_depth: Option<u32>,
+    /// Admission failure when this tick produced no surface submission.
+    pub skip_reason: Option<&'static str>,
     /// Raster received the display-link callback directly from the platform.
     pub compositor_only: bool,
     pub compositor_block: Option<engine::scene::CompositorBlockReason>,

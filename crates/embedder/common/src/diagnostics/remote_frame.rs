@@ -1,0 +1,108 @@
+use devtools_protocol::{CompositorBlock, FrameRecord, GpuPass, GpuTiming, RuntimeSample};
+
+use super::FrameSample;
+
+pub(super) fn record(frame: &FrameSample) -> FrameRecord {
+    let timing = frame.schedule;
+    let render = frame.raster.render;
+    let phase = frame.phases;
+    FrameRecord {
+        id: frame.number,
+        revision: frame.changed_at,
+        at_ms: frame.at_ms,
+        ui_ms: timing.ui_ms(),
+        queue_ms: timing.queue_ms(),
+        raster_ms: timing.raster_ms(),
+        e2e_ms: timing.e2e_ms(),
+        budget_ms: frame.budget_ms,
+        work_ms: frame.work_ms,
+        session_ms: frame.session_ms,
+        gesture_ms: frame.gesture_ms,
+        script_ms: frame.script_ms,
+        layout_ms: frame.layout_ms,
+        record_ms: frame.record_ms,
+        submit_ms: frame.submit_ms,
+        present_ms: frame.present_ms,
+        over_budget: frame.over_budget,
+        compositor_only: timing.compositor_only,
+        missed_vsync: timing.missed_vsync,
+        topology: timing.topology.map(str::to_owned),
+        skip_reason: timing.skip_reason.map(str::to_owned),
+        compositor_block: timing.compositor_block.map(|reason| CompositorBlock {
+            reason: reason.name().to_owned(),
+            node: reason.node().map(|id| id.to_string()),
+        }),
+        in_flight_depth: timing.in_flight_depth,
+        motion_ms: phase.motion_ms,
+        dispatch_ms: phase.dispatch_ms,
+        timer_ms: phase.timer_ms,
+        raf_ms: phase.raf_ms,
+        callback_ms: phase.callback_ms,
+        flush_ms: phase.flush_ms,
+        layout_cb_ms: phase.layout_cb_ms,
+        sync_ms: phase.sync_ms,
+        semantics_ms: phase.semantics_ms,
+        laywork_ms: phase.laywork_ms,
+        canvas_record_ms: phase.canvas_record_ms,
+        canvas_prepare_ms: phase.canvas_prepare_ms,
+        layout_passes: phase.layout_passes,
+        nodes_created: phase.nodes_created,
+        ffi_batches: phase.ffi_batches,
+        ffi_calls: phase.ffi_calls,
+        style_resolves: phase.style_resolves,
+        repaint_boundaries_dirtied: phase.repaint_boundaries_dirtied,
+        text_reused: phase.text_reused,
+        text_shaped: phase.text_shaped,
+        canvas_ops: phase.canvas_ops,
+        canvas_segments: phase.canvas_segments,
+        canvas_redraws: phase.canvas_redraws,
+        canvas_reused: phase.canvas_reused,
+        layout_cause: frame.layout_cause.to_owned(),
+        updates: frame.updates,
+        sets: frame.sets,
+        draws: render.draws,
+        passes: render.passes,
+        layers: frame.layers,
+        pictures: frame.pictures,
+        picture_rebuilt: frame.picture_rebuilt,
+        picture_reused: frame.picture_reused,
+        textures: frame.textures,
+        atlas_entries: frame.atlas_entries,
+        atlas_hits: frame.atlas_hits,
+        repainted_view_count: 0,
+        vertex_bytes: render.vertex_bytes,
+        uniform_bytes: render.uniform_bytes,
+        stop_bytes: render.stop_bytes,
+        extra_bytes: render.extra_bytes,
+        mesh_upload_bytes: render.mesh_upload_bytes,
+        atlas_upload_bytes: render.atlas_upload_bytes,
+        gpu: GpuTiming {
+            state: frame.gpu.status.name().to_owned(),
+            generation: frame.gpu.device_generation,
+            frame_span_us: frame.gpu_timing.as_ref().map(|gpu| gpu.frame_span_us),
+            passes_sum_us: frame.gpu_timing.as_ref().map(|gpu| gpu.passes_sum_us),
+            passes: frame.gpu_timing.as_ref().map(|gpu| {
+                gpu.passes
+                    .iter()
+                    .map(|pass| GpuPass {
+                        kind: format!("{:?}", pass.kind),
+                        slice: pass.slice_index,
+                        draws: pass.draws,
+                        start_us: pass.start_us,
+                        duration_us: pass.duration_us,
+                        shader_id: pass.shader_id().map(|id| id.0),
+                        view_id: pass.view_id().map(str::to_owned),
+                    })
+                    .collect()
+            }),
+        },
+        runtime_sample: frame.runtime.map(|sample| RuntimeSample {
+            promises: sample.promises,
+            timers: sample.timers,
+            requests: sample.requests,
+            queued_events: sample.queued_events,
+            queued_bytes: sample.queued_bytes,
+            heap_bytes: sample.heap_bytes,
+        }),
+    }
+}

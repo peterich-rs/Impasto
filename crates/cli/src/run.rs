@@ -17,8 +17,13 @@ pub struct RunOptions {
     pub verbose: bool,
     pub trace: bool,
     pub watch: bool,
+    pub devtools: bool,
 }
 pub fn run(options: RunOptions) -> Result<()> {
+    anyhow::ensure!(
+        !options.devtools || std::env::var("IMPASTO_DEVTOOLS").as_deref() != Ok("0"),
+        "--devtools requires the DevTools agent to be enabled"
+    );
     let mut app = App::current()?;
     let device = options
         .device
@@ -36,14 +41,28 @@ pub fn run(options: RunOptions) -> Result<()> {
     };
     let watch_interval = Duration::from_millis(if settings.hot.is_some() { 10 } else { 250 });
     if device == "ios" || device.starts_with("ios:") {
-        return crate::ios::run(app, &settings, device.strip_prefix("ios:"), options.watch);
+        return crate::ios::run(
+            app,
+            &settings,
+            device.strip_prefix("ios:"),
+            options.watch,
+            options.devtools,
+        );
     }
     if device != "macos" {
+        let serial = if device == "android" {
+            let output = Command::new("adb").arg("get-serialno").output()?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Select an Android device with -d <serial>"
+            );
+            String::from_utf8(output.stdout)?.trim().to_owned()
+        } else {
+            device.to_owned()
+        };
         let adb = || {
             let mut command = Command::new("adb");
-            if device != "android" {
-                command.args(["-s", device]);
-            }
+            command.args(["-s", &serial]);
             command
         };
         let connected = || {
@@ -115,13 +134,34 @@ pub fn run(options: RunOptions) -> Result<()> {
                                         }
                                     })
                             }
-                            AndroidDeployment::Apk(artifact) => install_android(
-                                &adb,
-                                &app.android_id(),
-                                &artifact.path,
-                                settings.debug,
-                            )
-                            .map(Some),
+                            AndroidDeployment::Apk(artifact) => {
+                                let config = if settings.debug {
+                                    crate::devtools::device_config()?
+                                } else {
+                                    None
+                                };
+                                install_android(
+                                    &adb,
+                                    &app.android_id(),
+                                    &artifact.path,
+                                    config.as_ref(),
+                                )
+                                .and_then(|activity| {
+                                    if let Some(config) = config {
+                                        let attach = crate::devtools::register_device(
+                                            devtools_protocol::DeviceKind::Android,
+                                            &serial,
+                                            &app.android_id(),
+                                            config,
+                                            &app.root,
+                                        )?;
+                                        if options.devtools && installed.is_none() {
+                                            crate::devtools::launch_native(Some(&attach))?;
+                                        }
+                                    }
+                                    Ok(Some(activity))
+                                })
+                            }
                         };
                         match deployed {
                             Err(_) if installed.is_some() && !connected() => {
@@ -198,6 +238,9 @@ pub fn run(options: RunOptions) -> Result<()> {
     let mailbox = settings.debug.then(tempfile::tempdir).transpose()?;
     let update = mailbox.as_ref().map(|dir| dir.path().join("app.js"));
     let mut child = launch_macos(&app, &application.path, options.trace, update.as_deref())?;
+    if options.devtools {
+        crate::devtools::launch_native(Some(&child.id().to_string()))?;
+    }
     let mut snapshot = files(&app)?;
     let mut installed_source = macos_source(&application.path, settings.hot.is_some());
     let mut installed = snapshot.clone();
@@ -312,9 +355,14 @@ fn launch_macos(
     }
     if let Some(update) = update {
         command.env("IMPASTO_SOURCE_MAILBOX", update);
-        command.env("IMPASTO_DEVTOOLS_PROJECT", &app.root);
-        command.env("IMPASTO_DEVTOOLS_FRAMEWORK", toolchain::framework()?);
     }
+    command.env("IMPASTO_DEVTOOLS_APP_NAME", &app.name);
+    command.env("IMPASTO_DEVTOOLS_PROJECT", &app.root);
+    command.env("IMPASTO_DEVTOOLS_FRAMEWORK", toolchain::framework()?);
+    command.env(
+        "IMPASTO_DEVTOOLS_SOURCE_MAP",
+        application.join("Contents/Resources/app.js.map"),
+    );
     Ok(command.spawn()?)
 }
 
@@ -376,13 +424,8 @@ fn install_android(
     adb: &impl Fn() -> Command,
     package: &str,
     apk: &Path,
-    debug: bool,
+    devtools: Option<&(u16, String)>,
 ) -> Result<String> {
-    let devtools = if debug {
-        crate::devtools::config()?
-    } else {
-        None
-    };
     let mut install = adb();
     install.args(["install", "-r"]).arg(apk);
     toolchain::run(install, "安装 APK")?;
@@ -416,7 +459,7 @@ fn install_android(
     let mut start = adb();
     start.args(["shell", "am", "start", "-S"]);
     if let Some((port, token)) = devtools {
-        crate::devtools::configure_android(adb, package, port, &token)?;
+        crate::devtools::configure_android(adb, package, *port, token)?;
     }
     start.args(["-n", activity]);
     toolchain::run(start, "启动 Android 应用")?;

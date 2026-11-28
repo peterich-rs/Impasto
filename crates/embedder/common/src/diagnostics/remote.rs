@@ -1,4 +1,4 @@
-//! Loopback-only, authenticated DevTools transport. Never enters the app runtime.
+//! Loopback-only, authenticated DevTools transport. UI-owned queries use the host inbox.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -8,6 +8,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
+use devtools_protocol::{
+    BinaryEnvelopeHeader, BinaryMsgType, Capability, MAX_BINARY_PAYLOAD, PROTOCOL_VERSION_V1,
+    PROTOCOL_VERSION_V2, SessionInfo,
+};
+use subtle::ConstantTimeEq;
+
+use crate::command::{Command, DevtoolsQuery};
+use crate::host::Poster;
+
 use futures_util::future::{self, Either};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -23,17 +32,19 @@ use tokio_tungstenite::{
     },
 };
 
-use super::TelemetryHub;
 use super::hub::{CaptureOptions, TraceCapture};
+use super::remote_stream::Subscription;
+use super::telemetry::TelemetryProfile;
 use super::timeline::{FieldValue, TraceDetail};
+use super::{TelemetryHub, discovery, remote_frame};
 
 const FRAME_SPAN_LIMIT: usize = 512;
 
-const REQUEST_LIMIT: usize = 4096;
+const REQUEST_LIMIT: usize = 64 * 1024;
 const CLIENT_LIMIT: usize = 4;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
-const UPDATE_INTERVAL: Duration = Duration::from_millis(250);
-const VERSION: u8 = 1;
+const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+const PENDING_RPC_LIMIT: usize = 8;
 
 pub(crate) struct Config {
     port: u16,
@@ -54,6 +65,10 @@ impl Config {
     }
 
     pub(crate) fn configured(_log_dir: Option<&Path>) -> Option<Self> {
+        let mode = std::env::var("IMPASTO_DEVTOOLS");
+        if mode.as_deref() == Ok("0") {
+            return None;
+        }
         #[cfg(target_os = "android")]
         if let Some(path) = _log_dir
             .and_then(Path::parent)
@@ -68,41 +83,127 @@ impl Config {
             let (port, token) = config.trim_end().split_once('\n')?;
             return Self::parse(port, token);
         }
-        Self::parse(
-            &std::env::var("IMPASTO_DEVTOOLS_PORT").ok()?,
-            &std::env::var("IMPASTO_DEVTOOLS_TOKEN").ok()?,
-        )
+        match (
+            std::env::var("IMPASTO_DEVTOOLS_PORT"),
+            std::env::var("IMPASTO_DEVTOOLS_TOKEN"),
+        ) {
+            (Ok(port), Ok(token)) => Self::parse(&port, &token),
+            (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent))
+                if cfg!(debug_assertions) || mode.as_deref() == Ok("1") =>
+            {
+                #[cfg(target_os = "android")]
+                return None; // The CLI allocates the remotely forwarded port.
+                #[cfg(not(target_os = "android"))]
+                return discovery::token().ok().map(|token| Self {
+                    port: 0,
+                    token: token.into(),
+                });
+            }
+            _ => None,
+        }
     }
 }
 
-pub(crate) struct Server(JoinHandle<()>);
+pub(crate) struct Server {
+    task: JoinHandle<()>,
+    _registration: Option<discovery::Registration>,
+}
 
 impl Server {
-    pub(crate) fn start(config: Config, hub: Arc<TelemetryHub>) -> io::Result<Self> {
+    pub(crate) fn start(
+        config: Config,
+        hub: Arc<TelemetryHub>,
+        poster: Poster,
+    ) -> io::Result<Self> {
         let runtime = crate::rt::rt().map_err(io::Error::other)?.handle();
         let _enter = runtime.enter();
         let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, config.port);
         let socket = std::net::TcpListener::bind(address)?;
         socket.set_nonblocking(true)?;
         let listener = TcpListener::from_std(socket)?;
-        hub.enable_inspector();
+        let address = listener.local_addr()?;
+        let register = cfg!(target_os = "macos")
+            || std::env::var_os("IMPASTO_DEVTOOLS_DISCOVERY_DIR").is_some();
+        let registration = if register {
+            match discovery::Registration::publish(address.port(), &config.token) {
+                Ok(registration) => Some(registration),
+                Err(error) => {
+                    tracing::warn!(target: "impasto::devtools", %error, "DevTools discovery unavailable");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         tracing::info!(target: "impasto::devtools", %address, "DevTools listening");
-        Ok(Self(runtime.spawn(listen(listener, config.token, hub))))
+        let state = Arc::new(Agent {
+            token: config.token,
+            hub,
+            poster: Some(poster),
+            name: discovery::app_name(),
+            os: crate::host::host_os_version(),
+        });
+        Ok(Self {
+            task: runtime.spawn(listen(listener, state)),
+            _registration: registration,
+        })
     }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        self.0.abort();
+        self.task.abort();
     }
 }
 
-async fn listen(listener: TcpListener, token: Arc<str>, hub: Arc<TelemetryHub>) {
+struct Agent {
+    token: Arc<str>,
+    hub: Arc<TelemetryHub>,
+    poster: Option<Poster>,
+    name: String,
+    os: String,
+}
+
+impl Agent {
+    fn info(&self) -> SessionInfo {
+        let metrics = self.hub.metrics();
+        let frame = self.hub.latest_frame();
+        let refresh_rate = *self
+            .hub
+            .refresh_rate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "window refresh rates use the existing f32 display contract"
+        )]
+        let inferred_refresh_rate = frame
+            .as_ref()
+            .filter(|frame| frame.budget_ms > 0.0)
+            .map(|frame| (1000.0 / frame.budget_ms) as f32);
+        SessionInfo {
+            pid: std::process::id(),
+            app_name: self.name.clone(),
+            platform: std::env::consts::OS.to_owned(),
+            os: self.os.clone(),
+            framework_version: impasto::VERSION.to_owned(),
+            width: metrics.width,
+            height: metrics.height,
+            dpr: metrics.device_pixel_ratio,
+            refresh_rate: refresh_rate.or(inferred_refresh_rate),
+            topology: frame
+                .and_then(|frame| frame.schedule.topology)
+                .map(str::to_owned),
+        }
+    }
+}
+
+async fn listen(listener: TcpListener, agent: Arc<Agent>) {
     let mut clients = JoinSet::new();
     while let Ok((stream, _)) = listener.accept().await {
         while clients.try_join_next().is_some() {}
         if clients.len() < CLIENT_LIMIT {
-            clients.spawn(serve(stream, Arc::clone(&token), Arc::clone(&hub)));
+            clients.spawn(serve(stream, Arc::clone(&agent)));
         }
     }
 }
@@ -130,13 +231,33 @@ fn handshake(request: &Request, response: Response) -> Result<Response, ErrorRes
 
 type Socket = WebSocketStream<TcpStream>;
 
-async fn send(socket: &mut Socket, value: Value) -> bool {
-    timeout(
-        IO_TIMEOUT,
-        socket.send(Message::Text(value.to_string().into())),
-    )
-    .await
-    .is_ok_and(|result| result.is_ok())
+async fn send(socket: &mut Socket, message: Message) -> bool {
+    timeout(IO_TIMEOUT, socket.send(message))
+        .await
+        .is_ok_and(|result| result.is_ok())
+}
+
+fn text(value: Value) -> Message {
+    Message::Text(value.to_string().into())
+}
+
+fn binary(id: u64, kind: BinaryMsgType, payload: &[u8]) -> Message {
+    let Ok(payload_len) = u32::try_from(payload.len()) else {
+        return text(error(Some(id), -32006, "payload too large"));
+    };
+    if payload.len() > MAX_BINARY_PAYLOAD {
+        return text(error(Some(id), -32006, "payload too large"));
+    }
+    let header = BinaryEnvelopeHeader {
+        msg_type: kind,
+        flags: 0,
+        request_id: id,
+        payload_len,
+    };
+    let mut bytes = Vec::with_capacity(header.encode().len() + payload.len());
+    bytes.extend(header.encode());
+    bytes.extend_from_slice(payload);
+    Message::Binary(bytes.into())
 }
 
 fn response(id: Option<u64>, result: Value) -> Value {
@@ -148,15 +269,11 @@ fn error(id: Option<u64>, code: i32, message: &str) -> Value {
 }
 
 fn matches_token(expected: &str, given: &str) -> bool {
-    expected.len() == given.len()
-        && expected
-            .bytes()
-            .zip(given.bytes())
-            .fold(0, |different, (a, b)| different | (a ^ b))
-            == 0
+    expected.len() == given.len() && bool::from(expected.as_bytes().ct_eq(given.as_bytes()))
 }
 
-async fn serve(stream: TcpStream, token: Arc<str>, hub: Arc<TelemetryHub>) {
+async fn serve(stream: TcpStream, agent: Arc<Agent>) {
+    let hub = &agent.hub;
     let limits = WebSocketConfig::default()
         .max_message_size(Some(REQUEST_LIMIT))
         .max_frame_size(Some(REQUEST_LIMIT));
@@ -173,26 +290,55 @@ async fn serve(stream: TcpStream, token: Arc<str>, hub: Arc<TelemetryHub>) {
     };
     let auth: Value = serde_json::from_str(&message).unwrap_or(Value::Null);
     let id = auth["id"].as_u64();
+    let version = auth["params"]["version"]
+        .as_u64()
+        .and_then(|value| u8::try_from(value).ok());
     if auth["jsonrpc"] != "2.0"
         || id.is_none()
         || auth["method"] != "authenticate"
-        || auth["params"]["version"].as_u64() != Some(u64::from(VERSION))
+        || !matches!(version, Some(PROTOCOL_VERSION_V1 | PROTOCOL_VERSION_V2))
         || !auth["params"]["token"]
             .as_str()
-            .is_some_and(|given| matches_token(&token, given))
+            .is_some_and(|given| matches_token(&agent.token, given))
     {
-        send(&mut socket, error(id, -32001, "authentication failed")).await;
+        send(
+            &mut socket,
+            text(error(id, -32001, "authentication failed")),
+        )
+        .await;
         return;
     }
-    if !send(&mut socket, response(id, json!({ "version": VERSION, "capabilities": ["frame_spans", "capture_status", "trace_detail", "capture_gpu", "inspector"] }))).await {
+    let v2 = version == Some(PROTOCOL_VERSION_V2);
+    let mut capabilities = vec![
+        Capability::FrameSpans,
+        Capability::CaptureStatus,
+        Capability::TraceDetail,
+        Capability::CaptureGpu,
+        Capability::Inspector,
+    ];
+    let result = if v2 {
+        capabilities.extend([Capability::MultiChannelSubscribe, Capability::BinaryFrames]);
+        json!({"version": PROTOCOL_VERSION_V2, "capabilities": capabilities, "session": agent.info()})
+    } else {
+        json!({"version": PROTOCOL_VERSION_V1, "capabilities": capabilities})
+    };
+    if !send(&mut socket, text(response(id, result))).await {
         return;
     }
+    let _inspector = (!v2).then(|| hub.inspect_remote());
     let mut cursor = None;
+    let mut subscription = Subscription::default();
+    let mut recording = None;
     let mut captures = JoinSet::new();
-    let mut updates = interval(UPDATE_INTERVAL);
+    let mut updates = interval(if v2 {
+        UPDATE_INTERVAL
+    } else {
+        Duration::from_millis(250)
+    });
+    updates.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     enum Next {
         Incoming(Option<Result<Message, SocketError>>),
-        Finished(Option<Value>),
+        Finished(Option<Message>),
         Update,
     }
     loop {
@@ -214,7 +360,24 @@ async fn serve(stream: TcpStream, token: Arc<str>, hub: Arc<TelemetryHub>) {
         };
         let result = match next {
             Next::Incoming(Some(Ok(Message::Text(message)))) => {
-                request(&hub, &message, &mut cursor, &mut captures)
+                if v2 {
+                    request_v2(
+                        &agent,
+                        &message,
+                        &mut subscription,
+                        &mut recording,
+                        &mut captures,
+                    )
+                } else {
+                    request(
+                        hub,
+                        agent.poster.as_ref(),
+                        &message,
+                        &mut cursor,
+                        &mut captures,
+                    )
+                    .map(text)
+                }
             }
             Next::Incoming(Some(Ok(Message::Ping(data)))) => {
                 if !timeout(IO_TIMEOUT, socket.send(Message::Pong(data)))
@@ -228,16 +391,17 @@ async fn serve(stream: TcpStream, token: Arc<str>, hub: Arc<TelemetryHub>) {
             Next::Incoming(Some(Ok(Message::Pong(_)))) => continue,
             Next::Incoming(_) => break,
             Next::Finished(result) => result,
+            Next::Update if v2 => subscription.update(hub).map(text),
             Next::Update => cursor.and_then(|since| {
                 let (revision, reset, samples) = hub.frame_updates(since);
                 if revision == since {
                     return None;
                 }
                 cursor = Some(revision);
-                Some(json!({
+                Some(text(json!({
                     "jsonrpc": "2.0", "method": "frames",
                     "params": frame_update(revision, reset, &samples),
-                }))
+                })))
             }),
         };
         if let Some(result) = result
@@ -250,9 +414,10 @@ async fn serve(stream: TcpStream, token: Arc<str>, hub: Arc<TelemetryHub>) {
 
 fn request(
     hub: &Arc<TelemetryHub>,
+    poster: Option<&Poster>,
     message: &str,
     cursor: &mut Option<u64>,
-    captures: &mut JoinSet<Value>,
+    captures: &mut JoinSet<Message>,
 ) -> Option<Value> {
     let Ok(rpc) = serde_json::from_str::<Value>(message) else {
         return Some(error(None, -32700, "invalid JSON"));
@@ -263,12 +428,25 @@ fn request(
     }
     let params = &rpc["params"];
     Some(match rpc["method"].as_str() {
-        Some("inspector") => response(
-            id,
-            hub.inspector()
-                .and_then(|snapshot| serde_json::from_str(&snapshot).ok())
-                .unwrap_or(Value::Null),
-        ),
+        Some("inspector") => {
+            let cached = hub
+                .inspector()
+                .and_then(|snapshot| serde_json::from_str(&snapshot).ok());
+            if cached.is_none()
+                && let (Some(id), Some(poster)) = (id, poster)
+                && captures.len() < PENDING_RPC_LIMIT
+            {
+                let (reply, done) = tokio::sync::oneshot::channel();
+                if poster.post_devtools(Command::Devtools {
+                    query: DevtoolsQuery::ViewSnapshot { max_nodes: 512 },
+                    reply,
+                }) {
+                    captures.spawn(ui_reply(id, None, done));
+                    return None;
+                }
+            }
+            response(id, cached.unwrap_or(Value::Null))
+        }
         Some("subscribe") => {
             let since = params["since"].as_u64().unwrap_or_default();
             let (revision, reset, samples) = hub.frame_updates(since);
@@ -334,14 +512,196 @@ fn request(
             };
             captures.spawn(async move {
                 match capture.finish(Duration::from_millis(duration)).await {
-                    Some(trace) => response(id, trace),
-                    None => error(id, -32002, "trace capture unavailable"),
+                    Some(trace) => text(response(id, trace)),
+                    None => text(error(id, -32002, "trace capture unavailable")),
                 }
             });
             return None;
         }
         _ => error(id, -32601, "unknown method"),
     })
+}
+
+fn request_v2(
+    agent: &Agent,
+    message: &str,
+    subscription: &mut Subscription,
+    recording: &mut Option<Capture>,
+    pending: &mut JoinSet<Message>,
+) -> Option<Message> {
+    let Ok(rpc) = serde_json::from_str::<Value>(message) else {
+        return Some(text(error(None, -32700, "invalid JSON")));
+    };
+    let (Some(id), Some(method), true) = (
+        rpc["id"].as_u64(),
+        rpc["method"].as_str(),
+        rpc["jsonrpc"] == "2.0",
+    ) else {
+        return Some(text(error(rpc["id"].as_u64(), -32600, "invalid request")));
+    };
+    let ok = |result| text(response(Some(id), result));
+    let fail = |code, message| text(error(Some(id), code, message));
+    let params = &rpc["params"];
+    let hub = &agent.hub;
+    Some(match method {
+        "session.info" => ok(json!(agent.info())),
+        "subscribe" => match serde_json::from_value(params.clone()) {
+            Ok(request) => ok(subscription.subscribe(request, hub)),
+            Err(_) => fail(-32602, "expected channels and optional cursors"),
+        },
+        "telemetry.set_profile" => {
+            let profile = match params["profile"].as_str() {
+                Some("off") => TelemetryProfile::Off,
+                Some("counters") => TelemetryProfile::Counters,
+                Some("gpu_timeline") => TelemetryProfile::GpuAndTimeline,
+                Some("deep_inspect") => TelemetryProfile::DeepInspect,
+                _ => return Some(fail(-32602, "invalid telemetry profile")),
+            };
+            hub.set_profile(profile);
+            ok(json!(true))
+        }
+        "frame.detail" => match params["frame_id"].as_u64() {
+            Some(frame_id) => hub.frame_detail(frame_id).map_or_else(
+                || fail(-32003, "frame is outside the retained window"),
+                |frame| ok(json!(remote_frame::record(&frame))),
+            ),
+            None => fail(-32602, "expected frame_id"),
+        },
+        "view.snapshot" | "view.probe" | "view.set_overlay" => {
+            if pending.len() >= PENDING_RPC_LIMIT {
+                return Some(fail(-32002, "too many pending requests"));
+            }
+            let query = match method {
+                "view.snapshot" => DevtoolsQuery::ViewSnapshot {
+                    max_nodes: usize::try_from(
+                        params["max_nodes"].as_u64().unwrap_or(512).min(20_000),
+                    )
+                    .unwrap_or(512),
+                },
+                "view.probe" => {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "hit testing uses scene coordinates represented as f32"
+                    )]
+                    let coordinates = params["x"]
+                        .as_f64()
+                        .zip(params["y"].as_f64())
+                        .map(|(x, y)| (x as f32, y as f32));
+                    let Some((x, y)) = coordinates.filter(|(x, y)| x.is_finite() && y.is_finite())
+                    else {
+                        return Some(fail(-32602, "expected finite scene coordinates"));
+                    };
+                    DevtoolsQuery::ViewProbe { x, y }
+                }
+                _ => {
+                    let Some(scan) = params["layout_scan"].as_bool() else {
+                        return Some(fail(-32602, "expected layout_scan"));
+                    };
+                    DevtoolsQuery::SetLayoutScan(scan)
+                }
+            };
+            let Some(poster) = &agent.poster else {
+                return Some(fail(-32004, "session closed"));
+            };
+            let (reply, done) = tokio::sync::oneshot::channel();
+            if !poster.post_devtools(Command::Devtools { query, reply }) {
+                return Some(fail(-32002, "UI queue is unavailable or busy"));
+            }
+            let binary_kind = (method == "view.snapshot").then_some(BinaryMsgType::ViewSnapshot);
+            pending.spawn(ui_reply(id, binary_kind, done));
+            return None;
+        }
+        "trace.start" => {
+            let Some(options) = capture_options(params) else {
+                return Some(fail(-32602, "invalid trace options"));
+            };
+            let Some(capture_id) = hub.begin_capture(None, options) else {
+                return Some(fail(-32002, "trace capture busy"));
+            };
+            *recording = Some(Capture {
+                hub: Arc::clone(hub),
+                id: capture_id,
+            });
+            ok(json!({"id": capture_id}))
+        }
+        "trace.stop" => {
+            if pending.len() >= PENDING_RPC_LIMIT {
+                return Some(fail(-32002, "too many pending requests"));
+            }
+            let Some(capture) = recording.take() else {
+                return Some(fail(-32003, "no active trace capture"));
+            };
+            pending.spawn_blocking(move || match capture.hub.take_capture(capture.id) {
+                Some(archive) => text(response(Some(id), capture_summary(&archive))),
+                None => text(error(Some(id), -32003, "trace capture unavailable")),
+            });
+            return None;
+        }
+        "trace.export_pftrace" => {
+            let Some(archive) = hub.latest_capture().filter(|archive| {
+                params["capture_id"].is_null() || params["capture_id"].as_u64() == Some(archive.id)
+            }) else {
+                return Some(fail(-32003, "trace capture unavailable"));
+            };
+            if pending.len() >= PENDING_RPC_LIMIT {
+                return Some(fail(-32002, "too many pending requests"));
+            }
+            pending.spawn_blocking(move || {
+                binary(
+                    id,
+                    BinaryMsgType::TraceExport,
+                    &super::trace_export::encode(&archive),
+                )
+            });
+            return None;
+        }
+        "trace.get_frame_spans" => match (
+            hub.latest_capture()
+                .filter(|archive| params["capture_id"].as_u64() == Some(archive.id)),
+            params["frame_id"].as_u64(),
+        ) {
+            (Some(archive), Some(frame_id)) => frame_spans(&archive, frame_id)
+                .map_or_else(|| fail(-32003, "frame is outside the retained capture"), ok),
+            _ => fail(-32003, "capture or frame unavailable"),
+        },
+        _ => fail(-32601, "unknown method"),
+    })
+}
+
+fn capture_options(params: &Value) -> Option<CaptureOptions> {
+    let detail = match params["detail"].as_str() {
+        Some("detailed") => TraceDetail::Detailed,
+        Some("stages") => TraceDetail::Stages,
+        None if params["detail"].is_null() => TraceDetail::Stages,
+        _ => return None,
+    };
+    let gpu = match params["gpu"] {
+        Value::Bool(value) => value,
+        Value::Null => true,
+        _ => return None,
+    };
+    Some(CaptureOptions { detail, gpu })
+}
+
+async fn ui_reply(
+    id: u64,
+    kind: Option<BinaryMsgType>,
+    done: tokio::sync::oneshot::Receiver<Result<Vec<u8>, String>>,
+) -> Message {
+    let value = match timeout(IO_TIMEOUT, done).await {
+        Ok(Ok(Ok(payload))) => {
+            if let Some(kind) = kind {
+                return binary(id, kind, &payload);
+            }
+            serde_json::from_slice(&payload)
+                .map(|value| response(Some(id), value))
+                .unwrap_or_else(|_| error(Some(id), -32603, "invalid UI reply"))
+        }
+        Ok(Ok(Err(message))) => error(Some(id), -32004, &message),
+        Ok(Err(_)) => error(Some(id), -32004, "session closed"),
+        Err(_) => error(Some(id), -32005, "UI query timed out"),
+    };
+    text(value)
 }
 
 fn capture_summary(capture: &TraceCapture) -> Value {
@@ -480,6 +840,16 @@ mod tests {
     type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
+    fn test_agent(token: Arc<str>, hub: &Arc<TelemetryHub>) -> Arc<Agent> {
+        Arc::new(Agent {
+            token,
+            hub: Arc::clone(hub),
+            poster: None,
+            name: "Example".to_owned(),
+            os: String::new(),
+        })
+    }
+
     async fn read(socket: &mut Client) -> Value {
         let message = timeout(Duration::from_secs(2), socket.next())
             .await
@@ -509,6 +879,62 @@ mod tests {
     }
 
     #[test]
+    fn v2_batches_channels_with_independent_resets_and_returns_binary_replies() {
+        crate::rt::rt().unwrap().handle().block_on(async {
+            let hub = Arc::new(TelemetryHub::new());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}/devtools", listener.local_addr().unwrap());
+            let _server = Server {
+                task: tokio::spawn(listen(listener, test_agent(TOKEN.into(), &hub))),
+                _registration: None,
+            };
+            let (mut client, _) = connect_async(&url).await.unwrap();
+            let auth = call(
+                &mut client,
+                1,
+                "authenticate",
+                json!({"version": 2, "token": TOKEN}),
+            )
+            .await;
+            assert_eq!(auth["result"]["session"]["app_name"], "Example");
+            let initial = call(
+                &mut client,
+                2,
+                "subscribe",
+                json!({
+                    "channels": ["frames", "errors"],
+                    "cursors": {"frames": 0, "errors": 123}
+                }),
+            )
+            .await;
+            assert_eq!(initial["result"]["frames"]["reset"], false);
+            assert_eq!(initial["result"]["errors"]["reset"], true);
+            hub.push_frame(super::super::FrameSample {
+                number: 42,
+                ..Default::default()
+            });
+            hub.error("test", "failure", None, Some(42));
+            let batch = read(&mut client).await;
+            assert_eq!(batch["method"], "stream.batch");
+            assert_eq!(batch["params"]["frames"]["entries"][0]["id"], 42);
+            assert_eq!(batch["params"]["errors"]["entries"][0]["frame"], 42);
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tx.send(Ok(b"[]".to_vec())).unwrap();
+            let reply = ui_reply(17, Some(BinaryMsgType::ViewSnapshot), rx).await;
+            let bytes = reply.into_data();
+            let (header, payload) = BinaryEnvelopeHeader::decode(&bytes).unwrap();
+            assert_eq!(header.request_id, 17);
+            assert_eq!(payload, b"[]");
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            drop(tx);
+            let reply = ui_reply(18, None, rx).await;
+            let reply: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+            assert_eq!(reply["error"]["code"], -32004);
+        });
+    }
+
+    #[test]
     fn subscription_backfills_gpu_and_exports_a_trace() {
         let _capture = super::super::hub::CAPTURE_TEST_LOCK.lock().unwrap();
         crate::rt::rt().unwrap().handle().block_on(async {
@@ -516,18 +942,17 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("ws://{}/devtools", listener.local_addr().unwrap());
             let config = Config::parse("8765", TOKEN).unwrap();
-            let server = Server(tokio::spawn(listen(
-                listener,
-                config.token,
-                Arc::clone(&hub),
-            )));
+            let server = Server {
+                task: tokio::spawn(listen(listener, test_agent(config.token, &hub))),
+                _registration: None,
+            };
             let (mut incompatible, _) = connect_async(&url).await.unwrap();
             let denied = call(
                 &mut incompatible,
                 1,
                 "authenticate",
                 json!({
-                    "token": TOKEN, "version": 2
+                    "token": TOKEN, "version": 99
                 }),
             )
             .await;

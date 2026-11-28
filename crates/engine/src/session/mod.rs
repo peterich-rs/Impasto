@@ -312,6 +312,16 @@ pub trait Session {
         None
     }
     /// A bounded scene snapshot for the host's developer inspector.
+    /// Returns a fresh snapshot bounded by the caller's node budget.
+    fn inspector_snapshot_limited(&self, _max_nodes: usize) -> Option<String> {
+        self.inspector_snapshot()
+    }
+
+    /// Returns the hit-test route at a point in scene coordinates.
+    fn inspector_probe(&self, _x: f32, _y: f32) -> Option<String> {
+        None
+    }
+
     fn inspector_snapshot(&self) -> Option<String> {
         None
     }

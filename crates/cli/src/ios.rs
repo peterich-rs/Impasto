@@ -736,33 +736,55 @@ impl RunDevice {
     fn install_and_launch(
         &self,
         application: &Path,
-        package: &str,
+        app: &App,
         options: &BuildOptions,
         development_token: Option<&str>,
+        attach: bool,
     ) -> Result<()> {
+        let package = bundle_id(app);
         let mut install = Command::new("xcrun");
         let mut launch = Command::new("xcrun");
-        if options.debug
-            && let Some((port, token)) = crate::devtools::config()?
-        {
-            let prefix = match self {
-                Self::Simulator(_) => "SIMCTL_CHILD",
-                Self::Physical(_) => "DEVICECTL_CHILD",
+        let mut device_config = None;
+        if options.debug {
+            let (prefix, config) = match self {
+                Self::Simulator(_) => {
+                    let root = crate::devtools::discovery_root();
+                    crate::devtools::private_dir(&root)?;
+                    launch.env("SIMCTL_CHILD_IMPASTO_DEVTOOLS_DISCOVERY_DIR", root);
+                    launch.env(
+                        "SIMCTL_CHILD_IMPASTO_DEVTOOLS_SOURCE_MAP",
+                        application.join("app.js.map"),
+                    );
+                    ("SIMCTL_CHILD", crate::devtools::config()?)
+                }
+                Self::Physical(_) => ("DEVICECTL_CHILD", crate::devtools::device_config()?),
             };
-            launch.env(format!("{prefix}_IMPASTO_DEVTOOLS_PORT"), port.to_string());
-            launch.env(format!("{prefix}_IMPASTO_DEVTOOLS_TOKEN"), token);
+            if std::env::var("IMPASTO_DEVTOOLS").as_deref() == Ok("0") {
+                launch.env(format!("{prefix}_IMPASTO_DEVTOOLS"), "0");
+            }
+            launch.env(format!("{prefix}_IMPASTO_DEVTOOLS_APP_NAME"), &app.name);
+            launch.env(format!("{prefix}_IMPASTO_DEVTOOLS_PROJECT"), &app.root);
+            launch.env(
+                format!("{prefix}_IMPASTO_DEVTOOLS_FRAMEWORK"),
+                toolchain::framework()?,
+            );
+            if let Some((port, token)) = config {
+                launch.env(format!("{prefix}_IMPASTO_DEVTOOLS_PORT"), port.to_string());
+                launch.env(format!("{prefix}_IMPASTO_DEVTOOLS_TOKEN"), &token);
+                device_config = Some((port, token));
+            }
         }
         match self {
             Self::Simulator(device) => {
                 install.args(["simctl", "install", &device.udid]);
                 launch.args(["simctl", "launch", "--terminate-running-process"]);
-                if development_token.is_none() && (options.verbose || options.trace) {
+                if !attach && development_token.is_none() && (options.verbose || options.trace) {
                     launch.arg("--console");
                 }
                 if let Some(token) = development_token {
                     launch.env("SIMCTL_CHILD_IMPASTO_DEV_SESSION", token);
                 }
-                launch.args([&device.udid, package]);
+                launch.args([&device.udid, &package]);
             }
             Self::Physical(udid) => {
                 install.args(["devicectl", "device", "install", "app", "--device", udid]);
@@ -775,18 +797,55 @@ impl RunDevice {
                     udid,
                     "--terminate-existing",
                 ]);
-                if development_token.is_none() && (options.verbose || options.trace) {
+                if !attach && development_token.is_none() && (options.verbose || options.trace) {
                     launch.arg("--console");
                 }
                 if let Some(token) = development_token {
                     launch.env("DEVICECTL_CHILD_IMPASTO_DEV_SESSION", token);
                 }
-                launch.arg(package);
+                launch.arg(&package);
             }
         }
         install.arg(application);
         toolchain::run(install, "安装 iOS 应用")?;
-        toolchain::run(launch, "启动 iOS 应用")
+        let needs_output = attach && matches!(self, Self::Simulator(_));
+        let output = if needs_output {
+            Some(require_output(launch.output()?, "启动 iOS 应用")?)
+        } else {
+            toolchain::run(launch, "启动 iOS 应用")?;
+            None
+        };
+        let target = match self {
+            Self::Physical(udid) => device_config
+                .map(|config| {
+                    crate::devtools::register_device(
+                        devtools_protocol::DeviceKind::Ios,
+                        udid,
+                        &package,
+                        config,
+                        &app.root,
+                    )
+                })
+                .transpose()?,
+            Self::Simulator(_) => output.as_deref().and_then(|text| {
+                text.lines()
+                    .find_map(|line| {
+                        let (name, pid) = line.split_once(':')?;
+                        (name.trim() == package)
+                            .then_some(pid.trim())
+                            .filter(|pid| pid.parse::<u32>().is_ok())
+                    })
+                    .map(str::to_owned)
+            }),
+        };
+        if attach {
+            crate::devtools::launch_native(Some(
+                target
+                    .as_deref()
+                    .context("iOS DevTools session unavailable")?,
+            ))?;
+        }
+        Ok(())
     }
 }
 
@@ -795,16 +854,16 @@ pub(crate) fn run(
     options: &BuildOptions,
     requested: Option<&str>,
     watch: bool,
+    attach: bool,
 ) -> Result<()> {
     require_platform(&app)?;
     let device = choose_device(requested)?;
     device.ready()?;
     if watch {
-        return watch::run(app, options, device);
+        return watch::run(app, options, device, attach);
     }
-    let package = bundle_id(&app);
     let path = build(&app, options, device.platform())?;
-    device.install_and_launch(&path, &package, options, None)
+    device.install_and_launch(&path, &app, options, None, attach)
 }
 
 fn require_output(output: Output, action: &str) -> Result<String> {

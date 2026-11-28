@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/engine",
+    "crates/devtools-protocol",
     "crates/raster",
     "crates/shader",
     "crates/javascript",
@@ -44,6 +45,7 @@ rolldown_common = "=1.2.13"
 thiserror = "2"
 impasto = { path = "crates/impasto" }
 engine = { path = "crates/engine" }
+devtools-protocol = { path = "crates/devtools-protocol" }
 raster = { path = "crates/raster" }
 javascript = { path = "crates/javascript", default-features = false }
 embedder = { path = "crates/embedder/common" }

@@ -64,6 +64,11 @@ impl Poster {
         self.inbox.post(command);
     }
 
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn post_devtools(&self, command: Command) -> bool {
+        self.inbox.post_devtools(command)
+    }
+
     /// Delete one image cache key and arm a single frame so the next paint requests it again.
     pub fn reload_image(&self, source: &str) {
         self.inbox.post(Command::ReloadImage(source.to_owned()));
@@ -318,7 +323,7 @@ fn install_panic_hook(hub: Arc<crate::diagnostics::DiagnosticsHub>) {
     }));
 }
 
-fn host_os_version() -> String {
+pub(crate) fn host_os_version() -> String {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("/usr/bin/sw_vers")
@@ -824,20 +829,28 @@ fn run_boot(
         mono_ns();
     }
     let capture_runner = Arc::clone(&runners.io);
-    crate::log_sub::install(boot.log_dir.as_deref(), boot.devtools.clone());
+    crate::log_sub::install(boot.log_dir.as_deref(), telemetry.clone());
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     let remote = match (remote, telemetry.clone()) {
-        (Some(config), Some(hub)) => match crate::diagnostics::remote::Server::start(config, hub) {
-            Ok(server) => Some(server),
-            Err(error) => {
-                tracing::warn!(target: "impasto::devtools", %error, "DevTools listener unavailable");
-                None
+        (Some(config), Some(hub)) => {
+            match crate::diagnostics::remote::Server::start(
+                config,
+                hub,
+                Poster {
+                    inbox: Arc::clone(inbox),
+                },
+            ) {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    tracing::warn!(target: "impasto::devtools", %error, "DevTools listener unavailable");
+                    None
+                }
             }
-        },
+        }
         _ => None,
     };
     let upload = Arc::new(Mutex::new(None));
-    if let Some(hub) = boot.devtools.as_ref() {
+    if let Some(hub) = telemetry.as_ref() {
         install_panic_hook(Arc::clone(hub));
     }
     let load_image: ImageLoader = Arc::new({
@@ -1272,7 +1285,7 @@ fn open_ui(
             .devtools
             .as_ref()
             .map_or_else(String::new, |_| host_os_version()),
-        diagnostics: boot.devtools.clone(),
+        diagnostics: links.telemetry.clone(),
         source_map: boot.devtools_source_map,
     };
     let (registry, plugins) = crate::plugins::attach(
@@ -1619,6 +1632,8 @@ fn dispatch_command(
     acks: &Arc<Acks>,
 ) -> Result<bool, BootError> {
     match command {
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        command @ Command::Devtools { .. } => session_cmds::handle(runtime, command),
         Command::Shutdown => Ok(true),
         Command::Deadline { .. } => Ok(false),
         Command::UpdateSource { revision, source } => {

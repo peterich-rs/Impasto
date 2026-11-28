@@ -8,6 +8,11 @@ publish.workspace = true
 devtools-server = []
 
 [dependencies]
+devtools-protocol.workspace = true
+getrandom = "0.4"
+subtle = "2"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
 impasto.workspace = true
 raster = { workspace = true }
 thiserror = { workspace = true }

@@ -1490,7 +1490,15 @@ impl Session for JsSession {
     }
 
     fn inspector_snapshot(&self) -> Option<String> {
-        Some(self.inner.tree.borrow().debug_snapshot_limited(512))
+        self.inspector_snapshot_limited(512)
+    }
+
+    fn inspector_snapshot_limited(&self, max_nodes: usize) -> Option<String> {
+        Some(self.inner.tree.borrow().debug_snapshot_limited(max_nodes))
+    }
+
+    fn inspector_probe(&self, x: f32, y: f32) -> Option<String> {
+        Some(self.inner.tree.borrow().debug_probe(x, y))
     }
 }
 
