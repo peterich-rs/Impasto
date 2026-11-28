@@ -2,6 +2,8 @@
 
 mod compositor_motion;
 mod debug;
+#[cfg(debug_assertions)]
+mod dev_error;
 mod geometry;
 mod gesture;
 mod hit;
@@ -25,6 +27,8 @@ pub use crate::geometry::{NodeId, Rect};
 #[cfg(feature = "js")]
 pub(crate) use debug::SourceLocation;
 pub use debug::{DebugAxis, LayoutIssue};
+#[cfg(debug_assertions)]
+pub use dev_error::{DevErrorCategory, DevErrorOverlay};
 #[cfg(test)]
 pub(crate) use hit::Affine;
 pub use layout::{LayoutCause, LayoutTrace, RootLayoutTrigger, TextProbeTrace};

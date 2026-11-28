@@ -178,6 +178,31 @@ impl FontLibrary {
         Ok(ids)
     }
 
+    #[cfg(debug_assertions)]
+    pub(crate) fn unregister(&self, context: &mut FontContext, family: &str) {
+        let _registration = self
+            .inner
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut library = self.lock();
+        library.families.retain(|(name, _)| name != family);
+        let mut next = FontContext::new();
+        for (name, blob) in &library.families {
+            register_family(&mut next, blob, name);
+        }
+        for face in library
+            .faces
+            .values_mut()
+            .filter(|face| face.family.as_deref() == Some(family))
+        {
+            face.retained = None;
+            face.family = None;
+        }
+        *context = next;
+        self.inner.revision.fetch_add(1, Ordering::Release);
+    }
+
     /// Drops the bytes of faces nothing names anymore. Called by the raster
     /// between frames; the UI never needs this.
     pub fn sweep(&self) -> usize {

@@ -19,7 +19,8 @@ pub(crate) fn module(assets: &Path, path: &Path) -> Result<Option<String>> {
     }
 }
 
-pub(crate) fn image(assets: &Path, path: &Path) -> Result<serde_json::Value> {
+/// Reads the static dimensions and density variants exported by an image import.
+pub fn image(assets: &Path, path: &Path) -> Result<serde_json::Value> {
     let asset_root = assets
         .canonicalize()
         .with_context(|| format!("{}: put imported images under assets/", path.display()))?;

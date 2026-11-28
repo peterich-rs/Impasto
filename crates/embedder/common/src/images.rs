@@ -151,6 +151,44 @@ pub trait ImageDecoder: Send + Sync {
     }
 }
 
+/// Candidate paths for a packaged image, in order of the requested pixel density.
+pub fn asset_image_candidates(source: &str, scale_bucket: u8) -> Vec<String> {
+    const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp"];
+    let Some(name) = source.strip_prefix("asset:") else {
+        return Vec::new();
+    };
+    let Ok(name) = engine::session::document_relative(name) else {
+        return Vec::new();
+    };
+    let explicit;
+    let (stem, extensions) = match name.rsplit_once('.') {
+        Some((stem, ext)) if EXTENSIONS.contains(&ext) => {
+            explicit = [ext];
+            (stem, explicit.as_slice())
+        }
+        _ => (name.as_str(), EXTENSIONS),
+    };
+    if stem.ends_with("@2x") || stem.ends_with("@3x") {
+        return extensions
+            .iter()
+            .map(|ext| format!("{stem}.{ext}"))
+            .collect();
+    }
+    let densities = match scale_bucket {
+        3 => ["@3x", "@2x", ""],
+        2 => ["@2x", "@3x", ""],
+        _ => ["", "@2x", "@3x"],
+    };
+    densities
+        .into_iter()
+        .flat_map(|density| {
+            extensions
+                .iter()
+                .map(move |ext| format!("{stem}{density}.{ext}"))
+        })
+        .collect()
+}
+
 /// Read a bounded resource from a directory-backed application bundle.
 pub fn read_packaged_file(
     root: &std::path::Path,
@@ -159,6 +197,21 @@ pub fn read_packaged_file(
 ) -> Result<Arc<[u8]>, String> {
     use std::fs::File;
 
+    #[cfg(debug_assertions)]
+    {
+        use crate::dev_channel::AssetOverride;
+        match crate::dev_channel::asset_override(relative) {
+            AssetOverride::File(path) => {
+                let file = File::open(path).map_err(|error| error.to_string())?;
+                let len =
+                    usize::try_from(file.metadata().map_err(|error| error.to_string())?.len())
+                        .map_err(|error| error.to_string())?;
+                return engine::session::read_asset_bytes(file, len, limit);
+            }
+            AssetOverride::Removed => return Err("asset was removed during development".to_owned()),
+            AssetOverride::Packaged => {}
+        }
+    }
     let root = root.canonicalize().map_err(|error| error.to_string())?;
     let path = root
         .join(relative)
@@ -815,5 +868,28 @@ mod tests {
             "https://cdn.example"
         );
         assert_eq!(source_log("asset:logo"), "asset:logo");
+    }
+}
+
+#[cfg(test)]
+mod development_asset_tests {
+    use super::asset_image_candidates;
+
+    #[test]
+    fn imported_images_keep_their_format_and_select_the_matching_scale() {
+        assert_eq!(
+            asset_image_candidates("asset:photos/card.webp", 2),
+            [
+                "photos/card@2x.webp",
+                "photos/card@3x.webp",
+                "photos/card.webp"
+            ]
+        );
+        assert_eq!(
+            asset_image_candidates("asset:card@2x.png", 3),
+            ["card@2x.png"]
+        );
+        assert_eq!(asset_image_candidates("asset:card", 1)[0], "card.png");
+        assert!(asset_image_candidates("asset:../card", 1).is_empty());
     }
 }

@@ -9,10 +9,11 @@ export interface IntlBackend {
   formatRelativeTime(locale: string, value: number, unit: "second" | "minute" | "hour" | "day" | "week" | "month" | "quarter" | "year"): string;
 }
 
-let intlBackend: IntlBackend | undefined;
+// Keep the configured backend when the development linker refreshes the catalog.
+const runtime: { backend?: IntlBackend } = {};
 
 export function setIntlBackend(backend: IntlBackend | undefined): void {
-  intlBackend = backend;
+  runtime.backend = backend;
 }
 
 function clampDigits(fractionDigits: number): number {
@@ -28,7 +29,7 @@ export function formatNumber(locale: string, value: number, fractionDigits: numb
     return "";
   }
   const digits = clampDigits(fractionDigits);
-  if (intlBackend) return intlBackend.formatNumber(locale, value, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  if (runtime.backend) return runtime.backend.formatNumber(locale, value, { minimumFractionDigits: digits, maximumFractionDigits: digits });
   const sign = value < 0 ? "-" : "";
   const factor = 10 ** digits;
   const rounded = Math.round(Math.abs(value) * factor) / factor;
@@ -57,7 +58,7 @@ export function plural(
   n: number,
   forms: PluralForms,
 ): string {
-  if (intlBackend && Number.isFinite(n)) return forms[intlBackend.pluralCategory(locale, n)] ?? forms.other;
+  if (runtime.backend && Number.isFinite(n)) return forms[runtime.backend.pluralCategory(locale, n)] ?? forms.other;
   if (n === 0 && forms.zero !== undefined) return forms.zero;
   if (!locale.startsWith("zh") && n === 1) return forms.one ?? forms.other;
   return forms.other;
@@ -69,17 +70,17 @@ function pad(value: number): string {
 
 /** `YYYY-MM-DD HH:mm` in the runtime's local zone. */
 export function formatDate(locale: string, epochMs: number): string {
-  if (intlBackend) return intlBackend.formatDate(locale, epochMs);
+  if (runtime.backend) return runtime.backend.formatDate(locale, epochMs);
   const date = new Date(epochMs);
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 export function formatCurrency(locale: string, value: number, currency: string): string {
-  return intlBackend?.formatCurrency(locale, value, currency) ?? `${formatNumber(locale, value, 2)} ${currency}`;
+  return runtime.backend?.formatCurrency(locale, value, currency) ?? `${formatNumber(locale, value, 2)} ${currency}`;
 }
 
 export function formatRelativeTime(locale: string, value: number, unit: Parameters<IntlBackend["formatRelativeTime"]>[2]): string {
-  if (intlBackend) return intlBackend.formatRelativeTime(locale, value, unit);
+  if (runtime.backend) return runtime.backend.formatRelativeTime(locale, value, unit);
   const name = `${unit}${Math.abs(value) === 1 ? "" : "s"}`;
   if (locale.startsWith("zh")) {
     const labels = { second: "秒", minute: "分钟", hour: "小时", day: "天", week: "周", month: "个月", quarter: "个季度", year: "年" };

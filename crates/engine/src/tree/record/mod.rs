@@ -203,7 +203,13 @@ impl Tree {
         self.sync_scroll_offsets();
         self.sync_metrics();
         self.finish_measure();
-        if out.0.is_none() && !self.overlay_visible() && self.apply_layer_patches() {
+        let had_overlay = self
+            .layers
+            .pictures
+            .last()
+            .is_some_and(|picture| picture.id == super::repaint::OVERLAY_PICTURE_ID);
+        if out.0.is_none() && !had_overlay && !self.overlay_visible() && self.apply_layer_patches()
+        {
             self.finish_repaints();
             return Ok(());
         }

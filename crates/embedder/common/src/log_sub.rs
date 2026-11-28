@@ -240,6 +240,27 @@ fn push_value(out: &mut String, raw: &str) {
     out.push('"');
 }
 
+#[cfg(debug_assertions)]
+struct DevChannelLogSink(Arc<crate::dev_channel::Development>);
+
+#[cfg(debug_assertions)]
+impl LogSink for DevChannelLogSink {
+    fn write(&self, record: &LogRecord, _line: &str) {
+        if self.0.accepts(record) {
+            self.0.record(record);
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn message_with_fields(record: &LogRecord) -> String {
+    let mut message = record.message.clone();
+    for (name, value) in &record.fields {
+        let _ = write!(message, " {name}={value}");
+    }
+    message
+}
+
 /// stdout / stderr, or Android logcat. Does not filter.
 pub struct ConsoleSink;
 
@@ -251,6 +272,12 @@ impl LogSink for ConsoleSink {
 
     #[cfg(not(target_os = "android"))]
     fn write(&self, record: &LogRecord, line: &str) {
+        #[cfg(debug_assertions)]
+        if crate::dev_channel::current().is_some_and(|development| {
+            development.suppress_console() && development.accepts(record)
+        }) {
+            return;
+        }
         desktop_log(record.level, line);
     }
 }
@@ -399,6 +426,10 @@ pub fn install(log_dir: Option<&std::path::Path>, devtools: Option<Arc<Diagnosti
         && let Some(file) = XlogSink::open(dir)
     {
         sinks.push(Arc::new(file));
+    }
+    #[cfg(debug_assertions)]
+    if let Some(development) = crate::dev_channel::current() {
+        sinks.push(Arc::new(DevChannelLogSink(Arc::clone(development))));
     }
     if let Some(devtools) = devtools {
         sinks.push(Arc::new(DevtoolSink::new(devtools)));

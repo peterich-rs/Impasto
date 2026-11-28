@@ -79,6 +79,16 @@ impl Inbox {
         })
     }
 
+    #[cfg(debug_assertions)]
+    pub(crate) fn post_development(&self, command: Command) -> bool {
+        self.post_if(command, |state| {
+            !state
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::Development { .. }))
+        })
+    }
+
     pub(crate) fn post_plugin_event(&self, event: impasto::abi::HostEvent) -> bool {
         let bytes = event
             .module

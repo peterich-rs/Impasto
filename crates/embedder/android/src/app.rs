@@ -164,25 +164,6 @@ impl Bridge {
         copied
     }
 
-    fn update_result(&self, revision: &str, result: Result<(), &str>) {
-        let Some(files) = &self.document_dir else {
-            return;
-        };
-        let directory = std::path::Path::new(files).join("impasto-debug");
-        let result = match result {
-            Ok(()) => "ok".to_owned(),
-            Err(message) => format!("error\n{message}"),
-        };
-        let status = (|| {
-            let temporary = directory.join(format!("v1-{revision}.tmp"));
-            std::fs::write(&temporary, result)?;
-            std::fs::rename(temporary, directory.join(format!("v1-{revision}.result")))
-        })();
-        if let Err(error) = status {
-            tracing::error!(target: "impasto::script", %error, "could not publish debug update result");
-        }
-    }
-
     fn place_platform_views(
         &self,
         surface: SurfaceId,
@@ -496,10 +477,6 @@ impl Services for Shared {
         self.0.publish_semantics(&nodes, true);
     }
 
-    fn source_updated(&self, revision: &str, result: Result<(), &str>) {
-        self.0.update_result(revision, result);
-    }
-
     fn platform_views(
         &self,
         surface: SurfaceId,
@@ -588,6 +565,8 @@ struct Host {
     clock: Arc<FrameClock>,
     bridge: Arc<Bridge>,
     ui: Mutex<Ui>,
+    #[cfg(debug_assertions)]
+    development: Mutex<Option<embedder::dev_channel::Server>>,
 }
 
 static WINDOW_SESSIONS: LazyLock<Mutex<HashMap<jlong, embedder::WindowSession>>> =
@@ -869,6 +848,8 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
                 clock,
                 bridge,
                 ui: Mutex::new(Ui::new()),
+                #[cfg(debug_assertions)]
+                development: Mutex::default(),
             }),
         );
     Ok(handle)
@@ -1204,14 +1185,6 @@ fn load_script(
     Err(SessionError::Runtime)
 }
 
-fn asset_image_path(source: &str, scale_bucket: u8) -> Vec<CString> {
-    let scale = f32::from(scale_bucket.max(1));
-    crate::assets::asset_image_candidates(source, scale)
-        .into_iter()
-        .filter_map(|path| CString::new(path).ok())
-        .collect()
-}
-
 fn load_asset(assets: &AssetManager, path: &CStr) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut asset = assets.open(path).ok_or_else(|| "open failed".to_string())?;
@@ -1241,6 +1214,20 @@ struct AssetDecoder {
 
 impl embedder::ImageDecoder for AssetDecoder {
     fn read_packaged_asset(&self, relative: &str, limit: usize) -> Result<Arc<[u8]>, String> {
+        #[cfg(debug_assertions)]
+        match embedder::dev_channel::asset_override(relative) {
+            embedder::dev_channel::AssetOverride::File(path) => {
+                let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+                let len =
+                    usize::try_from(file.metadata().map_err(|error| error.to_string())?.len())
+                        .map_err(|error| error.to_string())?;
+                return engine::session::read_asset_bytes(file, len, limit);
+            }
+            embedder::dev_channel::AssetOverride::Removed => {
+                return Err("asset was removed during development".to_owned());
+            }
+            embedder::dev_channel::AssetOverride::Packaged => {}
+        }
         let path = CString::new(format!("images/{relative}")).map_err(|error| error.to_string())?;
         let asset = self
             .assets
@@ -1268,16 +1255,23 @@ impl embedder::ImageDecoder for AssetDecoder {
         scale_bucket: u8,
         target: Option<embedder::DecodeTarget>,
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
-        let paths = asset_image_path(source, scale_bucket);
-        if paths.is_empty() {
-            return Err(embedder::ImageError::Missing);
-        }
-        for path in &paths {
-            let bytes = match load_asset(&self.assets, path) {
-                Ok(bytes) => bytes,
-                Err(_) => continue,
+        for relative in embedder::asset_image_candidates(source, scale_bucket) {
+            #[cfg(debug_assertions)]
+            match embedder::dev_channel::asset_override(&relative) {
+                embedder::dev_channel::AssetOverride::File(path) => {
+                    let bytes = std::fs::read(path)
+                        .map_err(|error| embedder::ImageError::Failed(error.to_string()))?;
+                    return self.decode_bytes_sized(source, &bytes, target);
+                }
+                embedder::dev_channel::AssetOverride::Removed => continue,
+                embedder::dev_channel::AssetOverride::Packaged => {}
+            }
+            let Ok(path) = CString::new(format!("images/{relative}")) else {
+                continue;
             };
-            return self.decode_bytes_sized(source, &bytes, target);
+            if let Ok(bytes) = load_asset(&self.assets, &path) {
+                return self.decode_bytes_sized(source, &bytes, target);
+            }
         }
         Err(embedder::ImageError::Missing)
     }

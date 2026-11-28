@@ -8,6 +8,7 @@ publish.workspace = true
 devtools-server = []
 
 [dependencies]
+dev-protocol = { path = "../../dev-protocol" }
 devtools-protocol.workspace = true
 getrandom = "0.4"
 subtle = "2"

@@ -322,6 +322,22 @@ pub trait Session {
     }
     /// An accessibility action. The default ignores it.
     fn semantics_action(&mut self, _action: crate::semantics::SemanticsAction) {}
+    /// Replaces the development error picture for the current session.
+    #[cfg(debug_assertions)]
+    fn set_dev_error(&mut self, _overlay: Option<crate::tree::DevErrorOverlay>) -> bool {
+        false
+    }
+
+    /// Reloads an already-registered packaged font from the active asset provider.
+    #[cfg(debug_assertions)]
+    fn reload_dev_font(
+        &mut self,
+        _relative: &str,
+        _bytes: Option<Arc<[u8]>>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Attempts to apply compiler-generated changes within the current runtime.
     fn apply_source_patch(&mut self, _source: &str) -> Result<bool, String> {
         Ok(false)

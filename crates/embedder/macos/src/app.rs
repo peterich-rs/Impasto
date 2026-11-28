@@ -882,7 +882,6 @@ fn command_key(selector: &str) -> Option<engine::session::KeyPress> {
 struct MacServices {
     font: Vec<u8>,
     ime_view: Arc<AtomicPtr<c_void>>,
-    update_mailbox: Option<PathBuf>,
 }
 
 /// Source maps larger than this stay off the panel. The bundle's map is small.
@@ -996,22 +995,6 @@ impl Services for MacServices {
         wake_main();
     }
 
-    fn source_updated(&self, revision: &str, result: Result<(), &str>) {
-        if let Some(directory) = self.update_mailbox.as_deref().and_then(Path::parent) {
-            let receipt = directory.join(format!("{revision}.result"));
-            let pending = receipt.with_extension("pending");
-            let contents = match result {
-                Ok(()) => "ok".to_owned(),
-                Err(error) => format!("脚本验证失败，仍在运行上一版本。{error}"),
-            };
-            if let Err(error) =
-                std::fs::write(&pending, contents).and_then(|()| std::fs::rename(pending, receipt))
-            {
-                eprintln!("impasto: {error}");
-            }
-        }
-    }
-
     fn request_exit(&self) {
         wake_main();
     }
@@ -1076,10 +1059,12 @@ pub fn run(
         bytecode,
         modules,
     } = launch;
-    let update_mailbox = (!bytecode)
-        .then(|| std::env::var_os("IMPASTO_SOURCE_MAILBOX"))
-        .flatten()
-        .map(PathBuf::from);
+    #[cfg(debug_assertions)]
+    let development = if bytecode {
+        None
+    } else {
+        development_config().map_err(|error| RunError::Window(error.into()))?
+    };
     let devtools_source_map = load_source_map(&name);
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
     let diagnostics = modules
@@ -1126,7 +1111,6 @@ pub fn run(
         font_family: FONT_FAMILY.to_string(),
         launch: embedder_launch,
         services: Box::new(MacServices {
-            update_mailbox: update_mailbox.clone(),
             font: font.to_vec(),
             ime_view: Arc::clone(&ime_view),
         }),
@@ -1190,8 +1174,11 @@ pub fn run(
     })
     .map_err(RunError::Boot)?;
 
-    let _update_mailbox = update_mailbox
-        .map(|path| SourceMailbox::start(path, link.poster()))
+    #[cfg(debug_assertions)]
+    let _development = development
+        .map(|(dev, id, socket)| {
+            embedder::dev_channel::Server::connect_unix(dev, link.poster(), id, socket)
+        })
         .transpose()
         .map_err(|error| RunError::Window(error.into()))?;
 
@@ -1282,61 +1269,28 @@ pub fn run(
     Ok(())
 }
 
-struct SourceMailbox {
-    stop: std::sync::mpsc::Sender<()>,
-    watcher: Option<std::thread::JoinHandle<()>>,
-}
-
-impl SourceMailbox {
-    fn start(path: PathBuf, poster: Poster) -> std::io::Result<Self> {
-        let (stop, stopped) = std::sync::mpsc::channel();
-        let watcher = std::thread::Builder::new()
-            .name("impasto-source-mailbox".into())
-            .spawn(move || {
-                let mut last = None;
-                while stopped.recv_timeout(std::time::Duration::from_millis(10))
-                    == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                {
-                    let Ok(metadata) = std::fs::metadata(&path) else {
-                        continue;
-                    };
-                    let Ok(modified) = metadata.modified() else {
-                        continue;
-                    };
-                    let stamp = (modified, metadata.len());
-                    if last == Some(stamp) {
-                        continue;
-                    }
-                    let Ok(message) = std::fs::read_to_string(&path) else {
-                        continue;
-                    };
-                    let Some((revision, source)) = message.split_once('\n') else {
-                        continue;
-                    };
-                    let Ok(version) = revision.parse::<u128>() else {
-                        continue;
-                    };
-                    last = Some(stamp);
-                    poster.post(Command::UpdateSource {
-                        revision: version.to_string(),
-                        source: source.to_owned(),
-                    });
-                }
-            })?;
-        Ok(Self {
-            stop,
-            watcher: Some(watcher),
-        })
-    }
-}
-
-impl Drop for SourceMailbox {
-    fn drop(&mut self) {
-        let _ = self.stop.send(());
-        if let Some(watcher) = self.watcher.take() {
-            let _ = watcher.join();
-        }
-    }
+#[cfg(debug_assertions)]
+fn development_config()
+-> std::io::Result<Option<(Arc<embedder::dev_channel::Development>, String, PathBuf)>> {
+    let (Ok(token), Ok(id), Some(socket)) = (
+        std::env::var("IMPASTO_DEV_SESSION"),
+        std::env::var("IMPASTO_DEV_APP_ID"),
+        std::env::var_os("IMPASTO_DEV_SOCKET"),
+    ) else {
+        return Ok(None);
+    };
+    let caches = sandbox_directory(objc2_foundation::NSSearchPathDirectory::CachesDirectory)
+        .ok_or_else(|| std::io::Error::other("development caches are unavailable"))?;
+    let app_caches = caches.join("Impasto").join(id.replace(['/', '\\'], "_"));
+    let dev = embedder::dev_channel::prepare(
+        token,
+        &app_caches,
+        embedder::dev_channel::Logging {
+            terminal: true,
+            verbose: std::env::var("IMPASTO_DEV_VERBOSE").as_deref() == Ok("1"),
+        },
+    )?;
+    Ok(Some((dev, id, PathBuf::from(socket))))
 }
 
 fn watch_appearance(host: &Host) {
@@ -1389,8 +1343,8 @@ impl embedder::ImageDecoder for PngDecoder {
         scale_bucket: u8,
         target: Option<embedder::DecodeTarget>,
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
-        let scale = f32::from(scale_bucket.max(1));
-        let Some(path) = crate::assets::resolve_asset_path(&self.directory, source, scale) else {
+        let Some(path) = crate::assets::resolve_asset_path(&self.directory, source, scale_bucket)
+        else {
             return Err(embedder::ImageError::Missing);
         };
         let rgba = crate::pixels::load_rgba_png(&path, target)

@@ -655,6 +655,12 @@ impl Tree {
         registered
     }
 
+    #[cfg(all(debug_assertions, feature = "js"))]
+    pub(crate) fn unregister_dev_font(&mut self, family: &str) {
+        self.shaper.unregister_dev_font(family);
+        self.mark_text_dirty();
+    }
+
     pub(super) fn sync_metrics(&mut self) {
         let started = std::time::Instant::now();
         let ids = std::mem::take(&mut self.pending_text);

@@ -542,6 +542,12 @@ impl Shaper for ParleyShaper {
         ParleyShaper::register(self, family, bytes)
     }
 
+    #[cfg(debug_assertions)]
+    fn unregister_dev_font(&mut self, family: &str) {
+        self.library.unregister(&mut self.fonts, family);
+        self.trim();
+    }
+
     fn register_shared_font(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {
         ParleyShaper::register_shared(self, family, bytes)
     }

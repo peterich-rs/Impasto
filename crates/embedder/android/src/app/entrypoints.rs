@@ -368,37 +368,102 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeExternalTexture<
     });
 }
 
+#[cfg(debug_assertions)]
 #[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
-pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeUpdateSource<'local>(
+pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePrepareDevelopment<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    token: JString<'local>,
+    caches: JString<'local>,
+    verbose: jboolean,
+) -> jboolean {
+    with_env(&mut env, |env| {
+        let (Some(token), Some(caches)) = (java_string(env, &token)?, java_string(env, &caches)?)
+        else {
+            return Ok(false);
+        };
+        let prepared = embedder::dev_channel::prepare(
+            token,
+            std::path::Path::new(&caches),
+            embedder::dev_channel::Logging {
+                terminal: false,
+                verbose,
+            },
+        );
+        Ok(prepared.is_ok())
+    })
+}
+
+#[cfg(debug_assertions)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
+pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeStartDevelopment<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
     handle: jlong,
-    revision: JString<'local>,
-    source: jni::objects::JByteArray<'local>,
-) {
+    package: JString<'local>,
+) -> jint {
     with_env(&mut env, |env| {
-        let Some(host) = host(handle) else {
-            return Ok(());
+        let (Some(host), Some(dev), Some(package)) = (
+            host(handle),
+            embedder::dev_channel::current(),
+            java_string(env, &package)?,
+        ) else {
+            return Ok(0);
         };
-        let Some(revision) = java_string(env, &revision)? else {
-            return Ok(());
-        };
-        if !(1..=20).contains(&revision.len())
-            || !revision.bytes().all(|byte| byte.is_ascii_digit())
+        let mut slot = host
+            .development
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        slot.take();
+        match embedder::dev_channel::Server::listen_tcp(
+            Arc::clone(dev),
+            host.link.poster(),
+            package,
+            0,
+        ) {
+            Ok((server, port)) => {
+                *slot = Some(server);
+                Ok(jint::from(port))
+            }
+            Err(_) => Ok(0),
+        }
+    })
+}
+
+#[cfg(debug_assertions)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
+pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeStopDevelopment(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    handle: jlong,
+) {
+    if let Some(host) = host(handle) {
+        host.development
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+#[cfg(debug_assertions)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
+pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeDevelopmentFile<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    handle: jlong,
+    revision: jlong,
+) {
+    with_env(&mut env, |_| {
+        if let Some(host) = host(handle)
+            && let Some(files) = &host.bridge.document_dir
+            && let Ok(revision) = u64::try_from(revision)
+            && let Some(dev) = embedder::dev_channel::current()
         {
-            return Ok(());
-        }
-        let length = source.len(env)?;
-        if !(1..=16 * 1024 * 1024).contains(&length) {
-            host.bridge
-                .update_result(&revision, Err("invalid source size"));
-            return Ok(());
-        }
-        match String::from_utf8(env.convert_byte_array(&source)?) {
-            Ok(source) => host.link.post(Command::UpdateSource { revision, source }),
-            Err(_) => host
-                .bridge
-                .update_result(&revision, Err("source is not UTF-8")),
+            dev.serve_file(
+                host.link.poster(),
+                std::path::Path::new(files).join("impasto-debug"),
+                revision,
+            );
         }
         Ok(())
     });

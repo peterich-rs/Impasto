@@ -22,6 +22,8 @@ use oxc::{
 #[cfg(feature = "bundle")]
 mod assets;
 #[cfg(feature = "bundle")]
+pub use assets::image as image_metadata;
+#[cfg(feature = "bundle")]
 mod bundle;
 #[cfg(feature = "bundle")]
 mod function_symbols;
@@ -37,7 +39,7 @@ pub use bundle::{
     bundle, bundle_with_cache,
 };
 #[cfg(feature = "bundle")]
-pub use hot::delta;
+pub use hot::{DeltaOutcome, ReloadReason, delta};
 
 #[cfg(feature = "wgsl")]
 mod diagnostics;

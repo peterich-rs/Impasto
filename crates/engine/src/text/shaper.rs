@@ -248,6 +248,9 @@ pub trait Shaper {
         self.register_font(family, &bytes)
     }
 
+    #[cfg(debug_assertions)]
+    fn unregister_dev_font(&mut self, _family: &str) {}
+
     /// Size, lines, and frozen glyphs at the key's constraint.
     fn metrics(&mut self, key: &MetricsKey) -> Arc<ParagraphMetrics>;
     /// Intrinsic width for this geometry.
@@ -326,6 +329,11 @@ impl Shaper for Box<dyn Shaper> {
         (**self).register_font(family, bytes)
     }
 
+    #[cfg(debug_assertions)]
+    fn unregister_dev_font(&mut self, family: &str) {
+        (**self).unregister_dev_font(family);
+    }
+
     fn register_shared_font(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {
         (**self).register_shared_font(family, bytes)
     }
@@ -383,6 +391,11 @@ impl<S: Shaper> Shaper for std::rc::Rc<std::cell::RefCell<S>> {
     }
     fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
         self.borrow_mut().register_font(family, bytes)
+    }
+
+    #[cfg(debug_assertions)]
+    fn unregister_dev_font(&mut self, family: &str) {
+        self.borrow_mut().unregister_dev_font(family);
     }
 
     fn register_shared_font(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {

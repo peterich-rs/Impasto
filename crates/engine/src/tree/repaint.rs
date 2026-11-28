@@ -390,6 +390,10 @@ impl Tree {
     }
 
     pub(crate) fn overlay_visible(&self) -> bool {
+        #[cfg(debug_assertions)]
+        if self.debug.dev_error.is_some() {
+            return true;
+        }
         self.debug.overlay.config.highlight.is_some() || self.debug.overlay.config.repaint_rainbow
     }
 
@@ -477,6 +481,8 @@ impl Tree {
         if let Some(rect) = highlight {
             commands.push(outline(rect, [56, 139, 253, 41], [56, 139, 253, 255]));
         }
+        #[cfg(debug_assertions)]
+        self.record_dev_error(&mut commands);
         commands
     }
 }

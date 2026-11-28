@@ -81,23 +81,8 @@ pub(crate) fn typescript(
             .iter()
             .map(|(name, path)| (name.clone(), json!([path]))),
     );
-    let shader_types = app.join(".impasto/types/shaders.d.ts");
-    fs::create_dir_all(app.join(".impasto/types"))?;
-    let token_types = app.join(".impasto/types/tokens.d.ts");
-    write(&token_types, &theme_types(app)?)?;
-    let i18n_types = app.join(".impasto/types/i18n.d.ts");
-    write(&i18n_types, &bundler::i18n::declarations(app)?)?;
-    let shaders = bundler::shader_types(app)?;
-    write(&shader_types, &shaders.ambient)?;
+    let [token_types, i18n_types, shader_types] = development_types(app)?;
     let shader_root = app.join(".impasto/types/shaders");
-    remove_stale_shader_types(&shader_root, &shader_root, &shaders.modules)?;
-    for (path, declaration) in &shaders.modules {
-        let path = shader_root.join(path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        write(&path, declaration)?;
-    }
     let files = types
         .iter()
         .cloned()
@@ -128,6 +113,61 @@ pub(crate) fn typescript(
         ".impasto/tsconfig.generated.json"
     };
     write(&app.join(file), &serde_json::to_string_pretty(&config)?)
+}
+
+pub(crate) fn refresh_development_types(app: &App, paths: &[PathBuf]) -> Result<()> {
+    let root = &app.root;
+    let types = root.join(".impasto/types");
+    let theme = paths.iter().any(|path| path == &root.join("src/theme.ts"));
+    let locales = paths
+        .iter()
+        .any(|path| path.starts_with(root.join("locales")));
+    let shaders = paths.iter().any(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "wgsl")
+    });
+    if theme || locales || shaders {
+        fs::create_dir_all(&types)?;
+    }
+    if theme {
+        write(&types.join("tokens.d.ts"), &theme_types(root)?)?;
+    }
+    if locales {
+        write(
+            &types.join("i18n.d.ts"),
+            &bundler::i18n::declarations(root)?,
+        )?;
+    }
+    if shaders {
+        write_shader_types(root, &types)?;
+    }
+    Ok(())
+}
+
+fn development_types(app: &Path) -> Result<[PathBuf; 3]> {
+    let types = app.join(".impasto/types");
+    fs::create_dir_all(&types)?;
+    let token_types = types.join("tokens.d.ts");
+    let i18n_types = types.join("i18n.d.ts");
+    write(&token_types, &theme_types(app)?)?;
+    write(&i18n_types, &bundler::i18n::declarations(app)?)?;
+    Ok([token_types, i18n_types, write_shader_types(app, &types)?])
+}
+
+fn write_shader_types(app: &Path, types: &Path) -> Result<PathBuf> {
+    let shader_types = types.join("shaders.d.ts");
+    let shaders = bundler::shader_types(app)?;
+    write(&shader_types, &shaders.ambient)?;
+    let shader_root = types.join("shaders");
+    remove_stale_shader_types(&shader_root, &shader_root, &shaders.modules)?;
+    for (path, declaration) in &shaders.modules {
+        let path = shader_root.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write(&path, declaration)?;
+    }
+    Ok(shader_types)
 }
 
 fn theme_types(app: &Path) -> Result<String> {

@@ -495,6 +495,11 @@ pub(super) fn call<'js>(
             let bytes = read(&relative, crate::text::MAX_APP_FONT_BYTES).map_err(|message| {
                 type_error(ctx, &format!("could not read font {source}: {message}"))
             })?;
+            #[cfg(debug_assertions)]
+            inner
+                .dev_fonts
+                .borrow_mut()
+                .insert(relative, family.clone());
             inner
                 .fonts
                 .borrow_mut()

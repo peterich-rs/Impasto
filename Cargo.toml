@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/engine",
+    "crates/dev-protocol",
     "crates/devtools-protocol",
     "crates/devtools-symbols",
     "crates/raster",

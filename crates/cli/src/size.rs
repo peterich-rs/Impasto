@@ -195,8 +195,8 @@ pub(crate) fn write(
         module.retained_pool_bytes = retained.get(module.path).copied().unwrap_or(0);
         module.amortized_pool_bytes = amortized.get(module.path).copied().unwrap_or(0);
     }
-    let mut assets = crate::run::Snapshot::new();
-    crate::run::snapshot_path(&app.join("assets"), &mut assets)?;
+    let mut assets = crate::watch::Snapshot::new();
+    crate::watch::scan(&app.join("assets"), &mut assets)?;
     let assets = assets
         .iter()
         .filter_map(|(path, (_, size))| Some((path.strip_prefix(app).ok()?, size)))

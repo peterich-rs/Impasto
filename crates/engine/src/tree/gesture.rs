@@ -225,6 +225,10 @@ impl Tree {
         if event.kind == PointerKind::Mouse {
             self.cursor_pointer = (event.phase != Phase::Cancel).then_some((event.x, event.y));
         }
+        #[cfg(debug_assertions)]
+        if self.dev_error_pointer(event) {
+            return Vec::new();
+        }
         if self.pick_remote_pointer(event) {
             return Vec::new();
         }
