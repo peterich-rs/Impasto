@@ -21,6 +21,8 @@ pub struct FrameTiming {
     pub semantics_ms: f64,
     pub submit_ms: f64,
     pub present_ms: f64,
+    pub presented: bool,
+    pub present_error: Option<raster::Status>,
     pub shapes_built: u32,
     pub shapes_measure_hit: u32,
     pub shapes_measure_miss: u32,
@@ -252,7 +254,11 @@ pub(crate) fn record_frame(
         sets: phases.trace.sets,
         runtime: timing.runtime,
         number: timing.number,
-        at_ms: mono_ms(),
+        at_ms: if timing.schedule.present_done_ns > 0 {
+            timing.schedule.present_done_ns as f64 / 1_000_000.0
+        } else {
+            mono_ms()
+        },
         work_ms: timing.work_ms,
         budget_ms: timing.interval_ms,
         session_ms: timing.session_ms,
@@ -262,6 +268,8 @@ pub(crate) fn record_frame(
         record_ms: timing.record_ms,
         submit_ms: timing.submit_ms,
         present_ms: timing.present_ms,
+        presented: timing.presented,
+        present_error: timing.present_error,
         layers: timing.layer_count,
         atlas_entries: timing.atlas_entries,
         pictures: timing.pictures,
@@ -462,12 +470,7 @@ pub(crate) fn ms_i64(ms: f64) -> i64 {
 }
 
 pub(crate) fn mono_ms() -> f64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_secs_f64()
-        * 1000.0
+    crate::diagnostics::telemetry::mono_ns() as f64 / 1_000_000.0
 }
 
 #[cfg(test)]

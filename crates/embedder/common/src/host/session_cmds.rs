@@ -155,6 +155,7 @@ fn metrics_cmd(runtime: &mut UiHost, metrics: Metrics) {
         hub.note_metrics(metrics);
     }
     if runtime.input.set_metrics(metrics) {
+        runtime.raster_dirty = true;
         arm(runtime);
     }
 }
@@ -173,6 +174,7 @@ fn lifecycle(runtime: &mut UiHost, state: engine::session::Lifecycle) {
         }
         (engine::session::Lifecycle::Resumed, _) | (engine::session::Lifecycle::Inactive, true) => {
             runtime.revision = runtime.revision.wrapping_add(1);
+            runtime.raster_dirty = true;
             runtime.update_raster(
                 |graphics| {
                     graphics.needs_present = true;

@@ -20,6 +20,7 @@ pub(super) fn handle(runtime: &mut UiHost, command: Command) -> Result<bool, Boo
 
 fn invalidate(runtime: &mut UiHost) {
     tracing::debug!(target: "impasto::render::gpu", "invalidate");
+    runtime.raster_dirty = true;
     runtime.graphics.post(|graphics| {
         graphics.needs_present = true;
         graphics.frame_retry_at = None;
@@ -34,6 +35,7 @@ fn memory_warning(runtime: &mut UiHost) {
         super::session_call(|| session.memory_pressure());
     }
     flush_gpu(runtime, "memory");
+    runtime.raster_dirty = true;
     runtime.graphics.post(|graphics| graphics.images.trim());
     if !runtime.input.is_paused() {
         arm(runtime);
@@ -43,6 +45,9 @@ fn memory_warning(runtime: &mut UiHost) {
 fn image_ready(runtime: &mut UiHost, ready: ImageReady) {
     let decoded = !super::compositor_animation::prefetch_image(runtime, ready.source())
         && matches!(&ready, ImageReady::Decoded(handle) if uses_texture(runtime, &handle.source));
+    if decoded {
+        runtime.raster_dirty = true;
+    }
     runtime.graphics.post(move |graphics| {
         let request_id = match &ready {
             ImageReady::Decoded(handle) => handle.generation,
@@ -70,6 +75,7 @@ fn image_ready(runtime: &mut UiHost, ready: ImageReady) {
 
 fn reload(runtime: &mut UiHost, source: String) {
     tracing::debug!(target: "impasto::render::image", source, "image reload");
+    runtime.raster_dirty = true;
     runtime.graphics.post(move |graphics| {
         graphics.images.reload(&source);
         graphics.raster.borrow_mut().forget_texture(&source);
@@ -80,6 +86,9 @@ fn reload(runtime: &mut UiHost, source: String) {
 
 fn external_texture(runtime: &mut UiHost, source: String, frame: Option<crate::ExternalFrame>) {
     let used = uses_texture(runtime, &source);
+    if used {
+        runtime.raster_dirty = true;
+    }
     runtime.graphics.post(move |graphics| {
         graphics.external_gpu.remove(&source);
         if let Some(frame) = frame {
@@ -100,6 +109,9 @@ fn external_gpu_texture(
     frame: Option<crate::ImportExternalFrame>,
 ) {
     let used = uses_texture(runtime, &source);
+    if used {
+        runtime.raster_dirty = true;
+    }
     runtime.graphics.post(move |graphics| {
         graphics.external_textures.remove(&source);
         if let Some(import) = frame {

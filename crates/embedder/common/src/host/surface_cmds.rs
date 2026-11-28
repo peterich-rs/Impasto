@@ -184,6 +184,7 @@ fn apply(runtime: &mut UiHost, result: OpenOutcome, acks: &Arc<Acks>) -> Result<
             runtime.services.borrow().surface_attached(id);
             runtime.active_surface = Some(id);
             runtime.try_surface = false;
+            runtime.raster_dirty = true;
             runtime.revision = runtime.revision.wrapping_add(1);
             note_scale(runtime, metrics.device_pixel_ratio);
             if let Some(hub) = &runtime.hub {
@@ -240,6 +241,9 @@ fn changed(
                     hub.note_metrics(metrics);
                 }
                 let metrics_changed = runtime.input.set_metrics(metrics);
+                if resized || metrics_changed {
+                    runtime.raster_dirty = true;
+                }
                 if metrics_changed || (resized && !runtime.input.is_paused()) {
                     arm(runtime);
                 }

@@ -593,6 +593,7 @@ pub(super) fn stop(runtime: &mut UiHost, announced: Option<Arc<CompositorSnapsho
         }
         if !active.plan.tree.tracks.is_empty() {
             // The raster queue invalidates its sampled tree before the next UI submission.
+            runtime.raster_dirty = true;
             runtime.graphics.post(|graphics| graphics.installed = None);
         }
         active.latest

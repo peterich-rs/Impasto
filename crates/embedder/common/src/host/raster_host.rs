@@ -42,6 +42,7 @@ pub(super) struct RasterHost {
     pub(super) gpu: Gpu,
     pub(super) last_step: Option<(FrameStep, Gpu)>,
     pub(super) frame_retry_at: Option<i64>,
+    pub(super) resource_retry_delay_ms: Option<i64>,
     pub(super) clock: Arc<dyn TaskRunner>,
     pub(super) busy: Arc<crate::watchdog::Busy>,
 }
@@ -202,30 +203,7 @@ pub(super) fn raster_frame(
     let output = render_layers(graphics, &mut submission, before_present);
     graphics.busy.leave();
     let mut output = output?;
-    if let Some(hub) = &submission.telemetry {
-        if let Some(timing) = output.timing.as_ref() {
-            crate::timing::record_frame(hub, timing, &submission.phases);
-        } else if let Some(mut schedule) = submission.schedule {
-            schedule.present_done_ns = mono_ns();
-            let phase = submission.phases;
-            crate::timing::record_frame(
-                hub,
-                &FrameTiming {
-                    number: submission.number,
-                    schedule,
-                    work_ms: schedule.e2e_ms(),
-                    interval_ms: submission.time.interval_ms,
-                    session_ms: submission.session_ms,
-                    gesture_ms: submission.gesture_ms,
-                    script_ms: phase.script_ms,
-                    layout_ms: phase.layout_ms,
-                    record_ms: phase.record_ms,
-                    runtime: submission.runtime_sample,
-                    ..FrameTiming::default()
-                },
-                &phase,
-            );
-        }
+    if submission.telemetry.is_some() {
         output.gpu_pending = graphics.raster.borrow().gpu_timings_pending();
     }
     drop(entered);

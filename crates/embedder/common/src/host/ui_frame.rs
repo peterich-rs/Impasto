@@ -170,11 +170,28 @@ pub(super) fn on_frame(
     submit_frame(runtime, submission, raster_admitted)
 }
 
+fn raster_needed(runtime: &UiHost, submission: &FrameSubmission) -> bool {
+    submission.layers_changed
+        || submission.placements_changed
+        || !submission.reloads.is_empty()
+        || submission.census.is_some()
+        || submission.again
+        || submission.animated_effects
+        || submission.gpu_views
+        || runtime.raster_dirty
+        || runtime.present_retry_at.is_some()
+        || runtime.frames.pending.is_some()
+}
+
 fn submit_frame(
     runtime: &mut UiHost,
     submission: FrameSubmission,
     raster_admitted: bool,
 ) -> Result<bool, BootError> {
+    if !raster_needed(runtime, &submission) {
+        skipped_frame("unchanged_ui");
+        return Ok(end_frame(runtime, false, false));
+    }
     let again = submission.again;
     let compositor_epoch = submission.compositor_epoch;
     if !raster_admitted {
@@ -182,6 +199,7 @@ fn submit_frame(
         runtime.frames.keep_latest(submission);
         return Ok(end_frame(runtime, false, false));
     }
+    runtime.raster_dirty = false;
     let submission = if runtime.frames.pending.is_some() {
         runtime.frames.keep_latest(submission);
         if let Some(pending) = runtime.frames.pending.take() {
@@ -325,6 +343,9 @@ fn finish_raster_frame(
     }
     runtime.active_surface = surface.filter(|&id| runtime.inbox.admits_surface(id));
     runtime.present_retry_at = retry_at;
+    if output.again || output.gpu_pending || retry_at.is_some() {
+        runtime.raster_dirty = true;
+    }
     if output.shown {
         if submission.interaction == runtime.interaction {
             runtime.interaction = None;
