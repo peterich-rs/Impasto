@@ -173,6 +173,8 @@ impl TestHarness {
         }));
         let shaper = Rc::new(RefCell::new(raster::ParleyShaper::new(library)));
         let runtime = UiHost {
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            overlay_owner: None,
             shaper,
             graphics: RasterPort::Local(Box::new(RasterHost {
                 raster,

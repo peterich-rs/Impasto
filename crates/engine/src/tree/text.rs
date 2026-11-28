@@ -92,6 +92,7 @@ impl Tree {
         if !text_changed && !cleared_runs {
             return Ok(());
         }
+        self.stage_repaint(id, super::RepaintReason::TEXT_CONTENT);
         self.mark_semantics_chain(id);
         self.queue_text_measure(id);
         Ok(())

@@ -222,6 +222,9 @@ impl Tree {
         event: PointerEvent,
         history: &[PointerSample],
     ) -> Vec<Gesture> {
+        if self.pick_remote_pointer(event) {
+            return Vec::new();
+        }
         self.arena.pointer_at = (event.x, event.y);
         let mut gestures = self.drain_pending();
         if self.debug.pointer_trace {

@@ -456,6 +456,9 @@ impl Tree {
         self.taffy
             .insert_child_at_index(parent_taffy, index, child_taffy)?;
         self.attach_links(parent, child, before)?;
+        self.stage_repaint(parent, super::RepaintReason::TREE_STRUCTURE);
+        self.stage_repaint(child, super::RepaintReason::TREE_STRUCTURE);
+
         self.invalidate_subtree_layers(parent);
         if let Ok(node) = self.node_mut(child) {
             node.flags.insert(NodeFlags::LAYOUT_DIRTY);
@@ -679,6 +682,7 @@ impl Tree {
     }
 
     fn unlink_kept(&mut self, parent: NodeId, child: NodeId) -> Result<Vec<Gesture>, Error> {
+        self.stage_repaint(parent, super::RepaintReason::TREE_STRUCTURE);
         self.drop_scopes_under(child);
         self.unlink(child)?;
         let mut gestures = self.blur_contained(child);
@@ -832,6 +836,9 @@ impl Tree {
     /// Drops whatever occupies `index` and recycles it until the generation cap.
     pub(super) fn retire(&mut self, index: u32) {
         self.debug.sources.remove(&index);
+        if let Some(tracker) = self.debug.repaint.as_mut() {
+            tracker.retire(index);
+        }
         if let Some(slot) = self.slots.get_mut(index as usize)
             && let Some(node) = slot.node.as_mut()
             && let Some(text) = node.text_mut()

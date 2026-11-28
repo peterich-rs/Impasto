@@ -144,6 +144,7 @@ pub struct PhaseSample {
 /// Per-frame timing sample, trimmed from [`crate::FrameTiming`].
 #[derive(Clone, Debug)]
 pub struct FrameSample {
+    pub repainted_view_count: u32,
     pub seq: u64,
     pub(crate) changed_at: u64,
     pub schedule: ScheduleTiming,
@@ -185,6 +186,7 @@ pub struct FrameSample {
 impl Default for FrameSample {
     fn default() -> Self {
         Self {
+            repainted_view_count: 0,
             seq: 0,
             changed_at: 0,
             schedule: ScheduleTiming::default(),
@@ -321,8 +323,25 @@ pub const LOG_CAP: usize = 400;
 pub const ERROR_CAP: usize = 100;
 pub const NET_CAP: usize = 150;
 pub const FRAME_CAP: usize = 240;
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+#[derive(Clone)]
+pub(super) struct RepaintUpdate {
+    pub seq: u64,
+    pub batch: Option<Arc<engine::tree::FrameRepaintBatch>>,
+    pub picked: Option<engine::tree::PickedViewEvent>,
+}
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+seq_field!(RepaintUpdate);
+
 /// Process-local telemetry store, shared by the host and its consumers.
 pub struct TelemetryHub {
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) repaints: Mutex<Ring<RepaintUpdate>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    repaint_readers: AtomicU64,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    latest_layers: Mutex<Option<(u64, Arc<engine::scene::LayerTree>)>>,
     profile: AtomicU8,
     capture_phase: AtomicU8,
     capture_gpu: AtomicBool,
@@ -376,6 +395,12 @@ impl Default for TelemetryHub {
 impl TelemetryHub {
     pub fn new() -> Self {
         Self {
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            repaints: Mutex::new(Ring::new(FRAME_CAP)),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            repaint_readers: AtomicU64::new(0),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            latest_layers: Mutex::new(None),
             profile: AtomicU8::new(TelemetryProfile::Counters as u8),
             capture_phase: AtomicU8::new(CAPTURE_IDLE),
             capture_gpu: AtomicBool::new(false),
@@ -559,6 +584,10 @@ impl TelemetryHub {
             }
         }
         self.profile.store(profile as u8, Ordering::Relaxed);
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        if profile != TelemetryProfile::DeepInspect {
+            *lock(&self.latest_layers) = None;
+        }
     }
 
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
@@ -577,6 +606,68 @@ impl TelemetryHub {
             .buf
             .iter()
             .find(|frame| frame.number == id)
+            .cloned()
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn repaint_reader(&self, add: bool) {
+        if add {
+            self.repaint_readers.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.repaint_readers.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn tracks_repaints(&self) -> bool {
+        self.repaint_readers.load(Ordering::Relaxed) != 0
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_repaints(
+        &self,
+        batch: Option<engine::tree::FrameRepaintBatch>,
+        picked: Option<engine::tree::PickedViewEvent>,
+    ) {
+        if batch.is_some() || picked.is_some() {
+            lock(&self.repaints).push(|seq| RepaintUpdate {
+                seq,
+                batch: batch.map(Arc::new),
+                picked,
+            });
+            self.bump();
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn frame_repaints(&self, id: u64) -> Option<Arc<engine::tree::FrameRepaintBatch>> {
+        lock(&self.repaints)
+            .buf
+            .iter()
+            .rev()
+            .filter_map(|entry| entry.batch.as_ref())
+            .find(|batch| batch.frame_number == id)
+            .map(Arc::clone)
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_layers(&self, frame: u64, tree: &Arc<engine::scene::LayerTree>) {
+        if self.profile.load(Ordering::Relaxed) == TelemetryProfile::DeepInspect as u8 {
+            let mut layers = lock(&self.latest_layers);
+            if self.profile.load(Ordering::Relaxed) == TelemetryProfile::DeepInspect as u8 {
+                *layers = Some((frame, Arc::clone(tree)));
+            }
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn retained_layers(
+        &self,
+        frame: Option<u64>,
+    ) -> Option<(u64, Arc<engine::scene::LayerTree>)> {
+        lock(&self.latest_layers)
+            .as_ref()
+            .filter(|(id, _)| frame.is_none_or(|frame| frame == *id))
             .cloned()
     }
 

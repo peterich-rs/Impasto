@@ -977,6 +977,8 @@ struct Installed {
 }
 
 pub(crate) struct UiHost {
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    overlay_owner: Option<u64>,
     shaper: Rc<RefCell<raster::ParleyShaper>>,
     graphics: RasterPort,
     active_surface: Option<SurfaceId>,
@@ -1379,6 +1381,8 @@ fn open_ui(
     let busy = Arc::new(crate::watchdog::Busy::new());
     crate::watchdog::spawn("ui", Arc::downgrade(&busy), boot.devtools.clone());
     Ok(UiHost {
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        overlay_owner: None,
         graphics,
         shaper,
         active_surface: None,

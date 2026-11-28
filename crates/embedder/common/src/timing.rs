@@ -243,6 +243,7 @@ pub(crate) fn record_frame(
     hub.push_frame(crate::diagnostics::FrameSample {
         seq: 0,
         changed_at: 0,
+        repainted_view_count: timing.schedule.repainted_view_count,
         schedule: timing.schedule,
         raster: timing.raster,
         gpu: timing.gpu,

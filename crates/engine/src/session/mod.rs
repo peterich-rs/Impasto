@@ -137,6 +137,8 @@ pub struct FrameOutput {
     pub phases: Option<FramePhases>,
     /// Current overflow report as JSON, when the debug scan is on.
     pub layout_report: Option<String>,
+    /// Optional per-view recording work for the current UI frame.
+    pub repaints: Option<crate::tree::FrameRepaintBatch>,
 }
 
 impl FrameOutput {
@@ -154,6 +156,7 @@ impl FrameOutput {
             images: None,
             phases: None,
             layout_report: None,
+            repaints: None,
         }
     }
 }
@@ -312,6 +315,22 @@ pub trait Session {
         None
     }
     /// A bounded scene snapshot for the host's developer inspector.
+    /// Sets repaint demand and the frame identity before the session advances.
+    fn begin_repaint_frame(&mut self, _enabled: bool, _frame_number: u64) {}
+
+    /// Updates the diagnostic overlay and picker.
+    fn set_remote_overlay(&mut self, _config: crate::tree::RemoteOverlayConfig) {}
+
+    /// Returns retained per-view repaint statistics for this session.
+    fn repaint_leaderboard(&self, _limit: usize) -> Vec<crate::tree::NodeRepaintStats> {
+        Vec::new()
+    }
+
+    /// Takes the most recent remote pointer selection.
+    fn take_picked_view(&mut self) -> Option<crate::tree::PickedViewEvent> {
+        None
+    }
+
     /// Returns a fresh snapshot bounded by the caller's node budget.
     fn inspector_snapshot_limited(&self, _max_nodes: usize) -> Option<String> {
         self.inspector_snapshot()

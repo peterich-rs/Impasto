@@ -5,6 +5,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -36,7 +37,7 @@ use super::hub::{CaptureOptions, TraceCapture};
 use super::remote_stream::Subscription;
 use super::telemetry::TelemetryProfile;
 use super::timeline::{FieldValue, TraceDetail};
-use super::{TelemetryHub, discovery, remote_frame};
+use super::{TelemetryHub, discovery, remote_frame, remote_views};
 
 const FRAME_SPAN_LIMIT: usize = 512;
 
@@ -317,7 +318,12 @@ async fn serve(stream: TcpStream, agent: Arc<Agent>) {
         Capability::Inspector,
     ];
     let result = if v2 {
-        capabilities.extend([Capability::MultiChannelSubscribe, Capability::BinaryFrames]);
+        capabilities.extend([
+            Capability::MultiChannelSubscribe,
+            Capability::BinaryFrames,
+            Capability::ViewRepaintTracker,
+            Capability::RemoteOverlay,
+        ]);
         json!({"version": PROTOCOL_VERSION_V2, "capabilities": capabilities, "session": agent.info()})
     } else {
         json!({"version": PROTOCOL_VERSION_V1, "capabilities": capabilities})
@@ -327,7 +333,8 @@ async fn serve(stream: TcpStream, agent: Arc<Agent>) {
     }
     let _inspector = (!v2).then(|| hub.inspect_remote());
     let mut cursor = None;
-    let mut subscription = Subscription::default();
+    let mut subscription = Subscription::new(Arc::clone(hub));
+    let mut overlay = OverlayLease::default();
     let mut recording = None;
     let mut captures = JoinSet::new();
     let mut updates = interval(if v2 {
@@ -366,6 +373,7 @@ async fn serve(stream: TcpStream, agent: Arc<Agent>) {
                         &message,
                         &mut subscription,
                         &mut recording,
+                        &mut overlay,
                         &mut captures,
                     )
                 } else {
@@ -527,6 +535,7 @@ fn request_v2(
     message: &str,
     subscription: &mut Subscription,
     recording: &mut Option<Capture>,
+    overlay: &mut OverlayLease,
     pending: &mut JoinSet<Message>,
 ) -> Option<Message> {
     let Ok(rpc) = serde_json::from_str::<Value>(message) else {
@@ -557,6 +566,12 @@ fn request_v2(
                 Some("deep_inspect") => TelemetryProfile::DeepInspect,
                 _ => return Some(fail(-32602, "invalid telemetry profile")),
             };
+            if let Some(tracking) = params.get("repaint_tracking") {
+                let Some(enabled) = tracking.as_bool() else {
+                    return Some(fail(-32602, "repaint_tracking must be boolean"));
+                };
+                subscription.set_repaint_tracking(enabled);
+            }
             hub.set_profile(profile);
             ok(json!(true))
         }
@@ -567,10 +582,49 @@ fn request_v2(
             ),
             None => fail(-32602, "expected frame_id"),
         },
-        "view.snapshot" | "view.probe" | "view.set_overlay" => {
+        "frame.repaints" => {
+            let Some(frame_id) = params["frame_id"].as_u64() else {
+                return Some(fail(-32602, "expected frame_id"));
+            };
+            let Some(batch) = hub.frame_repaints(frame_id) else {
+                return Some(fail(-32003, "no retained repaints for frame"));
+            };
+            let value = remote_views::repaints(&batch);
+            if batch.entries.len() >= 64 {
+                binary(
+                    id,
+                    BinaryMsgType::FrameRepaints,
+                    value.to_string().as_bytes(),
+                )
+            } else {
+                ok(value)
+            }
+        }
+        "frame.layer_tree" => {
+            let Some((frame, tree)) = hub.retained_layers(params["frame_id"].as_u64()) else {
+                return Some(fail(-32003, "no retained layer tree"));
+            };
             if pending.len() >= PENDING_RPC_LIMIT {
                 return Some(fail(-32002, "too many pending requests"));
             }
+            pending.spawn_blocking(move || {
+                binary(
+                    id,
+                    BinaryMsgType::ViewSnapshot,
+                    remote_views::layer_tree(frame, &tree)
+                        .to_string()
+                        .as_bytes(),
+                )
+            });
+            return None;
+        }
+        "view.snapshot" | "view.probe" | "view.set_overlay" | "view.repaint_leaderboard" => {
+            if pending.len() >= PENDING_RPC_LIMIT {
+                return Some(fail(-32002, "too many pending requests"));
+            }
+            let Some(poster) = &agent.poster else {
+                return Some(fail(-32004, "session closed"));
+            };
             let query = match method {
                 "view.snapshot" => DevtoolsQuery::ViewSnapshot {
                     max_nodes: usize::try_from(
@@ -593,15 +647,25 @@ fn request_v2(
                     };
                     DevtoolsQuery::ViewProbe { x, y }
                 }
+                "view.repaint_leaderboard" => DevtoolsQuery::ViewRepaintLeaderboard {
+                    limit: usize::try_from(params["limit"].as_u64().unwrap_or(32).min(256))
+                        .unwrap_or(32),
+                },
                 _ => {
-                    let Some(scan) = params["layout_scan"].as_bool() else {
-                        return Some(fail(-32602, "expected layout_scan"));
+                    let mut params = params.clone();
+                    if let Some(node) = params.get_mut("highlight_node")
+                        && let Some(raw) = node.as_u64()
+                    {
+                        *node = json!(raw.to_string());
+                    }
+                    let Ok(config) = serde_json::from_value(params) else {
+                        return Some(fail(-32602, "invalid overlay configuration"));
                     };
-                    DevtoolsQuery::SetLayoutScan(scan)
+                    DevtoolsQuery::ViewSetOverlay {
+                        owner: overlay.claim(poster),
+                        config,
+                    }
                 }
-            };
-            let Some(poster) = &agent.poster else {
-                return Some(fail(-32004, "session closed"));
             };
             let (reply, done) = tokio::sync::oneshot::channel();
             if !poster.post_devtools(Command::Devtools { query, reply }) {
@@ -666,6 +730,31 @@ fn request_v2(
         },
         _ => fail(-32601, "unknown method"),
     })
+}
+
+#[derive(Default)]
+struct OverlayLease(Option<(u64, Poster)>);
+
+impl OverlayLease {
+    fn claim(&mut self, poster: &Poster) -> u64 {
+        static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
+        self.0
+            .get_or_insert_with(|| (NEXT_OWNER.fetch_add(1, Ordering::Relaxed), poster.clone()))
+            .0
+    }
+}
+
+impl Drop for OverlayLease {
+    fn drop(&mut self) {
+        if let Some((owner, poster)) = &self.0 {
+            let (reply, abandoned) = tokio::sync::oneshot::channel();
+            drop(abandoned);
+            poster.post(Command::Devtools {
+                query: DevtoolsQuery::ClearOverlay { owner: *owner },
+                reply,
+            });
+        }
+    }
 }
 
 fn capture_options(params: &Value) -> Option<CaptureOptions> {

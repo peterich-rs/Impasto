@@ -1098,6 +1098,7 @@ impl Session for JsSession {
                 paint(host)
             };
             let mut tree = inner.tree.borrow_mut();
+            tree.advance_overlay();
             let record_started = std::time::Instant::now();
             if self.prefetching_list {
                 inner.drivers.borrow().refresh_compositor_windows(&mut tree);
@@ -1144,6 +1145,7 @@ impl Session for JsSession {
                 None
             };
             let scene_delta = tree.take_scene_delta();
+            let repaints = tree.take_repaints();
             let generation = tree.image_generation();
             let images = if generation != self.image_generation {
                 self.image_generation = generation;
@@ -1339,6 +1341,7 @@ impl Session for JsSession {
                     trace,
                 }),
                 layout_report,
+                repaints,
             }
         }
     }
@@ -1402,7 +1405,7 @@ impl Session for JsSession {
         let (visual, motion) = {
             let tree = inner.tree.borrow();
             (
-                tree.needs_layout() || tree.needs_paint(),
+                tree.needs_layout() || tree.needs_paint() || tree.overlay_animating(),
                 tree.motion_active(),
             )
         };
@@ -1424,6 +1427,9 @@ impl Session for JsSession {
 
         let inner = &self.inner;
         let host = &self.vm.host;
+        if inner.tree.borrow().overlay_visible() {
+            return Err(CompositorBlockReason::PendingUiWork);
+        }
         if host.observes_frame() {
             return Err(CompositorBlockReason::GlobalFrameHook);
         }
@@ -1487,6 +1493,26 @@ impl Session for JsSession {
             .into_iter()
             .chain(gesture)
             .min_by(f64::total_cmp)
+    }
+
+    fn begin_repaint_frame(&mut self, enabled: bool, frame_number: u64) {
+        self.inner
+            .tree
+            .borrow_mut()
+            .begin_repaint_frame(enabled, frame_number);
+    }
+
+    fn set_remote_overlay(&mut self, config: crate::tree::RemoteOverlayConfig) {
+        self.inner.settings_frame.set(true);
+        self.inner.tree.borrow_mut().set_remote_overlay(config);
+    }
+
+    fn repaint_leaderboard(&self, limit: usize) -> Vec<crate::tree::NodeRepaintStats> {
+        self.inner.tree.borrow().repaint_leaderboard(limit)
+    }
+
+    fn take_picked_view(&mut self) -> Option<crate::tree::PickedViewEvent> {
+        self.inner.tree.borrow_mut().take_picked_view()
     }
 
     fn inspector_snapshot(&self) -> Option<String> {

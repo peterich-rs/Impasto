@@ -842,6 +842,9 @@ impl Tree {
         if !(paint_changed || transform_changed || text_changed || image_changed) {
             return Ok(());
         }
+        if !same_layer_effects {
+            self.stage_repaint(id, super::RepaintReason::EFFECT_LAYER);
+        }
         let node = self.node_mut(id)?;
         if paint_changed {
             node.paint = Some(Box::new(next.paint));

@@ -230,3 +230,86 @@ fn suppressed_pointers_update_the_trace_without_dispatch() -> Result<(), Error> 
     );
     Ok(())
 }
+
+#[test]
+fn overlay_appends_to_the_scene_without_changing_the_view_tree() -> Result<(), Error> {
+    use crate::tree::RemoteOverlayConfig;
+
+    let mut tree = tree();
+    let root = tree.column(0.0)?;
+    let label = tree.text("overlay target", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(root, label)?;
+    tree.layout()?;
+    tree.record_layers()?;
+    let before = tree.debug_snapshot();
+    let probe = tree.debug_probe(2.0, 2.0);
+    let pictures = tree.layer_tree().pictures.len();
+    tree.set_remote_overlay(RemoteOverlayConfig {
+        highlight: Some(label),
+        pick_mode: true,
+        ..Default::default()
+    });
+    tree.record_layers()?;
+    assert_eq!(tree.layer_tree().pictures.len(), pictures + 1);
+    assert_eq!(tree.debug_snapshot(), before);
+    assert_eq!(tree.debug_probe(2.0, 2.0), probe);
+    assert!(
+        tree.pointer(pointer(2.0, 2.0, crate::input::Phase::Down))
+            .is_empty()
+    );
+    assert_eq!(
+        tree.take_picked_view()
+            .and_then(|picked| picked.chain.last().copied()),
+        Some(label)
+    );
+    tree.set_remote_overlay(RemoteOverlayConfig::default());
+    tree.record_layers()?;
+    assert_eq!(tree.layer_tree().pictures.len(), pictures);
+    Ok(())
+}
+
+#[test]
+fn recorded_repaints_are_coalesced_and_generations_do_not_share_stats() -> Result<(), Error> {
+    use crate::tree::RepaintReason;
+
+    let mut tree = tree();
+    let root = tree.column(0.0)?;
+    let label = tree.text("a", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(root, label)?;
+    tree.begin_repaint_frame(true, 1);
+    tree.layout()?;
+    tree.record_layers()?;
+    let _ = tree.take_repaints();
+    tree.begin_repaint_frame(true, 2);
+    tree.set_text(label, "bb")?;
+    tree.set_text(label, "ccc")?;
+    tree.layout()?;
+    tree.record_layers()?;
+    let batch = tree
+        .take_repaints()
+        .expect("changed label recorded a picture");
+    let entry = batch
+        .entries
+        .iter()
+        .find(|record| record.node == label)
+        .expect("label attributed");
+    assert!(entry.reason.contains(RepaintReason::TEXT_CONTENT));
+    assert!(entry.reason.contains(RepaintReason::LAYOUT_GEOMETRY));
+    assert_eq!(
+        batch
+            .entries
+            .iter()
+            .filter(|record| record.node == label)
+            .count(),
+        1
+    );
+    tree.remove(root, label)?;
+    tree.discard_detached();
+    assert!(
+        !tree
+            .repaint_leaderboard(100)
+            .iter()
+            .any(|entry| entry.node == label)
+    );
+    Ok(())
+}

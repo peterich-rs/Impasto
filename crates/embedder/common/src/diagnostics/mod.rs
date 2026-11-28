@@ -11,6 +11,8 @@ pub(crate) mod remote;
 mod remote_frame;
 #[cfg(any(debug_assertions, feature = "devtools-server"))]
 mod remote_stream;
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+pub(crate) mod remote_views;
 pub(crate) mod snapshot;
 
 pub(crate) use hub::CaptureFrame;

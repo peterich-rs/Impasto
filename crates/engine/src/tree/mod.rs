@@ -12,6 +12,7 @@ mod node;
 pub(crate) mod picture_id;
 mod platform_view;
 mod record;
+mod repaint;
 mod scroll;
 mod scroll_rules;
 mod semantics;
@@ -32,6 +33,10 @@ pub use node::{
     Inset, Justify, PanelAlign, RowCrossAlign, ScrollEdge, SubtreeSpace, TrackSize,
 };
 pub use platform_view::PlatformViewPlacement;
+pub use repaint::{
+    FrameRepaintBatch, FrameRepaintRecord, NodeRepaintStats, PaintPath, PickedViewEvent,
+    RemoteOverlayConfig, RepaintReason,
+};
 pub use scroll::ScrollSample;
 pub use text::TextLink;
 

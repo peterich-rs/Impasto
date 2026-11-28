@@ -203,7 +203,8 @@ impl Tree {
         self.sync_scroll_offsets();
         self.sync_metrics();
         self.finish_measure();
-        if out.0.is_none() && self.apply_layer_patches() {
+        if out.0.is_none() && !self.overlay_visible() && self.apply_layer_patches() {
+            self.finish_repaints();
             return Ok(());
         }
         let mut previous = std::mem::take(&mut self.retained_layers.spare);
@@ -238,6 +239,38 @@ impl Tree {
         self.close_run();
         self.leave_owner(root);
         self.finish_compositor_record();
+        if self.debug.repaint.is_some() {
+            let prior: std::collections::HashMap<_, _> = previous
+                .keys
+                .iter()
+                .zip(&previous.layers)
+                .map(|(key, layer)| (*key, &layer.kind))
+                .collect();
+            for index in 0..self.layers.layers.len() {
+                let key = self.retained_layers.keys[index];
+                let LayerKey::Node(node, _) = key else {
+                    continue;
+                };
+                if prior
+                    .get(&key)
+                    .is_none_or(|kind| **kind != self.layers.layers[index].kind)
+                {
+                    self.commit_repaint(node, super::PaintPath::FullPictureRebuild, None, 0);
+                }
+            }
+        }
+        self.finish_repaints();
+        if self.overlay_visible() {
+            let commands = self.overlay_commands();
+            if !commands.is_empty() {
+                self.adopt_picture(Arc::new(crate::scene::Picture::new(
+                    super::repaint::OVERLAY_PICTURE_ID,
+                    self.layer_epoch,
+                    (0.0, 0.0),
+                    commands.into(),
+                )));
+            }
+        }
         self.runs.retain(|id, _| self.finished_owners.contains(id));
         debug_assert!(self.layer_stack.is_empty());
         if self.layers.epoch != self.layer_epoch {
@@ -422,6 +455,7 @@ impl Tree {
     pub fn set_blur(&mut self, id: NodeId, sigma: f32) -> Result<(), Error> {
         let previous = positive_sigma(self.node(id)?.blur()).is_some();
         self.node_mut(id)?.write_paint(|paint| paint.blur = sigma);
+        self.stage_repaint(id, super::RepaintReason::EFFECT_LAYER);
         let next = positive_sigma(self.node(id)?.blur()).is_some();
         if previous == next {
             self.paint_layer_value();
@@ -436,6 +470,7 @@ impl Tree {
         let previous = positive_sigma(self.node(id)?.backdrop()).is_some();
         self.node_mut(id)?
             .write_paint(|paint| paint.backdrop = sigma);
+        self.stage_repaint(id, super::RepaintReason::EFFECT_LAYER);
         let next = positive_sigma(self.node(id)?.backdrop()).is_some();
         if previous == next {
             self.paint_layer_value();
@@ -464,6 +499,7 @@ impl Tree {
         let same_structure = old.is_some() == material.is_some();
         self.node_mut(id)?
             .write_paint(|paint| paint.backdrop_material = material);
+        self.stage_repaint(id, super::RepaintReason::EFFECT_LAYER);
         if same_structure {
             self.paint_layer_value();
         } else {
@@ -493,6 +529,7 @@ impl Tree {
         let same_structure = old.is_some() == matrix.is_some();
         self.node_mut(id)?
             .write_paint(|paint| paint.color_filter = matrix);
+        self.stage_repaint(id, super::RepaintReason::EFFECT_LAYER);
         if same_structure {
             self.paint_layer_value();
         } else {
@@ -505,6 +542,7 @@ impl Tree {
     pub fn set_blend(&mut self, id: NodeId, mode: crate::scene::BlendMode) -> Result<(), Error> {
         let previous = self.node(id)?.blend() != crate::scene::BlendMode::SrcOver;
         self.node_mut(id)?.write_paint(|paint| paint.blend = mode);
+        self.stage_repaint(id, super::RepaintReason::EFFECT_LAYER);
         let next = self.node(id)?.blend() != crate::scene::BlendMode::SrcOver;
         if previous == next {
             self.paint_layer_value();
@@ -618,6 +656,11 @@ impl Tree {
         if self.run.first.is_none() && buf.len() > before {
             self.run.first = Some(id);
         }
+        if buf.len() > before
+            && let Some(tracker) = self.debug.repaint.as_mut()
+        {
+            tracker.run_members.push(id);
+        }
         self.mirror_tail(before, &buf, out, clip);
         self.run.commands = buf;
     }
@@ -662,6 +705,11 @@ impl Tree {
         let Some(scope) = self.run.scope else {
             return;
         };
+        let members = self
+            .debug
+            .repaint
+            .as_mut()
+            .map(|tracker| std::mem::take(&mut tracker.run_members));
         let captured = std::mem::take(&mut self.run.commands);
         let first = self.run.first.take();
         if captured.is_empty() {
@@ -683,7 +731,30 @@ impl Tree {
             && matched.commands().as_ref() == captured.as_slice()
         {
             self.adopt_picture(Arc::clone(matched));
+            if let (Some(tracker), Some(mut members)) = (self.debug.repaint.as_mut(), members) {
+                members.clear();
+                tracker.run_members = members;
+            }
             return;
+        }
+        if let Some(mut members) = members {
+            self.commit_repaint(
+                scope.owner,
+                super::PaintPath::FullPictureRebuild,
+                Some(picture_id),
+                captured.len(),
+            );
+            for node in members.drain(..) {
+                self.commit_repaint(
+                    node,
+                    super::PaintPath::FullPictureRebuild,
+                    Some(picture_id),
+                    captured.len(),
+                );
+            }
+            if let Some(tracker) = self.debug.repaint.as_mut() {
+                tracker.run_members = members;
+            }
         }
         self.picture_writes = self.picture_writes.saturating_add(captured.len());
         let picture = Arc::new(crate::scene::Picture::new(
@@ -840,8 +911,15 @@ impl Tree {
             return;
         }
         self.picture_writes = self.picture_writes.saturating_add(commands.len());
+        let picture_id = crate::tree::picture_id::child_picture_id(id);
+        self.commit_picture_repaint(
+            id,
+            super::PaintPath::FullPictureRebuild,
+            picture_id,
+            commands.len(),
+        );
         let picture = Arc::new(crate::scene::Picture::new(
-            crate::tree::picture_id::child_picture_id(id),
+            picture_id,
             self.layer_epoch,
             origin,
             Arc::from(commands),

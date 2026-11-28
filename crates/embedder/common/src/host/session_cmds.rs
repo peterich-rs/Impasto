@@ -8,7 +8,9 @@ pub(super) fn handle(runtime: &mut UiHost, command: Command) -> Result<bool, Boo
     match command {
         #[cfg(any(debug_assertions, feature = "devtools-server"))]
         Command::Devtools { query, reply } => {
-            if !reply.is_closed() {
+            if !reply.is_closed()
+                || matches!(query, crate::command::DevtoolsQuery::ClearOverlay { .. })
+            {
                 let _ = reply.send(devtools(runtime, query));
             }
             Ok(false)
@@ -245,13 +247,41 @@ fn devtools(runtime: &mut UiHost, query: crate::command::DevtoolsQuery) -> Resul
             session_call(|| value = session.inspector_snapshot_limited(max_nodes))
         }
         DevtoolsQuery::ViewProbe { x, y } => session_call(|| value = session.inspector_probe(x, y)),
-        DevtoolsQuery::SetLayoutScan(layout_scan) => {
-            let hub = runtime.telemetry.as_ref().ok_or("telemetry unavailable")?;
-            let mut flags = hub.flags();
-            flags.layout_scan = layout_scan;
-            hub.set_flags(flags);
+        DevtoolsQuery::ViewSetOverlay { owner, config } => {
+            let highlight = config
+                .highlight_node
+                .as_deref()
+                .map(str::parse::<u64>)
+                .transpose()
+                .map_err(|_| "invalid highlight node")?
+                .map(engine::tree::NodeId::from_raw);
+            session_call(|| {
+                session.set_remote_overlay(engine::tree::RemoteOverlayConfig {
+                    highlight,
+                    pick_mode: config.pick_mode,
+                    repaint_rainbow: config.repaint_rainbow,
+                    layout_scan: config.layout_scan,
+                })
+            });
+            runtime.overlay_owner = Some(owner);
             arm(runtime);
             return Ok(b"true".to_vec());
+        }
+        DevtoolsQuery::ClearOverlay { owner } => {
+            if runtime.overlay_owner == Some(owner) {
+                runtime.overlay_owner = None;
+                session_call(|| {
+                    session.set_remote_overlay(engine::tree::RemoteOverlayConfig::default())
+                });
+                arm(runtime);
+            }
+            return Ok(b"true".to_vec());
+        }
+        DevtoolsQuery::ViewRepaintLeaderboard { limit } => {
+            session_call(|| {
+                let records = session.repaint_leaderboard(limit);
+                value = Some(crate::diagnostics::remote_views::leaderboard(&records).to_string());
+            });
         }
     };
     value

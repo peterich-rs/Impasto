@@ -39,6 +39,7 @@ pub struct ScheduleTiming {
     pub in_flight_depth: Option<u32>,
     /// Admission failure when this tick produced no surface submission.
     pub skip_reason: Option<&'static str>,
+    pub repainted_view_count: u32,
     /// Raster received the display-link callback directly from the platform.
     pub compositor_only: bool,
     pub compositor_block: Option<engine::scene::CompositorBlockReason>,

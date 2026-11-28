@@ -1,11 +1,11 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use devtools_protocol::{Channel, ChannelCursors, ChannelUpdate};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::hub::{Ring, SeqField};
-use super::{TelemetryHub, remote_frame};
+use super::{TelemetryHub, remote_frame, remote_views};
 
 #[derive(Deserialize)]
 pub(super) struct Subscribe {
@@ -14,14 +14,40 @@ pub(super) struct Subscribe {
     cursors: ChannelCursors,
 }
 
-#[derive(Default)]
 pub(super) struct Subscription {
+    hub: Arc<TelemetryHub>,
+    repaint_requested: bool,
+    repaint_active: bool,
     channels: Vec<Channel>,
     cursors: ChannelCursors,
     revision: Option<u64>,
 }
 
 impl Subscription {
+    pub(super) fn new(hub: Arc<TelemetryHub>) -> Self {
+        Self {
+            hub,
+            channels: Vec::new(),
+            cursors: ChannelCursors::default(),
+            revision: None,
+            repaint_requested: false,
+            repaint_active: false,
+        }
+    }
+
+    pub(super) fn set_repaint_tracking(&mut self, enabled: bool) {
+        self.repaint_requested = enabled;
+        self.sync_repaints();
+    }
+
+    fn sync_repaints(&mut self) {
+        let active = self.repaint_requested || self.channels.contains(&Channel::Repaints);
+        if self.repaint_active != active {
+            self.hub.repaint_reader(active);
+            self.repaint_active = active;
+        }
+    }
+
     pub(super) fn subscribe(&mut self, request: Subscribe, hub: &TelemetryHub) -> Value {
         self.channels.clear();
         for channel in request.channels {
@@ -29,6 +55,7 @@ impl Subscription {
                 self.channels.push(channel);
             }
         }
+        self.sync_repaints();
         self.cursors = request.cursors;
         self.revision = Some(hub.revision());
         self.collect(hub, true)
@@ -93,7 +120,16 @@ impl Subscription {
                         })
                     }),
                 ),
-                Channel::Repaints => ("repaints", empty(since)),
+                Channel::Repaints => (
+                    "repaints",
+                    changes(&hub.repaints, since, |entry| {
+                        json!({
+                            "seq": entry.seq,
+                            "repaints": entry.batch.as_deref().map(remote_views::repaints),
+                            "view.picked": entry.picked.as_ref().map(remote_views::picked),
+                        })
+                    }),
+                ),
                 Channel::Runtime => ("runtime", empty(since)),
                 Channel::Resources => ("resources", empty(since)),
             };
@@ -103,6 +139,14 @@ impl Subscription {
             }
         }
         Value::Object(batch)
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if self.repaint_active {
+            self.hub.repaint_reader(false);
+        }
     }
 }
 

@@ -47,9 +47,23 @@ impl SurfaceTarget {
 #[cfg(any(debug_assertions, feature = "devtools-server"))]
 #[derive(Debug)]
 pub enum DevtoolsQuery {
-    ViewSnapshot { max_nodes: usize },
-    ViewProbe { x: f32, y: f32 },
-    SetLayoutScan(bool),
+    ViewSnapshot {
+        max_nodes: usize,
+    },
+    ViewProbe {
+        x: f32,
+        y: f32,
+    },
+    ViewSetOverlay {
+        owner: u64,
+        config: devtools_protocol::OverlayConfig,
+    },
+    ClearOverlay {
+        owner: u64,
+    },
+    ViewRepaintLeaderboard {
+        limit: usize,
+    },
 }
 
 pub enum Command {

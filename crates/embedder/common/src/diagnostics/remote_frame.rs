@@ -69,7 +69,7 @@ pub(super) fn record(frame: &FrameSample) -> FrameRecord {
         textures: frame.textures,
         atlas_entries: frame.atlas_entries,
         atlas_hits: frame.atlas_hits,
-        repainted_view_count: 0,
+        repainted_view_count: frame.repainted_view_count,
         vertex_bytes: render.vertex_bytes,
         uniform_bytes: render.uniform_bytes,
         stop_bytes: render.stop_bytes,

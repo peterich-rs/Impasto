@@ -68,6 +68,16 @@ pub(super) fn on_frame(
     } else {
         tracing::debug!(target: "impasto::frame", id = runtime.frame_number, "Impasto frame");
     }
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    if let Some(session) = runtime.session.as_mut() {
+        session.begin_repaint_frame(
+            runtime
+                .telemetry
+                .as_deref()
+                .is_some_and(crate::diagnostics::TelemetryHub::tracks_repaints),
+            runtime.frame_number,
+        );
+    }
     let (paused, gesture_ms) = deliver_frame_input(runtime);
     let session_started = Instant::now();
     let Some(SessionFrame {
@@ -479,6 +489,15 @@ fn run_session(
         Ok(mut output) => {
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
             if let Some(hub) = runtime.telemetry.as_ref() {
+                if let Some(schedule) = schedule {
+                    schedule.repainted_view_count = output.repaints.as_ref().map_or(0, |batch| {
+                        u32::try_from(batch.total_repainted_views).unwrap_or(u32::MAX)
+                    });
+                }
+                hub.note_repaints(output.repaints.take(), session.take_picked_view());
+                if let Some(tree) = output.layers.as_ref().or(runtime.latest.as_ref()) {
+                    hub.note_layers(runtime.frame_number, tree);
+                }
                 hub.refresh_inspector(!output.again, || session.inspector_snapshot());
             }
             if counters && runtime.frame_number.is_multiple_of(30) {
