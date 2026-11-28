@@ -887,7 +887,10 @@ fn scroll_physics<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Result<
     let snap_stiffness = optional(12)? as f32;
     let snap_damping = optional(13)? as f32;
     let band = if optional(14)? as i32 == 1 {
-        Band::Curve { c: factor }
+        Band::Curve {
+            c: factor,
+            max_dimension: None,
+        }
     } else {
         Band::Linear { factor }
     };

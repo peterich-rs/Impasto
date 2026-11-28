@@ -114,6 +114,8 @@ impl Vsync for RecVsync {
 struct SessionLog {
     io: Vec<IoEvent>,
     frames: Vec<FrameTime>,
+    input_frame: Option<FrameTime>,
+    pointer_frames: Vec<Option<FrameTime>>,
     wants: bool,
     launch_urls: Vec<String>,
     clipboard: Option<String>,
@@ -126,7 +128,15 @@ struct MockSession {
 impl engine::session::Session for MockSession {
     fn metrics(&mut self, _: &Metrics) {}
 
-    fn pointer(&mut self, _: engine::input::PointerEvent) {}
+    fn prepare_frame_input(&mut self, time: FrameTime) {
+        self.log.borrow_mut().input_frame = Some(time);
+    }
+
+    fn pointer(&mut self, _: engine::input::PointerEvent) {
+        let mut log = self.log.borrow_mut();
+        let time = log.input_frame;
+        log.pointer_frames.push(time);
+    }
 
     fn frame(&mut self, time: FrameTime) -> FrameOutput {
         let mut log = self.log.borrow_mut();
@@ -167,6 +177,8 @@ impl TestHarness {
         let log = Rc::new(RefCell::new(SessionLog {
             io: Vec::new(),
             frames: Vec::new(),
+            input_frame: None,
+            pointer_frames: Vec::new(),
             wants: false,
             launch_urls: Vec::new(),
             clipboard: None,
@@ -186,6 +198,7 @@ impl TestHarness {
                 load_image: Arc::new(|_| true),
                 busy: Arc::new(crate::watchdog::Busy::new()),
                 frame_retry_at: None,
+                resource_retry_delay_ms: None,
                 clock: Arc::new(crate::ManualTaskRunner::default()),
                 external_textures: Default::default(),
                 external_gpu: Default::default(),
@@ -246,6 +259,7 @@ impl TestHarness {
             ),
             dump_list: false,
             present_retry_at: None,
+            raster_dirty: true,
             listeners: Vec::new(),
             inspect: None,
             hub: None,
@@ -289,6 +303,38 @@ fn now() -> FrameTime {
         interval_ms: 16.0,
         mono_ms: 1.0,
     }
+}
+
+#[test]
+fn queued_pointer_uses_the_frame_time_before_dispatch() {
+    let mut harness = TestHarness::new();
+    harness.open_dummy();
+    let token = harness
+        .vsync
+        .last_token()
+        .expect("surface requests a frame");
+    assert!(!harness.command(Command::Frame { token, time: now() }));
+    let release = engine::input::PointerEvent::wheel_with_phase(
+        10.0,
+        10.0,
+        500.0,
+        0.0,
+        0.0,
+        engine::input::ScrollPhase::Ended,
+    );
+    assert!(!harness.command(Command::Pointer(release)));
+    let time = FrameTime {
+        vsync_ms: 500.0,
+        target_ms: 508.0,
+        interval_ms: 8.0,
+        mono_ms: 120.0,
+    };
+    let token = harness
+        .vsync
+        .last_token()
+        .expect("pointer requests a frame");
+    assert!(!harness.command(Command::Frame { token, time }));
+    assert_eq!(harness.session.borrow().pointer_frames, [Some(time)]);
 }
 
 #[test]
@@ -1013,4 +1059,171 @@ fn not_ready_surface_waits_and_a_gave_up_change_rearms() {
             .take_attempt()
             .is_some()
     );
+}
+
+#[test]
+fn noop_pointer_move_does_not_record_telemetry_frame_or_present() {
+    let presents = Arc::new(AtomicU32::new(0));
+    let counted = Arc::clone(&presents);
+    let mut harness = TestHarness::new();
+    let telemetry = Arc::new(crate::diagnostics::TelemetryHub::new());
+    harness.runtime.telemetry = Some(Arc::clone(&telemetry));
+    harness.runtime.graphics.local().open_surface = Box::new(move |_, _| {
+        Ok(Box::new(CountSurface {
+            presents: Arc::clone(&counted),
+            pixels: Arc::new(Mutex::new(raster::PixelSize::default())),
+        }))
+    });
+    harness.open_dummy();
+    harness.runtime.latest = Some(Arc::new(engine::scene::LayerTree::empty()));
+    harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
+    harness.runtime.graphics.local().needs_present = true;
+    let first_token = harness.vsync.last_token().expect("initial frame token");
+    assert!(!harness.command(Command::Frame {
+        token: first_token,
+        time: now(),
+    }));
+    let (seq_after_first, first_frames) = telemetry.frames_since(0);
+    let timing = first_frames[0].schedule;
+    assert_eq!(
+        timing.trigger,
+        crate::diagnostics::telemetry::FrameTrigger::Vsync
+    );
+    assert!(timing.target_present_ns.is_some());
+    let presents_after_first = presents.load(Ordering::Relaxed);
+    assert_eq!(presents_after_first, 1);
+
+    assert!(
+        !harness.command(Command::Pointer(engine::input::PointerEvent::new(
+            engine::input::Phase::Move,
+            12.0,
+            18.0,
+            16.0,
+        )))
+    );
+    let move_token = harness.vsync.last_token().expect("move frame token");
+    assert_ne!(move_token, first_token);
+    assert!(!harness.command(Command::Frame {
+        token: move_token,
+        time: FrameTime {
+            vsync_ms: 17.0,
+            target_ms: 17.0,
+            interval_ms: 16.0,
+            mono_ms: 17.0,
+        },
+    }));
+    let (seq_after_move, new_frames) = telemetry.frames_since(seq_after_first);
+    assert_eq!(seq_after_move, seq_after_first);
+    assert!(new_frames.is_empty(), "unexpected frames: {new_frames:?}");
+    assert_eq!(presents.load(Ordering::Relaxed), presents_after_first);
+}
+
+#[test]
+fn prepared_resources_present_an_unchanged_scene_without_waiting_for_retry() {
+    let presents = Arc::new(AtomicU32::new(0));
+    let counted = Arc::clone(&presents);
+    let mut harness = TestHarness::new();
+    harness.runtime.graphics.local().open_surface = Box::new(move |_, _| {
+        Ok(Box::new(CountSurface {
+            presents: Arc::clone(&counted),
+            pixels: Arc::new(Mutex::new(raster::PixelSize::default())),
+        }))
+    });
+    harness.open_dummy();
+    harness.runtime.cancel_vsync();
+    harness.runtime.latest = Some(Arc::new(engine::scene::LayerTree::empty()));
+    harness.runtime.raster_dirty = false;
+    harness.runtime.present_retry_at = Some(i64::MAX);
+    let graphics = harness.runtime.graphics.local();
+    graphics.installed = Some(Installed { scale: 2.0 });
+    // This is the raster-side result of collecting a completed resource.
+    graphics.needs_present = true;
+
+    super::resource_ready(&mut harness.runtime, true);
+    assert!(harness.runtime.present_retry_at.is_none());
+    let token = harness
+        .vsync
+        .last_token()
+        .expect("resource completion arms vsync");
+    assert!(!harness.command(Command::Frame { token, time: now() }));
+    assert_eq!(presents.load(Ordering::Relaxed), 1);
+    assert!(!harness.runtime.raster_dirty);
+}
+
+#[test]
+fn resource_wait_retries_without_counting_drawable_failures() {
+    struct PendingSurface;
+    impl Surface for PendingSurface {
+        fn present(
+            &mut self,
+            _: &mut raster::Rasterizer,
+            _: raster::PixelSize,
+        ) -> Result<Presented, raster::Status> {
+            Err(raster::Status::ResourcesPending)
+        }
+    }
+
+    let mut harness = TestHarness::new();
+    let telemetry = Arc::new(crate::diagnostics::TelemetryHub::new());
+    harness.runtime.telemetry = Some(Arc::clone(&telemetry));
+    let clock = Arc::new(crate::ManualTaskRunner::default());
+    let graphics = harness.runtime.graphics.local();
+    graphics.clock = Arc::clone(&clock) as Arc<dyn crate::TaskRunner>;
+    graphics.open_surface = Box::new(|_, _| Ok(Box::new(PendingSurface)));
+    harness.open_dummy();
+    harness.runtime.latest = Some(Arc::new(engine::scene::LayerTree::empty()));
+    let graphics = harness.runtime.graphics.local();
+    graphics.installed = Some(Installed { scale: 2.0 });
+    graphics.needs_present = true;
+
+    let mut elapsed = 0;
+    for delay in [16, 32, 64, 128, 128] {
+        harness.runtime.cancel_vsync();
+        assert!(!harness.command(Command::Wake));
+        elapsed += delay;
+        let graphics = harness.runtime.graphics.local();
+        assert!(graphics.needs_present);
+        assert_eq!(graphics.present_failures, 0);
+        assert_eq!(graphics.frame_retry_at, Some(elapsed));
+        clock.advance(std::time::Duration::from_millis(delay.unsigned_abs()));
+    }
+    let (_, frames) = telemetry.frames_since(0);
+    assert_eq!(frames.len(), 5);
+    assert!(frames.iter().all(|frame| !frame.presented
+        && frame.present_error == Some(raster::Status::ResourcesPending)
+        && frame.schedule.trigger == crate::diagnostics::telemetry::FrameTrigger::Wake
+        && frame.schedule.target_present_ns.is_none()));
+}
+
+#[test]
+fn presentation_target_uses_the_display_lead_or_a_valid_interval() {
+    let base = 41_000_000;
+    let time = FrameTime {
+        vsync_ms: 900_000.,
+        target_ms: 900_012.5,
+        interval_ms: 16.,
+        mono_ms: 100.,
+    };
+    assert_eq!(super::target_present_ns(base, time), Some(53_500_000));
+    assert_eq!(
+        super::target_present_ns(
+            base,
+            FrameTime {
+                target_ms: f64::NAN,
+                ..time
+            }
+        ),
+        Some(57_000_000)
+    );
+    assert_eq!(
+        super::target_present_ns(
+            base,
+            FrameTime {
+                target_ms: 901_001.,
+                ..time
+            }
+        ),
+        Some(57_000_000)
+    );
+    assert_eq!(super::target_present_ns(base, FrameTime::at(100.)), None);
 }

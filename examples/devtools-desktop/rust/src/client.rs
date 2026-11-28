@@ -17,7 +17,7 @@ use tungstenite::{Message, WebSocket};
 
 use crate::DesktopError;
 use crate::discovery::{self, Target, Tunnel};
-use crate::store::{CHANNELS, ConnectionState, Recording, Shared};
+use crate::store::{CHANNELS, ConnectionState, FrameWindowKey, Recording, Shared};
 use crate::types::{SessionOverview, TickSummary};
 
 const READ_TIMEOUT: Duration = Duration::from_millis(25);
@@ -382,7 +382,13 @@ fn binary(bytes: &[u8]) -> Result<(u64, Payload), DesktopError> {
 struct Watch {
     sink: TypedSink<TickSummary>,
     cancel: CancelToken,
-    sent: Option<u64>,
+    sent: Option<(u64, Option<FrameWindowKey>)>,
+}
+
+fn advance_tick(deadline: Instant, now: Instant) -> Instant {
+    let late = now.duration_since(deadline);
+    let phase = u64::try_from(late.as_nanos() % TICK_INTERVAL.as_nanos()).unwrap_or_default();
+    now + (TICK_INTERVAL - Duration::from_nanos(phase))
 }
 
 struct Worker {
@@ -445,17 +451,19 @@ impl Worker {
             let now = Instant::now();
             if now >= self.next_discovery {
                 self.next_discovery = now + DISCOVERY_INTERVAL;
-                let targets: Vec<_> = discovery::targets()
+                let mut targets: Vec<_> = discovery::targets()
                     .iter()
                     .map(Target::summary)
                     .take(128)
                     .collect();
+                targets.sort_by_key(|target| target.is_self);
                 let mut store = self
                     .store
                     .write()
                     .unwrap_or_else(|error| error.into_inner());
                 if targets != store.targets {
                     store.targets = targets;
+                    store.targets_rev = store.targets_rev.wrapping_add(1);
                     store.touch();
                 }
             }
@@ -489,6 +497,7 @@ impl Worker {
                     if state.sequence == sequence {
                         if state.findings != findings {
                             state.findings = findings;
+                            state.audits_rev = state.audits_rev.wrapping_add(1);
                             state.touch();
                         }
                         self.audited = state.sequence;
@@ -509,11 +518,12 @@ impl Worker {
                         .values()
                         .any(crate::store::network::active)
                 {
-                    state.changed(Channel::Network);
+                    state.refresh_network_ages();
                 }
             }
+            let now = Instant::now();
             if now >= self.next_tick {
-                self.next_tick = now + TICK_INTERVAL;
+                self.next_tick = advance_tick(self.next_tick, now);
                 self.publish();
             }
         }
@@ -521,20 +531,19 @@ impl Worker {
 
     fn publish(&mut self) {
         self.watches.retain(|watch| !watch.cancel.is_cancelled());
+        if self.watches.is_empty() {
+            return;
+        }
         let store = self.store.read().unwrap_or_else(|error| error.into_inner());
-        let sequence = store.sequence;
-        if self
-            .watches
-            .iter()
-            .all(|watch| watch.sent == Some(sequence))
-        {
+        let key = (store.sequence, store.frame_window_key());
+        if self.watches.iter().all(|watch| watch.sent == Some(key)) {
             return;
         }
         let tick = store.tick();
         drop(store);
         for watch in &mut self.watches {
-            if watch.sent != Some(sequence) && watch.sink.try_send(tick.clone()).is_ok() {
-                watch.sent = Some(sequence);
+            if watch.sent != Some(key) && watch.sink.try_send(tick.clone()).is_ok() {
+                watch.sent = Some(key);
             }
         }
     }
@@ -542,7 +551,7 @@ impl Worker {
     fn connect(&mut self, candidate: Target) -> Result<SessionOverview, DesktopError> {
         let (connection, info, capabilities) = Connection::open(&candidate)?;
         let (project, framework) = candidate.roots();
-        let target_id = candidate.summary().id;
+        let target = candidate.summary();
         let mut store = self
             .store
             .write()
@@ -572,15 +581,16 @@ impl Worker {
             }
         }
         let overview = SessionOverview::from(&info);
-        store.data.info = Some(info);
+        store.set_session_info(info);
         store.state = ConnectionState::Connected;
-        store.capabilities = capabilities;
+        store.set_capabilities(capabilities);
         if store.profile.is_empty() {
             store.profile = "counters".to_owned();
         }
         store.project_root = project;
         store.framework_root = framework;
-        store.target_id = Some(target_id);
+        store.target_id = Some(target.id);
+        store.inspecting_self = target.is_self;
         store.reconnected_new_pid = new_process;
         store.reconnect_attempt = 0;
         store.message = None;
@@ -759,6 +769,7 @@ impl Worker {
                 match scope.as_str() {
                     "frames" => {
                         store.data.frames = Default::default();
+                        store.clear_frame_clock();
                         store.changed(Channel::Frames);
                     }
                     "network" => {
@@ -782,6 +793,7 @@ impl Worker {
                         let mut data = Recording::default();
                         data.info = store.data.info.take();
                         store.data = data;
+                        store.clear_frame_clock();
                         store.bodies = Default::default();
                         store.trace = None;
                         for (channel, _) in CHANNELS {
@@ -893,8 +905,11 @@ impl Worker {
                         .store
                         .write()
                         .unwrap_or_else(|error| error.into_inner());
-                    store.rtt_ms = Some(sent.elapsed().as_secs_f64() * 1000.);
-                    store.touch();
+                    let rtt = sent.elapsed().as_secs_f64() * 1000.;
+                    if store.rtt_ms.is_none_or(|last| (last - rtt).abs() >= 0.5) {
+                        store.rtt_ms = Some(rtt);
+                        store.touch();
+                    }
                 }
             }
             Some(Message::Ping(_)) => connection.socket.flush().map_err(ws_error)?,
@@ -941,16 +956,7 @@ impl Worker {
                         .store
                         .write()
                         .unwrap_or_else(|error| error.into_inner());
-                    if state.data.info.as_ref().is_none_or(|previous| {
-                        previous.width != info.width
-                            || previous.height != info.height
-                            || previous.dpr != info.dpr
-                            || previous.refresh_rate != info.refresh_rate
-                            || previous.topology != info.topology
-                    }) {
-                        state.data.info = Some(info);
-                        state.touch();
-                    }
+                    state.set_session_info(info);
                 }
             }
             Some(Action::Layout) => {
@@ -1018,6 +1024,20 @@ mod tests {
     use devtools_protocol::LocalSessionEntry;
 
     use super::*;
+
+    #[test]
+    fn overdue_ticks_keep_their_phase_and_skip_missed_slots() {
+        let deadline = Instant::now();
+        for elapsed in [0, 25, 99, 100, 211] {
+            let now = deadline + Duration::from_millis(elapsed);
+            let next = advance_tick(deadline, now);
+            assert_eq!(
+                next.duration_since(deadline),
+                Duration::from_millis((elapsed / 100 + 1) * 100),
+            );
+            assert!(next > now);
+        }
+    }
 
     fn take_text(socket: &mut WebSocket<TcpStream>) -> Result<Value, DesktopError> {
         loop {
@@ -1105,7 +1125,7 @@ mod tests {
                 &mut socket,
                 &request["id"],
                 json!({
-                    "frames": {"reset": true, "revision": 1, "entries": [frame(1)]},
+                    "frames": {"reset": true, "revision": 1, "sampled_at_ms": 1000., "entries": [frame(1)]},
                     "network": {"reset": true, "revision": 1, "entries": [{"token": 12}]},
                     "repaints": {"reset": true, "revision": 1, "entries": [{"seq": 1,"view.picked": {"node_id":"35","final": true}}]},
                     "logs": {"reset": true, "revision": 1, "entries": [{"seq": 1,"message":"first log"}]},
@@ -1118,7 +1138,7 @@ mod tests {
             assert_eq!(request["method"], "net.get_body");
             event(
                 &mut socket,
-                json!({"frames": {"reset": false, "revision": 2, "entries": [frame(2)]}}),
+                json!({"frames": {"reset": false, "revision": 2, "sampled_at_ms": 1010., "entries": [frame(2)]}}),
             )?;
             let header = BinaryEnvelopeHeader {
                 msg_type: BinaryMsgType::NetBody,
@@ -1144,7 +1164,7 @@ mod tests {
             reply(
                 &mut socket,
                 &request["id"],
-                json!({"frames":{"reset":true,"revision":3,"entries":[frame(3)]}}),
+                json!({"frames":{"reset":true,"revision":3,"sampled_at_ms":1000.,"entries":[frame(3)]}}),
             )?;
             let _ = take_text(&mut socket);
             Ok(())

@@ -147,7 +147,7 @@ export interface SceneModule {
     alignX: number,
     snapY: number,
     alignY: number,
-    /** `0` content, `1` always, `2` never. Omitted is content. */
+    /** `0` content, `1` always, `2` never, `3` overflow. Omitted is content. */
     accept?: number,
     /** `0` tau in milliseconds, `1` deceleration rate per millisecond. */
     decayKind?: number,

@@ -958,6 +958,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePointer<'local>(
         modifiers: engine::input::Modifiers::from_bits(modifiers as u8),
         dx: 0.0,
         dy: 0.0,
+        scroll_phase: engine::input::ScrollPhase::Discrete,
         zoom: 0.0,
         pen: None,
     };

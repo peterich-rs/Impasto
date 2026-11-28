@@ -1191,10 +1191,6 @@ impl Tree {
     pub(super) fn mark_structure(&mut self) {
         self.note_layout(super::LayoutCause::Structure);
         self.mark_layout();
-        if let Some(id) = self.arena.hovered.take() {
-            self.invalidate_style_deps(crate::style::DepMask::HOVER);
-            self.arena.pending.push(Gesture::Leave(id));
-        }
     }
 }
 

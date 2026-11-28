@@ -13,6 +13,11 @@ use crate::present::{self, AfterPresent, after_present};
 use crate::scheduler::{self, FrameStep, FrameView, Gpu, VsyncOp};
 use crate::timing::FrameTiming;
 
+// The resource callback wakes the host immediately. This deadline also covers
+// a job that stops without publishing a resource for the current scene.
+const RESOURCE_RETRY_MS: i64 = 16;
+const MAX_RESOURCE_RETRY_MS: i64 = 128;
+
 pub(super) fn render_layers(
     graphics: &mut RasterHost,
     submission: &mut FrameSubmission,
@@ -259,12 +264,7 @@ pub(super) fn render_layers(
         .map_or_else(ScheduleTiming::default, |mut schedule| {
             schedule.present_start_ns = present_start_ns;
             schedule.submit_done_ns = stats.submit_done.map(mono_ns_at);
-            schedule.present_done_ns = mono_ns_at(present_done);
-            schedule.missed_vsync = schedule.budget_ns > 0
-                && schedule
-                    .present_done_ns
-                    .saturating_sub(schedule.vsync_ns.unwrap_or(schedule.ui_start_ns))
-                    > schedule.budget_ns;
+            schedule.finish_present(mono_ns_at(present_done));
             schedule
         });
     let timing = FrameTiming {
@@ -287,6 +287,8 @@ pub(super) fn render_layers(
         semantics_ms: phase.semantics_ms,
         submit_ms,
         present_ms,
+        presented: matches!(presented, Ok(Presented::Continue)),
+        present_error,
         shapes_built: shapes.built,
         shapes_measure_hit: shapes.measure_hit,
         shapes_measure_miss: shapes.measure_miss,
@@ -308,6 +310,9 @@ pub(super) fn render_layers(
         gpu_pending: false,
         renderer_work,
     };
+    if let Some(hub) = &submission.telemetry {
+        crate::timing::record_frame(hub, &timing, &phase);
+    }
     finish_present(graphics, submission, output, presented, present_error)
 }
 
@@ -328,6 +333,20 @@ fn finish_present(
     presented: Result<Presented, raster::Status>,
     present_error: Option<raster::Status>,
 ) -> Result<RasterOutput, BootError> {
+    if present_error == Some(raster::Status::ResourcesPending) {
+        let delay = graphics
+            .resource_retry_delay_ms
+            .map_or(RESOURCE_RETRY_MS, |previous| {
+                (previous * 2).min(MAX_RESOURCE_RETRY_MS)
+            });
+        graphics.resource_retry_delay_ms = Some(delay);
+        graphics.needs_present = true;
+        graphics.frame_retry_at =
+            Some(crate::timing::ms_i64(graphics.clock.monotonic_ms()).saturating_add(delay));
+        output.again = false;
+        return Ok(output);
+    }
+    graphics.resource_retry_delay_ms = None;
     let number = submission.number;
     if present_error == Some(raster::Status::DeviceLost) {
         recover_device(graphics)?;

@@ -9,7 +9,7 @@
 
 use super::node::{DragClaim, Hit, TransformGeom};
 use super::{NodeId, Tree};
-use crate::motion::{ScrollAccept, ScrollAxis};
+use crate::motion::{OverscrollMode, ScrollAccept, ScrollAxis};
 
 const SCALE_EPSILON: f32 = 1.0e-4;
 
@@ -454,11 +454,10 @@ impl Tree {
     /// Scroll that should take a drag or a wheel sample.
     ///
     /// A declared axis looks only at its own component. `Both` still picks the
-    /// larger delta. `Never` is skipped. `Always` claims that axis even at the
-    /// edge. `Content` needs room in the drag direction. When nothing can move,
-    /// a drag still locks the innermost `Both` scroll that overflows, so the
-    /// gesture does not become a click. A declared axis does not use that
-    /// fallback: edge capture is `ScrollAccept::Always`. A wheel does not lock.
+    /// larger delta. `Content` needs room in the drag direction. `Overflow`
+    /// also accepts direct drags at an elastic edge with a scrollable range.
+    /// `Always` accepts even empty scrolls. If nothing can move, a drag can
+    /// still lock the innermost overflowing `Both` scroll to suppress clicks.
     pub(super) fn scroll_for(
         &self,
         start: NodeId,
@@ -478,7 +477,15 @@ impl Tree {
             if node.is_scroll() && !self.scroll_held_by_other(id, pointer) {
                 let (axis, accept) = node
                     .scroll_geom()
-                    .map(|geom| (geom.axis, geom.physics.accept))
+                    .map(|geom| {
+                        let mut accept = geom.physics.accept;
+                        if accept == ScrollAccept::Overflow
+                            && (!lock_at_edge || geom.physics.overscroll == OverscrollMode::Clamp)
+                        {
+                            accept = ScrollAccept::Content;
+                        }
+                        (geom.axis, accept)
+                    })
                     .unwrap_or((ScrollAxis::Both, ScrollAccept::Content));
                 if accept != ScrollAccept::Never {
                     if self.can_consume(id, axis, accept, dx, dy) {
@@ -503,17 +510,8 @@ impl Tree {
     }
 
     fn overflows(&self, id: NodeId, horizontal: bool) -> bool {
-        let Some(node) = self.get(id) else {
-            return false;
-        };
-        let Some((content_w, content_h)) = self.scroll_content(id) else {
-            return false;
-        };
-        if horizontal {
-            content_w > node.w + 0.5
-        } else {
-            content_h > node.h + 0.5
-        }
+        let (max_x, max_y) = self.scroll_limits(id);
+        if horizontal { max_x > 0.5 } else { max_y > 0.5 }
     }
 
     /// `dx` and `dy` use drag sign: positive moves the content with the finger.
@@ -525,54 +523,37 @@ impl Tree {
         dx: f32,
         dy: f32,
     ) -> bool {
-        match accept {
-            ScrollAccept::Never => false,
-            ScrollAccept::Always => match axis {
-                ScrollAxis::Vertical => dy != 0.0,
-                ScrollAxis::Horizontal => dx != 0.0,
-                ScrollAxis::Both => true,
-            },
-            ScrollAccept::Content => match axis {
-                ScrollAxis::Vertical => self.room_along(id, false, dy),
-                ScrollAxis::Horizontal => self.room_along(id, true, dx),
-                ScrollAxis::Both => {
-                    if dx.abs() >= dy.abs() {
-                        self.room_along(id, true, dx)
-                    } else {
-                        self.room_along(id, false, dy)
-                    }
-                }
-            },
-        }
+        let horizontal = match axis {
+            ScrollAxis::Horizontal => true,
+            ScrollAxis::Vertical => false,
+            ScrollAxis::Both => dx.abs() >= dy.abs(),
+        };
+        let delta = if horizontal { dx } else { dy };
+        delta != 0.0
+            && match accept {
+                ScrollAccept::Never => false,
+                ScrollAccept::Always => true,
+                ScrollAccept::Content => self.room_along(id, horizontal, delta),
+                ScrollAccept::Overflow => self.overflows(id, horizontal),
+            }
     }
 
     fn room_along(&self, id: NodeId, horizontal: bool, delta: f32) -> bool {
-        if delta == 0.0 {
-            return false;
-        }
-        let Some(node) = self.get(id) else {
+        let Ok((offset_x, offset_y)) = self.scroll_offset(id) else {
             return false;
         };
-        let Some((content_w, content_h)) = self.scroll_content(id) else {
-            return false;
-        };
-        let (offset_x, offset_y) = node.scroll_offset();
-        if horizontal {
-            if content_w <= node.w + 0.5 {
-                return false;
-            }
-            if delta > 0.0 {
-                offset_x > 0.5
-            } else {
-                offset_x + node.w < content_w - 0.5
-            }
-        } else if content_h <= node.h + 0.5 {
-            false
-        } else if delta > 0.0 {
-            offset_y > 0.5
+        let (max_x, max_y) = self.scroll_limits(id);
+        let (offset, max) = if horizontal {
+            (offset_x, max_x)
         } else {
-            offset_y + node.h < content_h - 0.5
-        }
+            (offset_y, max_y)
+        };
+        max > 0.5
+            && if delta > 0.0 {
+                offset > 0.5
+            } else {
+                offset < max - 0.5
+            }
     }
 
     pub(super) fn scroll_content(&self, id: NodeId) -> Option<(f32, f32)> {

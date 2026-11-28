@@ -52,7 +52,7 @@ export function SliceTable<T extends { id: string }>(props: {
     }
   });
 
-  return <View style={{ flex: 1, minHeight: 0, minWidth: 0 }}>
+  return <View style={{ flex: 1, minHeight: 0, minWidth: 0, position: "relative" }}>
     <ScrollArea
       style={{ flex: 1, minHeight: 0, minWidth: 0 }}
       viewportRef={node => { viewport = node; }}

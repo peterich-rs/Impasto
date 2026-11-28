@@ -10,10 +10,10 @@ use super::{
     Acks, FramePipeline, FrameSubmission, Inbox, RasterCompletion, RasterHost, RasterPort,
     RunnerSlot, UiHost, arm, compositor_animation, elapsed_ms, end_frame, fault_followup,
     layer_tree_line, ms_to_ns, next_frame_number, raster_frame, refresh_wake, session_call,
-    surface_cmds,
+    surface_cmds, target_present_ns,
 };
 use super::{issue_list, schedule_gpu_poll, write_inspect};
-use crate::diagnostics::telemetry::{ScheduleTiming, mono_ns, mono_ns_at};
+use crate::diagnostics::telemetry::{FrameTrigger, ScheduleTiming, mono_ns, mono_ns_at};
 use crate::error::BootError;
 use crate::input::FrameInput;
 
@@ -70,15 +70,16 @@ pub(super) fn on_frame(
     }
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     if let Some(session) = runtime.session.as_mut() {
-        session.begin_repaint_frame(
-            runtime
-                .telemetry
-                .as_deref()
-                .is_some_and(crate::diagnostics::TelemetryHub::tracks_repaints),
-            runtime.frame_number,
-        );
+        let tracks_repaints = runtime
+            .telemetry
+            .as_deref()
+            .is_some_and(crate::diagnostics::TelemetryHub::tracks_repaints);
+        session.begin_repaint_frame(tracks_repaints, runtime.frame_number);
+        if tracks_repaints && let Some(schedule) = schedule.as_mut() {
+            schedule.repainted_view_count = Some(0);
+        }
     }
-    let (paused, gesture_ms) = deliver_frame_input(runtime);
+    let (paused, gesture_ms) = deliver_frame_input(runtime, time);
     let session_started = Instant::now();
     let Some(SessionFrame {
         again,
@@ -170,11 +171,28 @@ pub(super) fn on_frame(
     submit_frame(runtime, submission, raster_admitted)
 }
 
+fn raster_needed(runtime: &UiHost, submission: &FrameSubmission) -> bool {
+    submission.layers_changed
+        || submission.placements_changed
+        || !submission.reloads.is_empty()
+        || submission.census.is_some()
+        || submission.again
+        || submission.animated_effects
+        || submission.gpu_views
+        || runtime.raster_dirty
+        || runtime.present_retry_at.is_some()
+        || runtime.frames.pending.is_some()
+}
+
 fn submit_frame(
     runtime: &mut UiHost,
     submission: FrameSubmission,
     raster_admitted: bool,
 ) -> Result<bool, BootError> {
+    if !raster_needed(runtime, &submission) {
+        skipped_frame("unchanged_ui");
+        return Ok(end_frame(runtime, false, false));
+    }
     let again = submission.again;
     let compositor_epoch = submission.compositor_epoch;
     if !raster_admitted {
@@ -182,6 +200,7 @@ fn submit_frame(
         runtime.frames.keep_latest(submission);
         return Ok(end_frame(runtime, false, false));
     }
+    runtime.raster_dirty = false;
     let submission = if runtime.frames.pending.is_some() {
         runtime.frames.keep_latest(submission);
         if let Some(pending) = runtime.frames.pending.take() {
@@ -325,6 +344,9 @@ fn finish_raster_frame(
     }
     runtime.active_surface = surface.filter(|&id| runtime.inbox.admits_surface(id));
     runtime.present_retry_at = retry_at;
+    if output.again || output.gpu_pending || retry_at.is_some() {
+        runtime.raster_dirty = true;
+    }
     if output.shown {
         if submission.interaction == runtime.interaction {
             runtime.interaction = None;
@@ -385,7 +407,13 @@ fn frame_schedule(
             ui_start_ns.saturating_sub(ms_to_ns(queued_ms))
         });
         ScheduleTiming {
+            trigger: if from_vsync {
+                FrameTrigger::Vsync
+            } else {
+                FrameTrigger::Wake
+            },
             vsync_ns,
+            target_present_ns: vsync_ns.and_then(|base_ns| target_present_ns(base_ns, time)),
             ui_start_ns,
             topology: Some(runtime.queue_placement),
             in_flight_depth: u32::try_from(runtime.frames.in_flight).ok(),
@@ -395,8 +423,11 @@ fn frame_schedule(
     })
 }
 
-fn deliver_frame_input(runtime: &mut UiHost) -> (bool, f64) {
+fn deliver_frame_input(runtime: &mut UiHost, time: FrameTime) -> (bool, f64) {
     let frame = runtime.input.begin_frame();
+    if let Some(session) = runtime.session.as_mut() {
+        session_call(|| session.prepare_frame_input(time));
+    }
     if let Some(metrics) = frame.metrics {
         runtime.point_scale = metrics.device_pixel_ratio;
         if let Some(session) = runtime.session.as_mut() {
@@ -489,10 +520,9 @@ fn run_session(
         Ok(mut output) => {
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
             if let Some(hub) = runtime.telemetry.as_ref() {
-                if let Some(schedule) = schedule {
-                    schedule.repainted_view_count = output.repaints.as_ref().map_or(0, |batch| {
-                        u32::try_from(batch.total_repainted_views).unwrap_or(u32::MAX)
-                    });
+                if let (Some(schedule), Some(batch)) = (schedule.as_mut(), &output.repaints) {
+                    schedule.repainted_view_count =
+                        Some(u32::try_from(batch.total_repainted_views).unwrap_or(u32::MAX));
                 }
                 hub.note_repaints(output.repaints.take(), session.take_picked_view());
                 if let Some(tree) = output.layers.as_ref().or(runtime.latest.as_ref()) {

@@ -90,8 +90,11 @@ export function InteractiveCanvas(props: {
   // reads the completed projection while the Canvas recorder owns the scene.
   createTrackedEffect(() => {
     const { width, height } = size();
-    palette = colors();
-    projected = width > 0 && height > 0 ? props.project(width, height) : undefined;
+    const nextPalette = colors();
+    const nextPlot = width > 0 && height > 0 ? props.project(width, height) : undefined;
+    if (nextPlot === projected && nextPalette === palette) return;
+    palette = nextPalette;
+    projected = nextPlot;
     binding?.invalidate();
   });
   const pointer = () => {
@@ -119,6 +122,7 @@ export function InteractiveCanvas(props: {
     onDoubleTap={() => props.onReset?.()}>
     <Canvas
       ref={element => { node = element; }}
+      deferWhenOffscreen
       style={{ width: "100%", height: "100%" }}
       controller={value => { binding = value; }}
       onDrawError={error => {

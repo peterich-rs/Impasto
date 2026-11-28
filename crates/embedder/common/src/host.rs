@@ -1033,6 +1033,7 @@ pub(crate) struct UiHost {
     wake: WakeTimer,
     dump_list: bool,
     present_retry_at: Option<i64>,
+    raster_dirty: bool,
     listeners: Vec<Box<dyn crate::timing::FrameListener>>,
     inspect: Option<std::path::PathBuf>,
     hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
@@ -1226,14 +1227,14 @@ fn open_ui(
                         |graphics| {
                             let ready = graphics.surfaces.is_open()
                                 && graphics.raster.borrow_mut().collect_resources();
-                            graphics.needs_present |= ready;
+                            if ready {
+                                graphics.needs_present = true;
+                                graphics.frame_retry_at = None;
+                                graphics.resource_retry_delay_ms = None;
+                            }
                             ready
                         },
-                        |runtime, ready| {
-                            if ready && !runtime.input.is_paused() {
-                                arm(runtime);
-                            }
-                        },
+                        resource_ready,
                     );
                     Ok(false)
                 }));
@@ -1258,6 +1259,7 @@ fn open_ui(
             present_failures: 0,
             device_recoveries: 0,
             frame_retry_at: None,
+            resource_retry_delay_ms: None,
             clock: raster_clock,
             gpu: Gpu::Live,
             last_step: None,
@@ -1448,6 +1450,7 @@ fn open_ui(
         wake: WakeTimer::new(runners.ui, Arc::clone(inbox)),
         dump_list: boot.dump_list,
         present_retry_at: None,
+        raster_dirty: true,
         listeners: frame_listeners(),
         inspect: boot.inspect,
         hub: boot.devtools.clone(),
@@ -1491,6 +1494,7 @@ fn update_source(runtime: &mut UiHost, patch: bool, source: &str) -> Result<&'st
         }
         runtime.input.reset_for_source_update();
         runtime.revision = runtime.revision.wrapping_add(1);
+        runtime.raster_dirty = true;
         runtime.graphics.post(|graphics| {
             graphics.raster.borrow_mut().invalidate_pictures();
             graphics.installed = None;
@@ -1794,6 +1798,17 @@ fn layer_tree_line(tree: &engine::scene::LayerTree) -> String {
     )
 }
 
+fn target_present_ns(base_ns: u64, time: FrameTime) -> Option<u64> {
+    // Platform display timestamps and the process clock can have different origins.
+    let lead_ms = time.target_ms - time.vsync_ms;
+    let lead_ms = if lead_ms > 0.0 && lead_ms <= 1_000.0 {
+        lead_ms
+    } else {
+        time.interval_ms
+    };
+    (lead_ms.is_finite() && lead_ms > 0.0).then(|| base_ns.saturating_add(ms_to_ns(lead_ms)))
+}
+
 fn ms_to_ns(ms: f64) -> u64 {
     Duration::try_from_secs_f64(ms / 1_000.0)
         .ok()
@@ -1841,6 +1856,17 @@ fn refresh_wake(runtime: &mut UiHost) {
     runtime
         .wake
         .set(deadline.filter(|_| !runtime.frames.waiting));
+}
+
+fn resource_ready(runtime: &mut UiHost, ready: bool) {
+    if ready {
+        runtime.raster_dirty = true;
+        runtime.present_retry_at = None;
+        refresh_wake(runtime);
+        if !runtime.input.is_paused() {
+            arm(runtime);
+        }
+    }
 }
 
 struct WakeTimer {

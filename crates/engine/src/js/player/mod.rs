@@ -546,6 +546,13 @@ impl Session for JsSession {
         }
     }
 
+    fn prepare_frame_input(&mut self, time: crate::session::FrameTime) {
+        self.inner
+            .tree
+            .borrow_mut()
+            .set_motion_clock(time.target_ms);
+    }
+
     fn pointer(&mut self, event: crate::input::PointerEvent) {
         self.pointer_moves(event, &[]);
     }
@@ -1142,8 +1149,36 @@ impl Session for JsSession {
                             drop(tree);
                             return self.hold_layout(message);
                         }
+                        ran_layout = true;
+                    }
+                    Ok(true) => {
+                        ran_layout = true;
                     }
                     _ => {}
+                }
+            }
+            if ran_layout {
+                let hover_gestures = inner.tree.borrow_mut().refresh_hover();
+                if !hover_gestures.is_empty() {
+                    if let Err(message) = dispatch_gestures(host, hover_gestures) {
+                        self.note_script_error(message);
+                    }
+                    if let Err(error) = self.run_reactive() {
+                        return self.hold_frame(error);
+                    }
+                    let mut tree = inner.tree.borrow_mut();
+                    if let Err(error) = tree.flush_styles() {
+                        let message = error.to_string();
+                        drop(tree);
+                        return self.hold_layout(message);
+                    }
+                    if tree.needs_layout()
+                        && let Err(error) = tree.layout()
+                    {
+                        let message = error.to_string();
+                        drop(tree);
+                        return self.hold_layout(message);
+                    }
                 }
             }
             let canvas_stats = if paused {

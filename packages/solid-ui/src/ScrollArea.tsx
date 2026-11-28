@@ -47,8 +47,9 @@ export type ScrollPhysics = {
     align?: "start" | "center" | "end";
   };
   chain?: boolean;
-  /** `content` yields at the edge. `always` keeps the drag and can rubber-band. `never` passes the drag to a parent. */
-  accept?: "content" | "always" | "never";
+  /** `overflow` allows an elastic edge when content is scrollable. `content` yields at the edge.
+   * `always` also accepts drags on short content. `never` passes the drag to a parent. */
+  accept?: "content" | "always" | "never" | "overflow";
 };
 
 /** Asymptotic band, 500ms coast, and a critically damped return. */
@@ -62,8 +63,8 @@ export const bouncing: ScrollPhysics = {
   overscroll: "rubber",
   spring: {
     // Match the engine's default overscroll spring.
-    stiffness: 256,
-    damping: 32,
+    stiffness: 484,
+    damping: 44,
   },
   snap: {
     stiffness: 220,
@@ -83,14 +84,15 @@ function acceptCode(accept: ScrollPhysics["accept"]): number {
   if (accept === "never") {
     return 2;
   }
+  if (accept === "overflow") {
+    return 3;
+  }
   return 0;
 }
 
 /**
- * A scroller on one axis. The default is vertical, and `accept` is always, so
- * an edge drag stays here and can rubber-band. Pass `horizontal` for a pager.
- * `content` yields at the edge. Drag, wheel, and clamp run on the scroll
- * controller. After release, `core` coasts on the declared axis.
+ * Defaults to a vertical scroller with an elastic edge when content overflows.
+ * Pass `horizontal` for a pager, or set `accept: "always"` to pull short content.
  */
 export function ScrollArea(props: ScrollAreaProps): NodeHandle {
   const ctrl = untrack(() => props.controller) ?? createScrollController();
@@ -138,7 +140,7 @@ export function ScrollArea(props: ScrollAreaProps): NodeHandle {
       align(physics.snapX?.align),
       physics.snapY?.interval ?? 0,
       align(physics.snapY?.align),
-      acceptCode(physics.accept ?? "always"),
+      acceptCode(physics.accept ?? "overflow"),
       decayKind,
       physics.snap.stiffness,
       physics.snap.damping,

@@ -8,7 +8,11 @@ use super::node::Kind;
 use super::{FocusDirection, Gesture, NodeId, Tree};
 use crate::{
     Error,
-    input::{Button, Phase, PointerEvent, PointerId, PointerKind, PointerSample, drag_slop},
+    input::{
+        Button, Phase, PointerEvent, PointerId, PointerKind, PointerSample, ScrollPhase,
+        VelocityRing, drag_slop,
+    },
+    motion::{AnimProp, ScrollPhase as MotionPhase},
 };
 
 /// Routes captured at pointer down. Not a gesture contest: one pointer has one route.
@@ -17,6 +21,8 @@ pub(super) struct PointerTable {
     pub(super) routes: HashMap<PointerId, PointerRoute>,
     /// Scroll nodes that already have a locked pointer. A second finger does not join.
     pub(super) scroll_locks: HashMap<NodeId, PointerId>,
+    wheel_scroll: WheelScroll,
+    wheel_velocity: WheelVelocity,
     pub(super) hovered: Option<NodeId>,
     /// Leave gestures produced by a structure change, delivered on the next pointer or remove.
     pub(super) pending: Vec<Gesture>,
@@ -31,11 +37,49 @@ impl Default for PointerTable {
         Self {
             routes: HashMap::new(),
             scroll_locks: HashMap::new(),
+            wheel_scroll: WheelScroll::Idle,
+            wheel_velocity: WheelVelocity::default(),
             hovered: None,
             pending: Vec::new(),
             pending_tap: None,
             pointer_at: (0.0, 0.0),
         }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+enum WheelScroll {
+    #[default]
+    Idle,
+    Dragging(NodeId),
+    /// Only a release inside the scroll range may accept system momentum.
+    Momentum {
+        id: NodeId,
+        sample_ms: f64,
+    },
+}
+
+impl WheelScroll {
+    fn target(self) -> Option<NodeId> {
+        match self {
+            Self::Idle => None,
+            Self::Dragging(id) | Self::Momentum { id, .. } => Some(id),
+        }
+    }
+}
+
+#[derive(Default)]
+struct WheelVelocity {
+    x: f32,
+    y: f32,
+    samples: VelocityRing,
+}
+
+impl WheelVelocity {
+    fn push(&mut self, dx: f32, dy: f32, time_ms: f64) {
+        self.x += dx;
+        self.y += dy;
+        self.samples.push(self.x, self.y, time_ms);
     }
 }
 
@@ -107,7 +151,7 @@ pub(super) struct DragState {
     pub(super) origin_y: f32,
     pub(super) last_x: f32,
     pub(super) last_y: f32,
-    pub(super) velocity: crate::input::VelocityRing,
+    pub(super) velocity: VelocityRing,
     /// One "scroll not claimed" note per press. Later moves stay quiet.
     miss_noted: bool,
     /// Last time a locked drag logged an offset rebase.
@@ -311,7 +355,7 @@ impl Tree {
         let scroll = hit.and_then(|id| self.drag_of(id));
         route.pressed = pressed;
         if pressed.is_some() || scroll.is_some() {
-            let mut velocity = crate::input::VelocityRing::new();
+            let mut velocity = VelocityRing::new();
             velocity.push(event.x, event.y, event.time_ms);
             route.drag = Some(DragState {
                 hit,
@@ -624,7 +668,8 @@ impl Tree {
         if let Some(watch) = route.long_press.as_mut() {
             watch.cancelled = true;
         }
-        let (ox, oy) = self.scroll_offset(scroll).unwrap_or((0.0, 0.0));
+        let (_, oy) = self.scroll_offset(scroll).unwrap_or((0.0, 0.0));
+        let (raw_x, raw_y) = self.unclamped_scroll_offset(scroll);
         let phase = self
             .scroll_phase(scroll)
             .map(|phase| phase.name())
@@ -639,8 +684,8 @@ impl Tree {
             offset_y = oy,
             "scroll locked"
         );
-        drag.desired_x = ox - dx;
-        drag.desired_y = oy - dy;
+        drag.desired_x = raw_x - dx;
+        drag.desired_y = raw_y - dy;
         let desired_x = drag.desired_x;
         let desired_y = drag.desired_y;
         if let Ok(sample) = self.apply_drag_desired(scroll, desired_x, desired_y) {
@@ -963,22 +1008,141 @@ impl Tree {
     }
 
     pub(super) fn pointer_wheel(&mut self, event: PointerEvent) -> Vec<Gesture> {
-        let Some(hit) = self.hit_root(event.x, event.y) else {
-            return Vec::new();
+        let wheel = match event.scroll_phase {
+            ScrollPhase::MayBegin => None,
+            ScrollPhase::Began => {
+                self.finish_wheel_scroll();
+                self.drag_wheel(event)
+            }
+            ScrollPhase::Changed => self.drag_wheel(event),
+            ScrollPhase::Ended => self.release_wheel(event),
+            ScrollPhase::Cancelled => {
+                if matches!(self.arena.wheel_scroll, WheelScroll::Dragging(_)) {
+                    self.finish_wheel_scroll();
+                }
+                None
+            }
+            ScrollPhase::MomentumBegan | ScrollPhase::MomentumChanged => self.coast_wheel(event),
+            ScrollPhase::MomentumEnded => {
+                if matches!(self.arena.wheel_scroll, WheelScroll::Momentum { .. }) {
+                    self.finish_wheel_scroll();
+                }
+                None
+            }
+            ScrollPhase::Discrete => {
+                self.finish_wheel_scroll();
+                self.step_wheel(event)
+            }
         };
-        // Wheel sign is opposite the finger: positive dy increases the offset.
-        // Only the scroll's declared axis is forwarded.
-        let Some(id) = self.scroll_for(hit, -event.dx, -event.dy, None, false) else {
-            return Vec::new();
+        wheel.into_iter().collect()
+    }
+
+    fn drag_wheel(&mut self, event: PointerEvent) -> Option<Gesture> {
+        let id = match self.arena.wheel_scroll {
+            WheelScroll::Idle => {
+                let hit = self.hit_root(event.x, event.y)?;
+                let id = self.scroll_for(hit, -event.dx, -event.dy, None, true)?;
+                self.arena.wheel_scroll = WheelScroll::Dragging(id);
+                self.arena.wheel_velocity = WheelVelocity::default();
+                self.cancel_scroll_motion(id);
+                self.note_scroll_phase(id, MotionPhase::Dragging, 0.0, 0.0);
+                id
+            }
+            WheelScroll::Dragging(id) => id,
+            WheelScroll::Momentum { .. } => return None,
         };
         let (dx, dy) = self.axis_of(id).filter(event.dx, event.dy);
+        self.arena.wheel_velocity.push(dx, dy, event.time_ms);
         if dx == 0.0 && dy == 0.0 {
-            return Vec::new();
+            return None;
         }
-        let (x, y) = self.scroll_offset(id).unwrap_or((0.0, 0.0));
-        let _ = self.resolve_scroll(id, x + dx, y + dy);
+        self.resolve_wheel_drag(id, dx, dy);
+        Some(Gesture::Wheel(id, dx, dy))
+    }
+
+    fn release_wheel(&mut self, event: PointerEvent) -> Option<Gesture> {
+        let WheelScroll::Dragging(id) = self.arena.wheel_scroll else {
+            return None;
+        };
+        // Some devices deliver the last contact delta with the release.
+        let wheel = self.drag_wheel(event);
+        self.arena.wheel_scroll = WheelScroll::Idle;
+        let (x, y) = self.overscroll(id).ok()?;
+        if x != 0.0 || y != 0.0 {
+            let (vx, vy) = self.arena.wheel_velocity.samples.velocity_at(event.time_ms);
+            self.arm_wheel_return(id, vx, vy);
+        } else {
+            self.arena.wheel_scroll = WheelScroll::Momentum {
+                id,
+                sample_ms: event.time_ms,
+            };
+        }
+        self.sync_scroll_phase(id);
+        wheel
+    }
+
+    fn coast_wheel(&mut self, event: PointerEvent) -> Option<Gesture> {
+        let WheelScroll::Momentum { id, sample_ms } = self.arena.wheel_scroll else {
+            return None;
+        };
+        if self.has_overscroll_motion(id) {
+            self.finish_wheel_scroll();
+            return None;
+        }
+        let (x, y) = self.scroll_offset(id).ok()?;
+        let (max_x, max_y) = self.scroll_limits(id);
+        let (dx, dy) = self.axis_of(id).filter(event.dx, event.dy);
+        let dx = if max_x > 0.5 { dx } else { 0.0 };
+        let dy = if max_y > 0.5 { dy } else { 0.0 };
+        self.arena.wheel_scroll = WheelScroll::Momentum {
+            id,
+            sample_ms: event.time_ms,
+        };
+        if dx == 0.0 && dy == 0.0 {
+            return None;
+        }
+        let (next_x, next_y) = (x + dx, y + dy);
+        let (nx, ny) = super::layout::rubber_band(next_x, next_y, max_x, max_y);
+        let _ = self.resolve_scroll(id, nx, ny);
+
+        // AppKit timestamps measure incoming deltas even when several arrive in
+        // one UI frame. Bound very short intervals from coalesced samples.
+        let dt = crate::cast::f32_from_f64((event.time_ms - sample_ms).max(1.0));
+        let (vx, vy) = (dx / dt, dy / dt);
+        if nx != next_x || ny != next_y {
+            if nx != next_x {
+                self.bounce_wheel(id, AnimProp::ScrollX, vx);
+            }
+            if ny != next_y {
+                self.bounce_wheel(id, AnimProp::ScrollY, vy);
+            }
+            self.arena.wheel_scroll = WheelScroll::Idle;
+            self.sync_scroll_phase(id);
+        } else {
+            self.note_scroll_phase(id, MotionPhase::Coasting, vx, vy);
+        }
+        Some(Gesture::Wheel(id, dx, dy))
+    }
+
+    fn finish_wheel_scroll(&mut self) {
+        if let Some(id) = std::mem::take(&mut self.arena.wheel_scroll).target() {
+            if !self.has_overscroll_motion(id) {
+                self.arm_wheel_return(id, 0.0, 0.0);
+            }
+            self.sync_scroll_phase(id);
+        }
+    }
+
+    fn step_wheel(&mut self, event: PointerEvent) -> Option<Gesture> {
+        let hit = self.hit_root(event.x, event.y)?;
+        let id = self.scroll_for(hit, -event.dx, -event.dy, None, false)?;
+        let (dx, dy) = self.axis_of(id).filter(event.dx, event.dy);
+        let (x, y) = self.scroll_offset(id).ok()?;
+        let (max_x, max_y) = self.scroll_limits(id);
+        let (nx, ny) = super::layout::rubber_band(x + dx, y + dy, max_x, max_y);
+        let _ = self.resolve_scroll(id, nx, ny);
         self.merge_wheel(id, dx, dy);
-        vec![Gesture::Wheel(id, dx, dy)]
+        Some(Gesture::Wheel(id, dx, dy))
     }
 
     /// A programmatic write during a drag continues from the requested position.
@@ -1027,6 +1191,14 @@ impl Tree {
             self.arena.hovered = None;
             self.invalidate_style_deps(crate::style::DepMask::HOVER);
             gestures.push(Gesture::Leave(hovered));
+        }
+        if self
+            .arena
+            .wheel_scroll
+            .target()
+            .is_some_and(|id| self.contains(root, id))
+        {
+            self.finish_wheel_scroll();
         }
         if self
             .arena
@@ -1105,6 +1277,20 @@ impl Tree {
             gestures.push(Gesture::Hover(id));
         }
         gestures
+    }
+
+    pub fn refresh_hover(&mut self) -> Vec<Gesture> {
+        let Some((x, y)) = self.cursor_pointer else {
+            return Vec::new();
+        };
+        if !self.laid_out {
+            return Vec::new();
+        }
+        let gestures = self.update_hover(x, y);
+        if !gestures.is_empty() {
+            self.invalidate_style_deps(crate::style::DepMask::HOVER);
+        }
+        self.finish_pointer(gestures)
     }
 
     pub(super) fn drain_pending(&mut self) -> Vec<Gesture> {

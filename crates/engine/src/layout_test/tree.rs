@@ -390,3 +390,37 @@ fn a_fraction_min_height_fills_half_the_parent() -> Result<(), crate::Error> {
     assert!((height - 50.0).abs() < 0.5, "min-height 50% gave {height}");
     Ok(())
 }
+
+#[test]
+fn clearing_absolute_children_from_relative_container_does_not_panic_on_layout()
+-> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 300.0, 200.0)?;
+    let root = tree.column(0.0)?;
+    let content = tree.column(0.0)?;
+    tree.set_position(content, false)?;
+    tree.add_child(root, content)?;
+
+    let row = tree.sized(300.0, 26.0)?;
+    tree.set_position(row, true)?;
+    tree.add_child(content, row)?;
+
+    let wrapper = tree.column(0.0)?;
+    let nested_abs = tree.sized(80.0, 20.0)?;
+    tree.set_position(nested_abs, true)?;
+    tree.add_child(wrapper, nested_abs)?;
+    tree.add_child(content, wrapper)?;
+
+    tree.layout()?;
+
+    tree.remove(content, row)?;
+    let _ = tree.discard(row)?;
+    tree.remove(content, wrapper)?;
+    let _ = tree.discard(wrapper)?;
+
+    // Mirror SliceTable becoming empty: content now has zero children while
+    // freed nodes used to sit in `content.hoisted`.
+    tree.layout()?;
+    assert_eq!(tree.rect(content)?.h, 0.0);
+    Ok(())
+}

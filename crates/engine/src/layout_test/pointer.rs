@@ -1257,3 +1257,38 @@ fn a_second_finger_does_not_join_a_locked_scroll() -> Result<(), crate::Error> {
     );
     Ok(())
 }
+
+#[test]
+fn unrelated_tree_mutation_keeps_stationary_hover() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 300.0, 100.0)?;
+    let root = tree.row(10.0)?;
+    let left_button = tree.pointer_region()?;
+    tree.set_size(left_button, 80.0, 30.0)?;
+    let right_pane = tree.column(0.0)?;
+    let log_row = tree.sized(100.0, 20.0)?;
+    tree.add_child(right_pane, log_row)?;
+    tree.add_child(root, left_button)?;
+    tree.add_child(root, right_pane)?;
+    tree.layout()?;
+
+    let hovered = tree.pointer(event(Phase::Move, 20.0, 15.0));
+    assert_eq!(hovered, vec![Gesture::Hover(left_button)]);
+
+    // Simulate an unrelated log row inserted into another pane while the mouse stays still.
+    let new_row = tree.sized(100.0, 20.0)?;
+    tree.add_child(right_pane, new_row)?;
+    tree.layout()?;
+    assert!(
+        tree.refresh_hover().is_empty(),
+        "stationary pointer still over left_button should not leave or re-enter"
+    );
+
+    // Widen a spacer before left_button so right_pane shifts under the cursor.
+    let spacer = tree.sized(100.0, 30.0)?;
+    tree.insert(root, spacer, Some(left_button))?;
+    tree.layout()?;
+    let moved = tree.refresh_hover();
+    assert_eq!(moved, vec![Gesture::Leave(left_button)]);
+    Ok(())
+}

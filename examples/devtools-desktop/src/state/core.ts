@@ -24,17 +24,20 @@ export function streamTicks(onError: (error: unknown) => void) {
   }
   void consume().catch(error => { if (!cancel.signal.aborted) onError(error); });
 
-  const revision = (key: "framesRev" | "repaintsRev" | "networkRev" | "logsRev" | "errorsRev" | "runtimeRev" | "resourcesRev" | "auditsRev") =>
+  const revision = (key: "framesRev" | "repaintsRev" | "networkRev" | "networkRecordsRev" | "logsRev" | "errorsRev" | "runtimeRev" | "resourcesRev" | "auditsRev" | "sessionRev" | "targetsRev") =>
     createMemo(() => tick()?.[key] ?? 0);
   return {
     tick,
     frame: revision("framesRev"),
     repaint: revision("repaintsRev"),
     network: revision("networkRev"),
+    networkRecords: revision("networkRecordsRev"),
     log: revision("logsRev"),
     error: revision("errorsRev"),
     runtime: revision("runtimeRev"),
     resource: revision("resourcesRev"),
     audit: revision("auditsRev"),
+    sessionRev: revision("sessionRev"),
+    targetsRev: revision("targetsRev"),
   };
 }

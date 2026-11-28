@@ -1,6 +1,6 @@
 //! Pointer samples stay in scene points. AppKit already reports those points.
 
-use engine::input::{Button, Modifiers, Phase, PointerEvent};
+use engine::input::{Button, Modifiers, Phase, PointerEvent, ScrollPhase};
 
 /// One AppKit sample before it is flipped into scene points.
 pub struct PointerSample {
@@ -9,6 +9,7 @@ pub struct PointerSample {
     pub local_y: f64,
     pub view_height: f64,
     pub time_ms: f64,
+    pub scroll_phase: ScrollPhase,
 }
 
 /// `local_x` and `local_y` are inside the content view, with the origin at the
@@ -50,6 +51,7 @@ pub fn pointer_event(
         modifiers,
         dx,
         dy,
+        scroll_phase: sample.scroll_phase,
         zoom: 0.0,
         pen: None,
     }
@@ -80,6 +82,7 @@ mod tests {
                 local_y: 108.0,
                 view_height: 180.0,
                 time_ms: 12.0,
+                scroll_phase: super::ScrollPhase::Discrete,
             },
             Button::Primary,
             Modifiers::empty(),

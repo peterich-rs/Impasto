@@ -4,7 +4,7 @@ use super::layout::{finite_number, nearest_offset, rubber_band};
 use super::node::Kind;
 use super::{Gesture, NodeId, Tree};
 use crate::Error;
-use crate::motion::{Band, OVERSCROLL_FACTOR};
+use crate::motion::Band;
 
 /// Offset and overscroll after [`Tree::resolve_scroll`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -15,8 +15,6 @@ pub struct ScrollSample {
     pub overscroll_y: f32,
 }
 
-/// Overscroll for a scroll that never had physics installed: the historical
-/// linear band.
 fn resting_spring(from: f32, to: f32, stiffness: f32, damping: f32) -> crate::motion::Spring {
     crate::motion::Spring {
         x0: from,
@@ -25,13 +23,6 @@ fn resting_spring(from: f32, to: f32, stiffness: f32, damping: f32) -> crate::mo
         stiffness,
         damping,
     }
-}
-
-fn default_stretch(over: f32, _dimension: f32) -> f32 {
-    Band::Linear {
-        factor: OVERSCROLL_FACTOR,
-    }
-    .stretch(over, 0.0)
 }
 
 impl Tree {
@@ -52,6 +43,39 @@ impl Tree {
             return Err(Error::WrongKind);
         }
         Ok(node.overscroll())
+    }
+
+    /// Unclamped desired offset matching current scroll offset plus unstretched overscroll.
+    pub(super) fn unclamped_scroll_offset(&self, id: NodeId) -> (f32, f32) {
+        self.unstretch_scroll(id, self.scroll_physics(id).unwrap_or_default().band)
+    }
+
+    fn unstretch_scroll(&self, id: NodeId, band: Band) -> (f32, f32) {
+        let Ok(node) = self.node(id) else {
+            return (0.0, 0.0);
+        };
+        let (ox, oy) = node.scroll_offset();
+        let (sx, sy) = node.overscroll();
+        (
+            ox + band.unstretch(sx, node.w),
+            oy + band.unstretch(sy, node.h),
+        )
+    }
+
+    pub(super) fn resolve_wheel_drag(&mut self, id: NodeId, dx: f32, dy: f32) {
+        let physics = self.scroll_physics(id).unwrap_or_default().for_trackpad();
+        let (x, y) = self.unstretch_scroll(id, physics.band);
+        let _ = self.resolve_scroll_with_physics(id, x + dx, y + dy, physics);
+    }
+
+    pub(super) fn has_overscroll_motion(&self, id: NodeId) -> bool {
+        self.motions.iter().any(|motion| {
+            motion.node == id
+                && matches!(
+                    motion.prop,
+                    crate::motion::AnimProp::OverscrollX | crate::motion::AnimProp::OverscrollY
+                )
+        })
     }
 
     /// Scroll paint offset in scene points. Does not run Taffy.
@@ -76,6 +100,17 @@ impl Tree {
         desired_x: f32,
         desired_y: f32,
     ) -> Result<ScrollSample, Error> {
+        let physics = self.scroll_physics(id).unwrap_or_default();
+        self.resolve_scroll_with_physics(id, desired_x, desired_y, physics)
+    }
+
+    fn resolve_scroll_with_physics(
+        &mut self,
+        id: NodeId,
+        desired_x: f32,
+        desired_y: f32,
+        physics: crate::motion::ScrollPhysics,
+    ) -> Result<ScrollSample, Error> {
         finite_number(desired_x)?;
         finite_number(desired_y)?;
         if self.node(id)?.kind != Kind::Scroll {
@@ -90,19 +125,19 @@ impl Tree {
             let node = self.node(id)?;
             (node.w, node.h)
         };
-        let physics = self.scroll_physics(id);
-        let stretch = |over: f32, dimension: f32| -> f32 {
-            match physics {
-                Some(physics) => physics.stretch(over, dimension),
-                None => default_stretch(over, dimension),
+        let stretch = |over: f32, dimension: f32, limit: f32| -> f32 {
+            if physics.accept == crate::motion::ScrollAccept::Overflow && limit <= 0.5 {
+                0.0
+            } else {
+                physics.stretch(over, dimension)
             }
         };
         let overscroll = if applying {
             None
         } else {
             Some(axis.filter(
-                stretch(desired_x - ox, view_w),
-                stretch(desired_y - oy, view_h),
+                stretch(desired_x - ox, view_w, max_x),
+                stretch(desired_y - oy, view_h, max_y),
             ))
         };
         let wrote = {
@@ -729,19 +764,36 @@ impl Tree {
     /// sign as pointer movement. A positive finger speed decreases offset, so
     /// the overscroll derivative is the negation times the band slope.
     pub(super) fn arm_overscroll_spring(&mut self, id: NodeId, finger_vx: f32, finger_vy: f32) {
+        let physics = self.scroll_physics(id).unwrap_or_default();
+        self.arm_scroll_return(id, (-finger_vx, -finger_vy), physics);
+    }
+
+    pub(super) fn arm_wheel_return(&mut self, id: NodeId, vx: f32, vy: f32) {
+        let physics = self.scroll_physics(id).unwrap_or_default().for_trackpad();
+        // Carry a fraction of contact velocity through the release. Bound the
+        // offset derivative before mapping it through the local band slope.
+        let release_velocity = |v: f32| (v * 0.35).clamp(-2.0, 2.0);
+        self.arm_scroll_return(id, (release_velocity(vx), release_velocity(vy)), physics);
+    }
+
+    fn arm_scroll_return(
+        &mut self,
+        id: NodeId,
+        (vx, vy): (f32, f32),
+        physics: crate::motion::ScrollPhysics,
+    ) {
         let Ok(node) = self.node(id) else {
             return;
         };
         let (x, y) = node.overscroll();
         let (view_w, view_h) = (node.w, node.h);
         let axis = self.axis_of(id);
-        let physics = self.scroll_physics(id).unwrap_or_default();
         if axis.allows_x() && x.abs() > f32::EPSILON {
             self.arm_overscroll_axis(
                 id,
                 crate::motion::AnimProp::OverscrollX,
                 x,
-                -finger_vx * physics.band.slope_at_stretch(x, view_w),
+                vx * physics.band.slope_at_stretch(x, view_w),
                 physics,
             );
         }
@@ -750,7 +802,7 @@ impl Tree {
                 id,
                 crate::motion::AnimProp::OverscrollY,
                 y,
-                -finger_vy * physics.band.slope_at_stretch(y, view_h),
+                vy * physics.band.slope_at_stretch(y, view_h),
                 physics,
             );
         }
@@ -985,31 +1037,62 @@ impl Tree {
     /// `sim_v` is the offset derivative, the same sign `Friction` used.
     fn bounce_fling(&mut self, id: NodeId, prop: crate::motion::AnimProp, sim_v: f32) -> bool {
         let physics = self.scroll_physics(id).unwrap_or_default();
+        self.bounce_at_edge(id, prop, sim_v, physics)
+    }
+
+    pub(super) fn bounce_wheel(
+        &mut self,
+        id: NodeId,
+        prop: crate::motion::AnimProp,
+        velocity: f32,
+    ) {
+        let physics = self.scroll_physics(id).unwrap_or_default().for_trackpad();
+        self.bounce_at_edge(id, prop, velocity, physics);
+    }
+
+    fn bounce_at_edge(
+        &mut self,
+        id: NodeId,
+        prop: crate::motion::AnimProp,
+        sim_v: f32,
+        physics: crate::motion::ScrollPhysics,
+    ) -> bool {
         if physics.overscroll == crate::motion::OverscrollMode::Clamp {
             return false;
         }
-        let (ox, oy) = self
-            .node(id)
-            .ok()
-            .map(|node| node.overscroll())
-            .unwrap_or((0.0, 0.0));
-        let (view_w, view_h) = self
-            .node(id)
-            .ok()
-            .map(|node| (node.w, node.h))
-            .unwrap_or((0.0, 0.0));
-        let (over_prop, x0, dimension) = if prop == crate::motion::AnimProp::ScrollX {
-            (crate::motion::AnimProp::OverscrollX, ox, view_w)
-        } else {
-            (crate::motion::AnimProp::OverscrollY, oy, view_h)
+        let Ok(node) = self.node(id) else {
+            return false;
         };
-        let v0 = sim_v * physics.band.slope(x0, dimension);
+        let (ox, oy) = node.overscroll();
+        let (max_x, max_y) = self.scroll_limits(id);
+        let (over_prop, x0, dimension, limit) = if prop == crate::motion::AnimProp::ScrollX {
+            (crate::motion::AnimProp::OverscrollX, ox, node.w, max_x)
+        } else {
+            (crate::motion::AnimProp::OverscrollY, oy, node.h, max_y)
+        };
+        if physics.accept == crate::motion::ScrollAccept::Overflow && limit <= 0.5 {
+            return false;
+        }
         if x0.abs() > f32::EPSILON {
             // Already past the wall. Pointer-up armed the return spring;
             // restarting it here would freeze the stretch on this sample.
             return false;
         }
-        if v0.abs() < 0.02 {
+        // From rest position, a critical spring peaks at v0 / (e * ω).
+        // Use the undamped energy bound for softer damping.
+        let omega = physics.overscroll_stiffness.sqrt();
+        let max_peak = (dimension * 0.15).min(72.0);
+        let gain = if physics.overscroll_damping >= 2.0 * omega {
+            std::f32::consts::E
+        } else {
+            1.0
+        };
+        let speed_limit = max_peak * omega * gain / 1000.0;
+        if !speed_limit.is_finite() || speed_limit <= 0.0 {
+            return false;
+        }
+        let v0 = (sim_v * physics.band.slope(0.0, dimension)).clamp(-speed_limit, speed_limit);
+        if !v0.is_finite() || v0.abs() < 0.02 {
             return false;
         }
         if self

@@ -52,7 +52,7 @@ export type NavigationIntent =
 
 ### 6 条核心因果穿透路径
 
-1. **Overview Live Audit → 异常现场**：点击任意诊断告警直接派发对应 `NavigationIntent`（如 `frame.jank_burst` → 跳 `Frames` 选中最慢帧；`view.repaint_hotspot` → 跳 `Views` 定位热点节点）。
+1. **Overview Live Audit → 异常现场**：点击任意诊断告警直接派发对应 `NavigationIntent`（如 `frame.jank_burst` → 跳 `Frames` 选中掉帧最多的帧；`view.repaint_hotspot` → 跳 `Views` 定位热点节点）。
 2. **Frames 掉帧柱 → 当帧重绘 View → 目标端高亮 → IDE 源码行**：在 Frames 页点击超预算红柱 → 右侧切到 `Repainted Views` 页签 → 点击 `FullPictureRebuild` 节点既可在目标端即时高亮（`setOverlay({ highlightNode })`），也可一键进入 `Views` 树定位并调用 `openSourceInEditor(...)`。
 3. **Frames 掉帧柱 → 当帧 JS 火焰图**：点击右侧 `JS & Reactive` 页签中的 `Open in Flamegraph` → 跳 `JS Runtime (flamegraph)` 并自动按该 `frameId` 过滤采样栈。
 4. **Frames `compositor_block` → 阻断节点**：帧详情展示 `compositorBlock.reason` 与 `compositorBlock.node` → 点击节点 ID 直接跳转 `Views` 树并高亮该阻断合成器的节点。
@@ -67,7 +67,7 @@ export type NavigationIntent =
 
 - **布局结构**：
   1. **顶部 KPI 紧凑指标条（6 格等宽横排，无厚重卡片套娃，1px 竖线分隔）**：
-     - `FPS`（实时帧率 + 目标刷新率）
+     - `Hitch`（每秒卡顿毫秒数、掉帧与呈现频次）
      - `Frame P95`（毫秒 + 超预算帧占比徽章）
      - `Compositor-Only`（纯合成快路径占比 %）
      - `JS Heap`（`memory_used_size` + 相对基线增减箭头）
@@ -86,7 +86,7 @@ export type NavigationIntent =
 
 - **动态订阅**：进入本页确保 `Frames` 激活；当切换右侧 `Repainted Views` 页签时按需增补 `Repaints`。
 - **布局结构**：
-  1. **顶部帧条带（`FrameStripChart`，高 `110pt`）**：展示最近帧柱，支持点击单帧、拖拽框选多帧对比均值、双指捏合缩放、工具栏内置 `Jump to Worst Jank` 按钮与 `Rec Trace`（`Stages` / `Detailed + JS Sampling`）录制控制。
+  1. **顶部帧条带（`FrameStripChart`，高 `110pt`）**：展示最近帧柱，支持点击单帧、拖拽框选多帧对比 Hitch、掉帧、频次和 P95、双指捏合缩放、工具栏内置 `Jump to Worst Jank` 按钮与 `Rec Trace`（`Stages` / `Detailed + JS Sampling`）录制控制。
   2. **主工作区（双视图切换）**：
      - **`Timeline (5 Lanes)`（默认）**：渲染 `LaneGanttChart`，展示选中帧的 `Platform / UI / Raster / IO / GPU` 5 泳道甘特瀑布；若当前帧属于已完成的 Trace Capture，自动调用 `loadFrameSpans` 展开完整嵌套 Span 并标注 `omitted_spans`（如有）；
      - **`Capture Summary`（录制完成后自动可用）**：展示本次录制总帧数、掉帧数、Span 丢失统计（`overwritten_spans` / `open_spans_at_stop`）、录制内慢帧排行榜，以及一键 `Export .pftrace` / `Open in Perfetto` 动作条。
@@ -187,7 +187,7 @@ export type NavigationIntent =
 |---|---|
 | `client` Mock WS v2 集成测试 | 启动本地 `TcpListener` 模拟 Agent v2：验证认证握手、7 通道增量推送与 `reset=true` 恢复、GPU 回填原地 patch、Binary Frame `NetBody`/`ViewSnapshot`/`TraceExport` 解码、断线后快照保留与新 PID 重连 |
 | `projection` 几何与命中测试 | 验证 `FrameStrip`、`5-Lane Gantt`、`Flamegraph`、`Treemap` 输出的 `Bytes` 长度均为 `32` 字节对齐倍数、坐标严格落在 `[0, width] × [0, height]`、且 `hit_test_*` 与绘制矩形坐标完全自洽 |
-| `analyzer` 算法单测 | 验证 `devtools-symbols` 堆栈还原、火焰图前缀合并与缩放归一化、`JsonIndex` 折叠/展开/搜索切片、7 条 `Live Audits` 规则边界触发、`bundle-size.json` schema v1 解析与 Squarified Treemap 面积守恒 |
+| `analyzer` 算法单测 | 验证 `devtools-symbols` 堆栈还原、火焰图前缀合并与缩放归一化、`JsonIndex` 折叠/展开/搜索切片、8 条 `Live Audits` 规则边界触发、`bundle-size.json` schema v1 解析与 Squarified Treemap 面积守恒 |
 | `archive` & `actions` 安全单测 | 验证 `.impasto-session` 导出→导入无损往返、gzip 超过 `128 MiB` 拒绝（防炸弹）、`open_source_in_editor` 拦截 `../` 路径穿越与非法编辑器名、`format_curl` 正确转义单引号且不还原脱敏头 |
 
 ### 4.2 仓库常规门禁与 macOS 自举验收
@@ -215,6 +215,6 @@ export type NavigationIntent =
      - 1px 分割线、预算红线、色板对比度、文字无截断重叠；
      - `col-resize` / `row-resize` / `pointer` / `grab` 光标形态切换；
    - 连续快速滚动 `gallery-solid` 列表制造高频帧与网络流量，同时用第二个 DevTools 实例连接 `devtools-desktop` 自身（自举观测），确认 **性能验收红线**：
-     - DevTools 桌面端在 `10 Hz` 通道持续推送下，自身 UI/JS 帧耗时 `< 1.0ms`、稳定满帧无掉帧；
+     - DevTools 桌面端在 `10 Hz` 通道持续推送下，自身 UI/JS 帧耗时目标为 `< 1.0ms`。滚动时核对帧预算与输入跟手度。静止时按需出帧，连续 500 ms 无成功呈现后显示 `Idle`。
      - 持续连接 `10 min` 后 DevTools 自身 JS 堆与 Rust 内存稳定在有界平台上，无泄漏爬升；
      - 关闭 `devtools-desktop` 后，目标 `gallery-solid` 自动清理 Overlay/Sampler Lease 且无僵尸 `adb forward` / `iproxy` 子进程残留。

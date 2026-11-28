@@ -11,7 +11,7 @@ use impasto::{
 
 mod types;
 use types::{
-    DiagError, Flags, FlagsPatch, FrameSample, GpuFrameTiming, LogLine, LogSource, NetEntry,
+    DiagError, Flags, FlagsPatch, FramePage, GpuFrameTiming, LogLine, LogSource, NetEntry,
     Platform, Versions,
 };
 
@@ -149,8 +149,12 @@ impl DevtoolsPlugin {
     pub fn network(&self, since: Option<f64>) -> Result<Page<NetEntry>, DevtoolsError> {
         self.read_page("network", since)
     }
-    pub fn frames(&self, since: Option<f64>) -> Result<Page<FrameSample>, DevtoolsError> {
-        self.read_page("frames", since)
+    pub fn frames(&self, since: Option<f64>) -> Result<FramePage, DevtoolsError> {
+        if self.source.is_some() {
+            self.query("frames", &[PluginValue::F64(since.unwrap_or_default())])
+        } else {
+            Ok(FramePage::default())
+        }
     }
     pub fn gpu_timing(&self, frame: f64) -> Result<Option<GpuFrameTiming>, DevtoolsError> {
         self.query("gpuTiming", &[PluginValue::F64(frame)])

@@ -2,16 +2,27 @@ import { View as HostView } from "@impasto/solid-renderer/host";
 /** Performance page: frame bars plus the selected frame's phase table. */
 import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { Button, Text, useTheme } from "@impasto/solid-ui";
-import { frames, store, traceResult, type FrameSample } from "../store.ts";
+import { frameSnapshot, frames, store, traceResult, type FrameSample } from "../store.ts";
+import { effectiveBudget, frameStageFlags, frameStageMs, summarizeFrames } from "../metrics.ts";
 const BAR_MAX = 96;
 
 /** Focused frame facts; each phase row is one line of the table. */
-function rowsOf(frame: FrameSample): [string, string][] {
+function rowsOf(frame: FrameSample, fallback: number): [string, string][] {
   const phase = frame.phases;
+  const budget = effectiveBudget(frame, fallback);
+  const flags = frameStageFlags(frame, fallback);
+  const duration = (ms: number | null | undefined) => ms == null ? "—" : `${ms.toFixed(2)} ms`;
+  const over = [flags.ui && "UI", flags.raster && "Raster", flags.gpu && "GPU"].filter(Boolean).join(" / ");
   const rows: [string, string][] = [
     ["帧号", String(frame.number)],
-    ["端到端 / 帧预算", `${frame.e2eMs.toFixed(2)} / ${frame.budgetMs.toFixed(2)} ms`],
-    ["UI / 排队 / Raster", `${frame.uiMs.toFixed(2)} / ${frame.queueMs.toFixed(2)} / ${frame.rasterMs.toFixed(2)} ms`],
+    ["触发源", frame.trigger],
+    ["阶段瓶颈", duration(frameStageMs(frame))],
+    ["UI / Raster / GPU", `${duration(frame.uiMs)} / ${duration(frame.rasterMs)} / ${duration(frame.gpuSpanMs)}`],
+    ["端到端 / 帧预算", `${duration(frame.e2eMs)} / ${budget > 0 ? duration(budget) : "—"}`],
+    ["目标截止 / 超支", `${duration(frame.targetLeadMs)} / ${duration(frame.deadlineOverrunMs)}`],
+    ["阶段超预算", over || "—"],
+    ["呈现", frame.presented ? "成功" : frame.skipReason ?? "失败"],
+    ["排队", duration(frame.queueMs)],
     ["Draw / Pass", `${frame.draws} / ${frame.passes}`],
     ["GPU", frame.gpuStatus],
     ["session", `${frame.sessionMs.toFixed(2)}ms`],
@@ -30,7 +41,7 @@ function rowsOf(frame: FrameSample): [string, string][] {
     ["cause", frame.layoutCause ?? ""],
   ];
   if (frame.compositorOnly) {
-    rows.splice(1, 0, ["合成线程", `Raster 托管 · ${Math.round(1000 / frame.budgetMs)} Hz`]);
+    rows.splice(1, 0, ["合成线程", `Raster 托管${budget > 0 ? ` · ${Math.round(1000 / budget)} Hz` : ""}`]);
   } else if (frame.compositorBlock) {
     const node = frame.compositorBlockNode ? ` · 节点 #${frame.compositorBlockNode}` : "";
     const hint = frame.compositorBlock === "scroll_callback"
@@ -59,13 +70,15 @@ export function PerformancePage() {
   const theme = useTheme();
   const [selected, setSelected] = createSignal<number>(-1);
   store.sampleFrames();
-  const peak = createMemo(() =>
-    frames().reduce(
-      (max, frame) =>
-        Math.max(max, frame.e2eMs),
-      0.01,
-    ),
-  );
+  const fallbackBudget = createMemo(() => {
+    const hz = frameSnapshot()?.refreshRate;
+    return hz && Number.isFinite(hz) && hz > 0 ? 1000 / hz : 0;
+  });
+  const stats = createMemo(() => {
+    const snapshot = frameSnapshot();
+    return summarizeFrames(snapshot?.entries ?? [], fallbackBudget(), snapshot);
+  });
+  const chartPeak = createMemo(() => frames().reduce((peak, frame) => Math.max(peak, frameStageMs(frame)), 0.01));
   const current = () => frames().find((frame) => frame.seq === selected());
   const gpu = createMemo(() => {
     const frame = current();
@@ -81,7 +94,6 @@ export function PerformancePage() {
     }, 200);
   };
   onCleanup(() => clearTimeout(poll));
-  const overCount = () => frames().filter((frame) => frame.overBudget).length;
   return (
     <HostView
       style={{
@@ -104,23 +116,23 @@ export function PerformancePage() {
           color: theme().color.textMuted,
         }}
       >
-        {frames().length} 帧 · 超预算 {overCount()} · 峰值 {peak().toFixed(1)}ms
+        Hitch {stats().hitchMsPerSec.toFixed(1)} ms/s · 掉帧 {stats().droppedFrames} · {stats().presentRateHz.toFixed(1)}/s · {stats().count} 帧 · 峰值 {stats().peakMs.toFixed(1)} ms
       </Text>
       <HostView
         style={{
           flexDirection: "row",
           gap: 1,
-          alignItems: "start",
+          alignItems: "end",
         }}
       >
         <For each={frames()}>
           {(frame) => {
-            const height = Math.max(2, Math.round((frame.e2eMs / peak()) * BAR_MAX));
+            const height = () => Math.max(2, Math.round((frameStageMs(frame) / chartPeak()) * BAR_MAX));
             return (
               <HostView onClick={() => { setSelected(frame.seq); refreshPending(); }} focusable={false}>
                 <HostView
                   style={{
-                    backgroundColor: frame.overBudget
+                    backgroundColor: frameStageFlags(frame, fallbackBudget()).any || !frame.presented
                       ? theme().color.danger
                       : theme().color.success,
                     borderRadius: 1,
@@ -129,7 +141,7 @@ export function PerformancePage() {
                   <HostView
                     style={{
                       width: 4,
-                      height: height,
+                      height: height(),
                     }}
                   />
                 </HostView>
@@ -160,7 +172,7 @@ export function PerformancePage() {
                 </HostView>
               )}
             </Show>
-            <For each={rowsOf(frame)}>
+            <For each={rowsOf(frame, fallbackBudget())}>
               {(row) => (
                 <Text
                   style={{

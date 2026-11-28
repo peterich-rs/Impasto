@@ -131,7 +131,12 @@ pub struct BinaryEnvelopeHeader {
 - **Script 与 Reactive（来自 `PhaseSample` & `FrameTrace`）**：`motion_ms`、`dispatch_ms`、`timer_ms`、`raf_ms`、`callback_ms`、`flush_ms`、`layout_cb_ms`、`sync_ms`、`semantics_ms`、`laywork_ms`、`layout_passes`、`layout_cause`、`updates`、`sets`、`nodes_created`、`ffi_batches`、`ffi_calls`、`style_resolves`、`repaint_boundaries_dirtied`；
 - **Text & Canvas 统计**：`text_reused`、`text_shaped`、`canvas_record_ms`、`canvas_prepare_ms`、`canvas_ops`、`canvas_segments`、`canvas_redraws`、`canvas_reused`；
 - **Raster 与 GPU 统计**：`draws`、`passes`、`layers`、`pictures`、`picture_rebuilt`、`picture_reused`、`textures`、`atlas_entries`、`atlas_hits`、`vertex_bytes`、`uniform_bytes`、`stop_bytes`、`extra_bytes`、`mesh_upload_bytes`、`atlas_upload_bytes`、`gpu { state, generation, frame_span_us, passes_sum_us, passes }`；
-- **帧级重绘与 JS 摘要**：`repainted_view_count`、`runtime_sample`（`promises` / `timers` / `requests` / `queued_events` / `queued_bytes` / `heap_bytes`）。
+- **帧级重绘与 JS 摘要**：开启重绘采集时记录 `repainted_view_count`。`runtime_sample` 包含 `promises`、`timers`、`requests`、`queued_events`、`queued_bytes` 和 `heap_bytes`。
+
+`at_ms` 使用目标进程的单调时钟，与日志、网络和 JS 采样共用原点。`presented` 记录宿主呈现调用是否成功，失败原因可见于 `present_error`。`present_ms` 覆盖整个呈现尝试，`surface_present_ms` 只计最终提交给表面的调用。
+
+帧记录包含 `trigger`、分阶段预算标记与 `input_events`。帧订阅批次携带 `sampled_at_ms`，供实时窗口按宿主时钟过滤历史帧。平台目标存在时，记录 `target_lead_ms` 与 `deadline_overrun_ms`。桌面端会话归档使用 schema 2。
+
 
 ---
 

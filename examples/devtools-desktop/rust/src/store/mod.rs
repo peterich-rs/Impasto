@@ -81,8 +81,15 @@ impl Recording {
         if let Some(frame) = self.frames.get(id) {
             return Some(std::borrow::Cow::Borrowed(frame));
         }
-        let item = self
-            .spans
+        let item = self.captured_frame(id)?;
+        let mut full = serde_json::to_value(FrameRecord::default()).ok()?;
+        full.as_object_mut()?.extend(item.as_object()?.clone());
+        let record = serde_json::from_value(full).ok()?;
+        Some(std::borrow::Cow::Owned(record))
+    }
+
+    fn captured_frame(&self, id: u64) -> Option<&Value> {
+        self.spans
             .get(&id)
             .and_then(|span| span.get("frame"))
             .or_else(|| {
@@ -90,11 +97,21 @@ impl Recording {
                     .as_array()?
                     .iter()
                     .find(|frame| frame["id"].as_u64() == Some(id))
-            })?;
-        let mut full = serde_json::to_value(FrameRecord::default()).ok()?;
-        full.as_object_mut()?.extend(item.as_object()?.clone());
-        let record = serde_json::from_value(full).ok()?;
-        Some(std::borrow::Cow::Owned(record))
+            })
+    }
+
+    pub(crate) fn frame_revision(&self, id: u64) -> Option<u64> {
+        self.frames.get(id).map(|frame| frame.revision).or_else(|| {
+            Some(
+                self.captured_frame(id)?["revision"]
+                    .as_u64()
+                    .unwrap_or_default(),
+            )
+        })
+    }
+
+    pub(crate) fn frame_budget(&self) -> f64 {
+        frames::refresh_budget(self.info.as_ref().and_then(|info| info.refresh_rate))
     }
 
     pub(crate) fn clip(&mut self) {
@@ -123,7 +140,10 @@ impl Recording {
 }
 
 pub(crate) enum Incoming {
-    Frames(ChannelUpdate<FrameRecord>),
+    Frames {
+        update: ChannelUpdate<FrameRecord>,
+        sampled_at_ms: f64,
+    },
     Channel(Channel, ChannelUpdate<Value>),
 }
 
@@ -136,7 +156,12 @@ pub(crate) fn decode_batch(batch: Value) -> Vec<Incoming> {
         .filter_map(|(name, update)| {
             let &(channel, _) = CHANNELS.iter().find(|(_, key)| *key == name)?;
             if channel == Channel::Frames {
-                serde_json::from_value(update).ok().map(Incoming::Frames)
+                let sampled_at_ms = update["sampled_at_ms"].as_f64()?;
+                let update = serde_json::from_value(update).ok()?;
+                Some(Incoming::Frames {
+                    update,
+                    sampled_at_ms,
+                })
             } else {
                 serde_json::from_value(update)
                     .ok()
@@ -161,6 +186,7 @@ pub(crate) type Shared = Arc<RwLock<Store>>;
 pub(crate) struct Store {
     pub generation: u64,
     clock: Option<(f64, Instant)>,
+    frame_clock: Option<(f64, Instant)>,
     pub sequence: u64,
     pub state: ConnectionState,
     pub paused: bool,
@@ -184,7 +210,19 @@ pub(crate) struct Store {
     pub bodies: network::Bodies,
     pub trace: Option<(u64, Arc<[u8]>)>,
     pub imported_trace: Option<Arc<[u8]>>,
+    pub audits_rev: u32,
+    session_rev: u32,
+    pub targets_rev: u32,
+    pub inspecting_self: bool,
+    network_records_rev: u32,
     revisions: [u32; 7],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameWindowKey {
+    idle: bool,
+    count: usize,
+    window_step: u64,
 }
 
 impl Store {
@@ -224,11 +262,91 @@ impl Store {
         (self.revisions[0], self.revisions[6])
     }
 
+    fn live_frame_now(&self) -> Option<f64> {
+        (self.state == ConnectionState::Connected && !self.paused).then(|| {
+            self.frame_clock.map_or(0., |(at_ms, received)| {
+                at_ms + received.elapsed().as_secs_f64() * 1_000.
+            })
+        })
+    }
+
+    fn frames_idle_at(&self, now: f64) -> bool {
+        let last_presented = self
+            .data
+            .frames
+            .entries()
+            .iter()
+            .filter(|frame| frame.presented)
+            .map(|frame| frame.at_ms)
+            .max_by(f64::total_cmp);
+        frames::is_idle(now, last_presented)
+    }
+
+    pub(crate) fn frame_window_key(&self) -> Option<FrameWindowKey> {
+        let now = self.live_frame_now()?;
+        let count = self
+            .data
+            .frames
+            .entries()
+            .iter()
+            .filter(|frame| frame.at_ms >= now - frames::LIVE_WINDOW_MS)
+            .count();
+        let window_step = (self.live_window_ms(now) / 250.) as u64;
+        Some(FrameWindowKey {
+            idle: self.frames_idle_at(now),
+            count,
+            window_step,
+        })
+    }
+
+    fn live_window_ms(&self, now: f64) -> f64 {
+        let first = self
+            .data
+            .frames
+            .entries()
+            .iter()
+            .map(|frame| frame.at_ms)
+            .min_by(f64::total_cmp)
+            .unwrap_or(now);
+        (now - first).clamp(250., frames::LIVE_WINDOW_MS)
+    }
+
+    pub(crate) fn set_session_info(&mut self, info: SessionInfo) {
+        if self.data.info.as_ref() != Some(&info) {
+            self.data.info = Some(info);
+            self.session_rev = self.session_rev.wrapping_add(1);
+            self.touch();
+        }
+    }
+
+    pub(crate) fn set_capabilities(&mut self, capabilities: Vec<String>) {
+        if self.capabilities != capabilities {
+            self.capabilities = capabilities;
+            self.session_rev = self.session_rev.wrapping_add(1);
+            self.touch();
+        }
+    }
+
+    pub(crate) fn clear_frame_clock(&mut self) {
+        self.frame_clock = None;
+    }
+
     pub(crate) fn touch(&mut self) {
         self.sequence = self.sequence.wrapping_add(1);
     }
 
     pub(crate) fn changed(&mut self, channel: Channel) {
+        if channel == Channel::Network {
+            self.network_records_rev = self.network_records_rev.wrapping_add(1);
+        }
+        self.invalidate_channel(channel);
+    }
+
+    pub(crate) fn refresh_network_ages(&mut self) {
+        self.invalidate_channel(Channel::Network);
+    }
+
+    fn invalidate_channel(&mut self, channel: Channel) {
         if let Some(index) = CHANNELS.iter().position(|(key, _)| *key == channel) {
             self.revisions[index] = self.revisions[index].wrapping_add(1);
         }
@@ -239,6 +357,9 @@ impl Store {
         *self = Self {
             generation: self.generation.wrapping_add(1),
             sequence: self.sequence.wrapping_add(1),
+            audits_rev: self.audits_rev.wrapping_add(1),
+            session_rev: self.session_rev.wrapping_add(1),
+            targets_rev: self.targets_rev,
             targets: std::mem::take(&mut self.targets),
             data,
             ..Default::default()
@@ -256,15 +377,18 @@ impl Store {
         }
         for update in batch {
             match update {
-                Incoming::Frames(update) => {
+                Incoming::Frames {
+                    update,
+                    sampled_at_ms,
+                } => {
                     if advance(cursors.cursor(Channel::Frames), &update).is_some() {
-                        if let Some(time) = update
-                            .entries
-                            .iter()
-                            .map(|frame| frame.at_ms)
-                            .max_by(f64::total_cmp)
+                        self.observe_time(sampled_at_ms);
+                        if update.reset
+                            || self
+                                .frame_clock
+                                .is_none_or(|(at_ms, _)| sampled_at_ms > at_ms)
                         {
-                            self.observe_time(time);
+                            self.frame_clock = Some((sampled_at_ms, Instant::now()));
                         }
                         resources::note(&mut self.data.resource_samples, &update.entries);
                         self.data.frames.update(update.reset, update.entries);
@@ -408,7 +532,24 @@ impl Store {
             resources_rev,
         ] = self.revisions.map(f64::from);
         let frames = data.frames.entries();
-        let end = frames.back().map_or(0., |frame| frame.at_ms);
+        let stats = if let Some(now) = self.live_frame_now() {
+            frames::live_stats(
+                frames
+                    .iter()
+                    .filter(|frame| frame.at_ms >= now - frames::LIVE_WINDOW_MS),
+                self.frames_idle_at(now),
+                self.live_window_ms(now),
+                data.frame_budget(),
+            )
+        } else {
+            let end = frames.iter().map(|frame| frame.at_ms).fold(0., f64::max);
+            frames::stats(
+                frames
+                    .iter()
+                    .filter(|frame| frame.at_ms >= end - frames::LIVE_WINDOW_MS),
+                data.frame_budget(),
+            )
+        };
         let count = |len| u32::try_from(len).unwrap_or(u32::MAX);
         TickSummary {
             generation: self.generation.to_string(),
@@ -426,13 +567,15 @@ impl Store {
             frames_rev,
             repaints_rev,
             network_rev,
+            network_records_rev: f64::from(self.network_records_rev),
             logs_rev,
             errors_rev,
             runtime_rev,
             resources_rev,
-            audits_rev: f64::from(
-                u32::try_from(self.sequence & u64::from(u32::MAX)).unwrap_or_default(),
-            ),
+            audits_rev: f64::from(self.audits_rev),
+            session_rev: f64::from(self.session_rev),
+            targets_rev: f64::from(self.targets_rev),
+            inspecting_self: self.inspecting_self,
             frame_count: count(frames.len()),
             latest_frame: frames.back().map(|frame| frame.id.to_string()),
             network_count: count(data.network.len()),
@@ -446,12 +589,7 @@ impl Store {
                     .count(),
             ),
             js_heap_bytes: data.memory["memory_used_size"].as_f64().unwrap_or_default(),
-            stats: frames::stats(
-                frames
-                    .iter()
-                    .rev()
-                    .take_while(|frame| frame.at_ms >= end - 2000.),
-            ),
+            stats,
             audit_count: count(self.findings.len()),
             picked_node_id: self.picked.as_ref().map(|(_, node)| node.clone()),
             picked_seq: self.picked.as_ref().map(|(seq, _)| seq.clone()),
@@ -477,6 +615,79 @@ pub(crate) fn trim_map<K: Ord, T>(entries: &mut BTreeMap<K, T>, capacity: usize)
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cross_channel_timestamps_do_not_age_the_live_frame_window() {
+        let mut store = Store {
+            state: ConnectionState::Connected,
+            ..Store::default()
+        };
+        let frame = |id, at_ms| FrameRecord {
+            id,
+            at_ms,
+            presented: true,
+            ..FrameRecord::default()
+        };
+        let mut cursors = ChannelCursors::default();
+        store.ingest(
+            vec![Incoming::Frames {
+                update: ChannelUpdate {
+                    revision: 1,
+                    reset: true,
+                    entries: vec![frame(1, 1_000.), frame(2, 1_010.)],
+                },
+                sampled_at_ms: 1_010.,
+            }],
+            &mut cursors,
+            BTreeMap::new(),
+        );
+        store.observe_time(80_000.);
+        assert!(store.now_ms() >= 80_000.);
+        let stats = store.tick().stats;
+        assert!(!stats.idle);
+        assert_eq!(stats.present_rate_hz, 8.);
+    }
+
+    #[test]
+    fn attaching_to_an_idle_target_does_not_treat_old_frames_as_live() {
+        let mut store = Store {
+            state: ConnectionState::Connected,
+            ..Store::default()
+        };
+        let mut cursors = ChannelCursors::default();
+        store.ingest(
+            vec![Incoming::Frames {
+                update: ChannelUpdate {
+                    revision: 1,
+                    reset: true,
+                    entries: vec![FrameRecord {
+                        id: 1,
+                        at_ms: 500.,
+                        presented: true,
+                        ..FrameRecord::default()
+                    }],
+                },
+                sampled_at_ms: 10_000.,
+            }],
+            &mut cursors,
+            BTreeMap::new(),
+        );
+        let stats = store.tick().stats;
+        assert!(stats.idle);
+        assert_eq!(stats.count, 0);
+        assert_eq!(store.data.frames.entries().len(), 1);
+    }
+
+    #[test]
+    fn refreshing_network_ages_does_not_invalidate_overview_network_records() {
+        let mut store = Store::default();
+        store.changed(Channel::Network);
+        let before = store.tick();
+        store.refresh_network_ages();
+        let after = store.tick();
+        assert_ne!(before.network_rev, after.network_rev);
+        assert_eq!(before.network_records_rev, after.network_records_rev);
+    }
 
     #[test]
     fn overlapping_subscription_replies_do_not_repeat_or_rewind_streams() {

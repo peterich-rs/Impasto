@@ -238,6 +238,10 @@ pub trait Session {
     }
     fn metrics(&mut self, metrics: &Metrics);
     fn window_display(&mut self, _display: WindowDisplay) {}
+
+    /// Sets the time base for motions started by this frame's queued input.
+    fn prepare_frame_input(&mut self, _time: FrameTime) {}
+
     fn pointer(&mut self, event: crate::input::PointerEvent);
 
     /// Dispatches the latest move, with optional earlier positions for velocity estimation.

@@ -24,8 +24,7 @@ pub(crate) struct Sample {
 
 pub(crate) fn note(samples: &mut VecDeque<Sample>, frames: &[FrameRecord]) {
     for frame in frames {
-        if frame.skip_reason.is_some()
-            || frame.present_ms <= 0.
+        if !frame.presented
             || samples
                 .back()
                 .is_some_and(|last| last.at_ms + 250. > frame.at_ms)

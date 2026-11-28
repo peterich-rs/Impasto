@@ -2,7 +2,7 @@
 import type {
   DiagError,
   Flags,
-  FrameSample,
+  FramePage,
   LogLine,
   LogSource,
   NetEntry,
@@ -34,8 +34,8 @@ export function errors(_since?: number) {
 export function network(_since?: number) {
   return emptyPage<NetEntry>();
 }
-export function frames(_since?: number) {
-  return emptyPage<FrameSample>();
+export function frames(_since?: number): FramePage {
+  return { revision: 0, entries: [], sampledAt: 0 };
 }
 export function flags(): Flags {
   return {

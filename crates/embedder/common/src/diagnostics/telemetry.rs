@@ -24,9 +24,32 @@ impl TelemetryProfile {
     }
 }
 
+/// Source that scheduled the frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrameTrigger {
+    #[default]
+    Wake,
+    Vsync,
+    Compositor,
+}
+
+impl FrameTrigger {
+    /// Name exported to diagnostic clients.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Wake => "wake",
+            Self::Vsync => "vsync",
+            Self::Compositor => "compositor",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScheduleTiming {
+    pub trigger: FrameTrigger,
     pub vsync_ns: Option<u64>,
+    /// Platform presentation target expressed in the process monotonic clock.
+    pub target_present_ns: Option<u64>,
     pub ui_start_ns: u64,
     pub ui_done_ns: u64,
     pub raster_start_ns: u64,
@@ -39,7 +62,7 @@ pub struct ScheduleTiming {
     pub in_flight_depth: Option<u32>,
     /// Admission failure when this tick produced no surface submission.
     pub skip_reason: Option<&'static str>,
-    pub repainted_view_count: u32,
+    pub repainted_view_count: Option<u32>,
     /// Raster received the display-link callback directly from the platform.
     pub compositor_only: bool,
     pub compositor_block: Option<engine::scene::CompositorBlockReason>,
@@ -47,6 +70,10 @@ pub struct ScheduleTiming {
 }
 
 impl ScheduleTiming {
+    pub fn is_split_pipeline(self) -> bool {
+        self.topology != Some("shared")
+    }
+
     pub fn ui_ms(self) -> f64 {
         duration_ms(self.ui_start_ns, self.ui_done_ns)
     }
@@ -59,11 +86,35 @@ impl ScheduleTiming {
         duration_ms(self.ui_done_ns, self.raster_start_ns)
     }
 
+    pub fn e2e_ns(self) -> u64 {
+        self.present_done_ns.saturating_sub(self.start_ns())
+    }
+
     pub fn e2e_ms(self) -> f64 {
-        duration_ms(
-            self.vsync_ns.unwrap_or(self.ui_start_ns),
-            self.present_done_ns,
-        )
+        self.e2e_ns() as f64 / 1_000_000.0
+    }
+
+    pub fn target_lead_ms(self) -> Option<f64> {
+        self.target_present_ns
+            .map(|target| duration_ms(self.start_ns(), target))
+    }
+
+    pub fn deadline_overrun_ms(self) -> Option<f64> {
+        self.target_present_ns
+            .filter(|_| self.present_done_ns > 0)
+            .map(|target| duration_ms(target, self.present_done_ns))
+    }
+
+    pub(crate) fn finish_present(&mut self, present_done_ns: u64) {
+        self.present_done_ns = present_done_ns;
+        let deadline_ns = self.target_present_ns.or_else(|| {
+            (self.budget_ns > 0).then(|| self.start_ns().saturating_add(self.budget_ns))
+        });
+        self.missed_vsync = deadline_ns.is_some_and(|deadline| present_done_ns > deadline);
+    }
+
+    fn start_ns(self) -> u64 {
+        self.vsync_ns.unwrap_or(self.ui_start_ns)
     }
 }
 

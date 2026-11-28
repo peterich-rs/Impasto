@@ -6,6 +6,15 @@ import * as core from "@app/devtools-core";
 import { streamTicks } from "./core";
 import { navigation, type NavigationIntent, type Page } from "./navigation";
 
+export function formatCadence(stats: core.FrameStats | undefined): string {
+  if (!stats) return "—";
+  if (stats.count > 0 && !stats.presentedCount) return "No presents";
+  if (stats.idle) return "Idle";
+  if (!stats.count) return "—";
+  if (stats.burstFps != null) return `${stats.burstFps.toFixed(0)}/s burst`;
+  return `${stats.presentRateHz.toFixed(1)}/s`;
+}
+
 export function createWorkspace() {
   const [notice, setNotice] = createSignal("");
   const [page, setPage] = createSignal<Page>("overview");
@@ -32,8 +41,22 @@ export function createWorkspace() {
   const live = createMemo(() => state() === "connected");
   const generation = createMemo(() => tick()?.generation ?? "");
   const capture = createMemo(() => tick()?.activeCapture ?? undefined);
-  const sessions = createMemo(() => tick()?.targets ?? []);
+  const sessions = createMemo(() => { stream.targetsRev(); return untrack(tick)?.targets ?? []; });
+  const session = createMemo(() => { stream.sessionRev(); return untrack(tick)?.session; });
+  const capabilities = createMemo(() => { stream.sessionRev(); return untrack(tick)?.capabilities ?? []; });
   const current = createMemo(() => tick()?.targetId ?? undefined);
+  const inspectingSelf = createMemo(() => live() && !!tick()?.inspectingSelf);
+  const hitchLabel = createMemo(() => {
+    const stats = tick()?.stats;
+    if (!stats?.count) return "—";
+    const hitch = stats.hitchMsPerSec;
+    return `${hitch < 0.05 ? "0" : hitch.toFixed(1)} ms/s`;
+  });
+  const hitchTone = createMemo(() => {
+    const hitch = tick()?.stats.hitchMsPerSec ?? 0;
+    return hitch >= 10 ? "danger" : hitch >= 5 ? "warn" : undefined;
+  });
+  const cadenceLabel = createMemo(() => formatCadence(tick()?.stats));
 
   async function run<T>(task: () => T | Promise<T>): Promise<T | undefined> {
     try { return await task(); }
@@ -170,7 +193,7 @@ export function createWorkspace() {
   }
 
   return {
-    ...stream, tick, live, state, generation, current, sessions, capture,
+    ...stream, tick, live, state, generation, current, sessions, session, capabilities, capture, hitchLabel, hitchTone, cadenceLabel, inspectingSelf,
     notice, setNotice, page, intent, consoleIntent, nav, inspector, showInspector, drawer, showDrawer,
     inspectorWidth, setInspectorWidth, frameTab, setFrameTab, theme, setTheme, editor, setEditor, command, setCommand,
     overlay, updateOverlay, sampling, setSampling, recordDetail, setRecordDetail, record,

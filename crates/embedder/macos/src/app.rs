@@ -17,7 +17,7 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel}
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, available, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSCursor, NSEvent, NSEventModifierFlags, NSFont, NSFontTextStyleBody, NSScreen,
+    NSCursor, NSEvent, NSEventModifierFlags, NSEventPhase, NSFont, NSFontTextStyleBody, NSScreen,
     NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate,
     NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
 };
@@ -35,7 +35,7 @@ use crate::menu;
 use crate::pointer::{PointerSample, pointer_event, scene_f32};
 use crate::surface::MetalSurface;
 use crate::vsync::DisplayLink;
-use engine::input::{Button, Modifiers, Phase, PointerEvent};
+use engine::input::{Button, Modifiers, Phase, PointerEvent, ScrollPhase};
 
 use crate::window::WindowOptions;
 const FONT_FAMILY: &str = "Sans";
@@ -56,6 +56,35 @@ fn modifiers_of(event: &NSEvent) -> Modifiers {
         modifiers = modifiers.with(Modifiers::META);
     }
     modifiers
+}
+
+fn scroll_phase_of(phase: NSEventPhase, momentum: NSEventPhase) -> ScrollPhase {
+    if !phase.is_empty() {
+        if phase.contains(NSEventPhase::Cancelled) {
+            return ScrollPhase::Cancelled;
+        }
+        if phase.contains(NSEventPhase::Ended) {
+            return ScrollPhase::Ended;
+        }
+        if phase.contains(NSEventPhase::Began) {
+            return ScrollPhase::Began;
+        }
+        if phase.contains(NSEventPhase::MayBegin) {
+            return ScrollPhase::MayBegin;
+        }
+        return ScrollPhase::Changed;
+    }
+    if momentum.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled) {
+        return ScrollPhase::MomentumEnded;
+    }
+    if momentum.contains(NSEventPhase::Began) {
+        return ScrollPhase::MomentumBegan;
+    }
+    if momentum.is_empty() {
+        ScrollPhase::Discrete
+    } else {
+        ScrollPhase::MomentumChanged
+    }
 }
 
 fn shortcut_character(event: &NSEvent) -> Option<char> {
@@ -383,6 +412,7 @@ impl ContentView {
             modifiers: modifiers_of(event),
             dx: 0.0,
             dy: 0.0,
+            scroll_phase: ScrollPhase::Discrete,
             zoom: 0.0,
             pen: None,
         }));
@@ -392,14 +422,21 @@ impl ContentView {
         let local = self.convertPoint_fromView(event.locationInWindow(), None);
         let height = self.bounds().size.height;
         let modifiers = modifiers_of(event);
-        let (dx, dy) = if phase == Phase::Wheel {
-            // AppKit's positive delta Y points up. Scene Y grows downward.
+        let (dx, dy, scroll_phase) = if phase == Phase::Wheel {
+            // AppKit reports precise deltas in points and coarse deltas in lines.
+            const WHEEL_LINE_POINTS: f64 = 40.0;
+            let scale = if event.hasPreciseScrollingDeltas() {
+                1.0
+            } else {
+                WHEEL_LINE_POINTS
+            };
             (
-                scene_f32(event.scrollingDeltaX()),
-                -scene_f32(event.scrollingDeltaY()),
+                scene_f32(-event.scrollingDeltaX() * scale),
+                scene_f32(-event.scrollingDeltaY() * scale),
+                scroll_phase_of(event.phase(), event.momentumPhase()),
             )
         } else {
-            (0.0, 0.0)
+            (0.0, 0.0, ScrollPhase::Discrete)
         };
         self.ivars().poster.post(Command::Pointer(pointer_event(
             PointerSample {
@@ -408,6 +445,7 @@ impl ContentView {
                 local_y: local.y,
                 view_height: height,
                 time_ms: event.timestamp() * 1000.0,
+                scroll_phase,
             },
             button,
             modifiers,
@@ -535,6 +573,7 @@ fn skip_launch_duplicate(launched: bool, initial: Option<&str>, url: &str) -> bo
 struct HostState {
     window: Retained<NSWindow>,
     layer: Retained<CAMetalLayer>,
+    surface: Cell<Option<embedder::SurfaceId>>,
     link: Link,
     /// `--url` at process start. `set_launch_url` does not overwrite this copy.
     initial_url: Option<String>,
@@ -722,10 +761,12 @@ impl Host {
             scene_f32(size.height),
             scene_f32(scale),
         );
+        let surface_id = embedder::SurfaceId::fresh();
+        self.ivars().surface.set(Some(surface_id));
         self.ivars()
             .link
             .post(Command::SurfaceReady(SurfaceTarget::new(
-                embedder::SurfaceId::fresh(),
+                surface_id,
                 NativePtr(layer),
                 metrics,
             )));
@@ -759,17 +800,32 @@ impl Host {
     fn post_metrics(&self) {
         let scale = point_scale(&self.ivars().window, self.mtm());
         let size = self.update_drawable(scale);
-        self.ivars().link.post(Command::Metrics(metrics(
-            scene_f32(size.width),
-            scene_f32(size.height),
-            scene_f32(scale),
-        )));
+        let command = resize_command(self.ivars().surface.get(), size.width, size.height, scale);
+        self.ivars().link.post(command);
     }
 
     fn post_settings(&self) {
         self.ivars()
             .link
             .post(Command::Settings(current_settings()));
+    }
+}
+
+fn resize_command(
+    surface: Option<embedder::SurfaceId>,
+    width: f64,
+    height: f64,
+    scale: f64,
+) -> Command {
+    let metrics = metrics(scene_f32(width), scene_f32(height), scene_f32(scale));
+    if let Some(id) = surface {
+        Command::SurfaceChanged {
+            id,
+            metrics,
+            pixels: embedder::pixel_size(metrics),
+        }
+    } else {
+        Command::Metrics(metrics)
     }
 }
 
@@ -1242,6 +1298,7 @@ pub fn run(
         HostState {
             window,
             layer,
+            surface: Cell::new(None),
             link,
             initial_url,
             native: RefCell::new(Some(native)),
@@ -1438,8 +1495,52 @@ mod settings_tests {
 }
 
 #[cfg(test)]
+mod scroll_tests {
+    use super::{NSEventPhase, ScrollPhase, scroll_phase_of};
+
+    #[test]
+    fn appkit_contact_and_momentum_keep_separate_phases() {
+        use NSEventPhase as Native;
+        let empty = Native::empty();
+        for (contact, momentum, expected) in [
+            (empty, empty, ScrollPhase::Discrete),
+            (Native::MayBegin, empty, ScrollPhase::MayBegin),
+            (Native::Began, empty, ScrollPhase::Began),
+            (Native::Stationary, empty, ScrollPhase::Changed),
+            (Native::Ended, empty, ScrollPhase::Ended),
+            (Native::Cancelled, empty, ScrollPhase::Cancelled),
+            (empty, Native::Began, ScrollPhase::MomentumBegan),
+            (empty, Native::Stationary, ScrollPhase::MomentumChanged),
+            (empty, Native::Changed, ScrollPhase::MomentumChanged),
+            (empty, Native::Ended, ScrollPhase::MomentumEnded),
+            (empty, Native::Cancelled, ScrollPhase::MomentumEnded),
+        ] {
+            assert_eq!(scroll_phase_of(contact, momentum), expected);
+        }
+    }
+}
+
+#[cfg(test)]
 mod url_tests {
-    use super::{nonempty_url, skip_launch_duplicate};
+    use super::{Command, nonempty_url, resize_command, skip_launch_duplicate};
+
+    #[test]
+    fn resize_with_surface_posts_surface_changed_with_scaled_pixels() {
+        let id = embedder::SurfaceId::fresh();
+        let command = resize_command(Some(id), 800.0, 600.0, 2.0);
+        assert!(matches!(
+            command,
+            Command::SurfaceChanged {
+                id: changed_id,
+                pixels,
+                ..
+            } if changed_id == id && pixels.width == 1600 && pixels.height == 1200
+        ));
+        assert!(matches!(
+            resize_command(None, 800.0, 600.0, 2.0),
+            Command::Metrics(_)
+        ));
+    }
 
     #[test]
     fn empty_text_is_not_a_url() {

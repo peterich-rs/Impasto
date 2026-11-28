@@ -7,7 +7,7 @@ import { createSignal, onCleanup } from "solid-js";
 import { appendCapped } from "./cursor.ts";
 import type { HighlightBox } from "./highlight.tsx";
 import * as raw from "@impasto/devtools/native";
-import type { DiagError, FrameSample, GpuFrameTiming, LogLine, NetEntry } from "@impasto/devtools/native";
+import type { DiagError, FramePage, FrameSample, GpuFrameTiming, LogLine, NetEntry } from "@impasto/devtools/native";
 export type {
   DiagError,
   FrameSample,
@@ -21,6 +21,7 @@ export type {
 export const [logs, setLogs] = createSignal<LogLine[]>([]);
 export const [errors, setErrors] = createSignal<DiagError[]>([]);
 export const [network, setNetwork] = createSignal<NetEntry[]>([]);
+export const [frameSnapshot, setFrameSnapshot] = createSignal<FramePage>();
 export const [frames, setFrames] = createSignal<FrameSample[]>([]);
 export const [traceRecording, setTraceRecording] = createSignal(false);
 export const [traceResult, setTraceResult] = createSignal<string | null>(null);
@@ -103,6 +104,7 @@ export const store = {
   },
   sampleFrames(): void {
     const page = raw.frames();
+    setFrameSnapshot(page);
     if (page.revision !== framesRevision) {
       framesRevision = page.revision;
       setFrames(page.entries.slice(-120));

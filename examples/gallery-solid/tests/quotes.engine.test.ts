@@ -1,10 +1,53 @@
 import { advanceFrames, assert, test } from "impasto:test";
+import { createRoot } from "solid-js";
 import { mulberry32, hashString, gauss } from "../src/engine/rng.ts";
 import { QuoteEngine } from "../src/engine/engine.ts";
 import { book, series } from "../src/engine/analytics.ts";
 import { stockSnapshot } from "../src/engine/stock-snapshot.ts";
 import { createAccount } from "../src/state/account.ts";
+import { marketPulse, useQuotes, wireQuotes } from "../src/state/quotes-provider.tsx";
 import { TickRing } from "../src/engine/types.ts";
+
+test("live quotes publish again after an interrupted market tick", async () => {
+  const engine = wireQuotes().engine;
+  const step = engine.step;
+  const timeout = globalThis.setTimeout;
+  const interval = globalThis.setInterval;
+  const interruption = new Error("interrupted market tick");
+  let interrupted = false;
+  let attempts = 0;
+  const observe = <Args extends unknown[]>(run: (...args: Args) => void, args: Args) => () => {
+    try {
+      run(...args);
+    } catch (error) {
+      if (error !== interruption) throw error;
+      interrupted = true;
+    }
+  };
+  // The headless driver rejects uncaught timer errors. Observe the injected
+  // fault outside the provider so the scheduler can run the following turn.
+  globalThis.setTimeout = (run, delay, ...args) => timeout(observe(run, args), delay);
+  globalThis.setInterval = (run, delay, ...args) => interval(observe(run, args), delay);
+  engine.step = (dt) => {
+    if (++attempts === 1) throw interruption;
+    return step.call(engine, dt);
+  };
+  const before = marketPulse();
+  const release = createRoot((dispose) => {
+    useQuotes();
+    return dispose;
+  });
+  try {
+    await advanceFrames(40);
+    assert.ok(interrupted, "first timer callback should have been interrupted");
+    assert.ok(marketPulse() > before, "market stopped publishing after the interruption");
+  } finally {
+    release();
+    engine.step = step;
+    globalThis.setTimeout = timeout;
+    globalThis.setInterval = interval;
+  }
+});
 
 // Determinism: same seed, identical tick streams.
 {

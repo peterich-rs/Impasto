@@ -200,9 +200,9 @@ impl AnimProp {
     }
 }
 
-/// Critical damping at ω = 16 retraces 95% of a resting stretch in about 300ms.
-pub const OVERSCROLL_STIFFNESS: f32 = 256.0;
-pub const OVERSCROLL_DAMPING: f32 = 32.0;
+/// Critical damping at ω = 22 retraces 95% of a resting stretch in about 216ms.
+pub const OVERSCROLL_STIFFNESS: f32 = 484.0;
+pub const OVERSCROLL_DAMPING: f32 = 44.0;
 /// Paging and programmatic scroll spring, per second.
 pub const SNAP_STIFFNESS: f32 = 220.0;
 pub const SNAP_DAMPING: f32 = 30.0;
@@ -213,11 +213,11 @@ pub const OVERSCROLL_FACTOR: f32 = 0.55;
 ///
 /// `Linear` multiplies the overflow by a constant factor: the historical
 /// behavior. For `Curve`, the stretch grows with the overflow, its slope
-/// shrinks, and the stretch approaches the viewport extent on that axis.
+/// shrinks, and the stretch approaches the viewport extent or a smaller cap.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Band {
     Linear { factor: f32 },
-    Curve { c: f32 },
+    Curve { c: f32, max_dimension: Option<f32> },
 }
 
 impl Band {
@@ -232,7 +232,8 @@ impl Band {
         }
         match self {
             Self::Linear { factor } => sign * factor * over,
-            Self::Curve { c } => {
+            Self::Curve { c, max_dimension } => {
+                let dimension = dimension.min(max_dimension.unwrap_or(dimension));
                 if !(c.is_finite() && c > 0.0) || dimension <= 0.0 {
                     return 0.0;
                 }
@@ -260,8 +261,9 @@ impl Band {
                     0.0
                 }
             }
-            Self::Curve { c } => {
-                if !(c.is_finite() && c > 0.0) {
+            Self::Curve { c, max_dimension } => {
+                let dimension = dimension.min(max_dimension.unwrap_or(dimension));
+                if !(c.is_finite() && c > 0.0) || dimension <= 0.0 {
                     return 0.0;
                 }
                 let ratio = dimension / (c * over.abs() + dimension);
@@ -276,12 +278,41 @@ impl Band {
             return 0.0;
         }
         let edge_slope = self.slope(0.0, dimension);
-        if matches!(self, Self::Curve { .. }) && edge_slope > 0.0 {
+        if let Self::Curve { max_dimension, .. } = self
+            && edge_slope > 0.0
+        {
+            let dimension = dimension.min(max_dimension.unwrap_or(dimension));
             // The fraction of the viewport still covered is D / (c|over| + D).
             let remaining = (1.0 - stretch.abs() / dimension).max(0.0);
             edge_slope * remaining * remaining
         } else {
             edge_slope
+        }
+    }
+
+    /// Inverse of [`Band::stretch`]: overflow past the edge for a stretched distance.
+    pub fn unstretch(self, stretch: f32, dimension: f32) -> f32 {
+        if !stretch.is_finite() || !dimension.is_finite() || stretch == 0.0 {
+            return 0.0;
+        }
+        let sign = stretch.signum();
+        let abs = stretch.abs();
+        match self {
+            Self::Linear { factor } => {
+                if factor.is_finite() && factor > 0.0 {
+                    sign * abs / factor
+                } else {
+                    0.0
+                }
+            }
+            Self::Curve { c, max_dimension } => {
+                let dimension = dimension.min(max_dimension.unwrap_or(dimension));
+                if !(c.is_finite() && c > 0.0) || dimension <= 0.0 {
+                    return 0.0;
+                }
+                let clamped = abs.min(dimension * 0.999);
+                sign * dimension * clamped / (c * (dimension - clamped))
+            }
         }
     }
 }
@@ -404,16 +435,35 @@ coded_trinary!(ScrollAxis, Both, Vertical, Horizontal);
 ///
 /// `Content` needs room in the drag direction. `Always` claims even at the
 /// edge, so rubber-band and refresh can run. `Never` leaves the drag for an
-/// ancestor.
+/// ancestor. `Overflow` allows edge capture on axes with a scrollable range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ScrollAccept {
     #[default]
     Content,
     Always,
     Never,
+    Overflow,
 }
 
-coded_trinary!(ScrollAccept, Content, Always, Never);
+impl ScrollAccept {
+    pub fn from_code(code: i32) -> Self {
+        match code {
+            1 => Self::Always,
+            2 => Self::Never,
+            3 => Self::Overflow,
+            _ => Self::Content,
+        }
+    }
+
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Content => 0,
+            Self::Always => 1,
+            Self::Never => 2,
+            Self::Overflow => 3,
+        }
+    }
+}
 
 /// Which distance arms a refresh. The threshold lives on the scroll node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -460,7 +510,10 @@ impl ScrollPhysics {
     /// A behavior preset, not a platform. `accept` stays [`ScrollAccept::Content`].
     pub const BOUNCING: Self = Self {
         decay: Decay::Tau(500.0),
-        band: Band::Curve { c: 0.55 },
+        band: Band::Curve {
+            c: 0.55,
+            max_dimension: None,
+        },
         overscroll: OverscrollMode::RubberBand,
         overscroll_stiffness: OVERSCROLL_STIFFNESS,
         overscroll_damping: OVERSCROLL_DAMPING,
@@ -471,6 +524,23 @@ impl ScrollPhysics {
         snap_y: None,
         accept: ScrollAccept::Content,
     };
+
+    /// Phased wheel input uses a tighter default band and return spring.
+    pub(crate) fn for_trackpad(mut self) -> Self {
+        if self.band == Self::BOUNCING.band {
+            self.band = Band::Curve {
+                c: 0.35,
+                max_dimension: Some(260.0),
+            };
+        }
+        if [self.overscroll_stiffness, self.overscroll_damping]
+            == [OVERSCROLL_STIFFNESS, OVERSCROLL_DAMPING]
+        {
+            self.overscroll_stiffness = 576.0;
+            self.overscroll_damping = 48.0;
+        }
+        self
+    }
 
     /// Offset stops at the limit. Overscroll stays zero.
     pub const CLAMPING: Self = Self {
@@ -574,6 +644,25 @@ mod tests {
         }
         let linear = Band::Linear { factor: 0.5 };
         assert_eq!(linear.slope_at_stretch(-40.0, dimension), 0.5);
+    }
+
+    #[test]
+    fn unstretch_inverts_stretch() {
+        let curve = ScrollPhysics::BOUNCING.band;
+        let dim = 400.0;
+        for overflow in [-600.0, -40.0, 0.0, 40.0, 600.0] {
+            let stretch = curve.stretch(overflow, dim);
+            let recovered = curve.unstretch(stretch, dim);
+            assert!(
+                (recovered - overflow).abs() < 1.0e-2,
+                "curve overflow {overflow} -> {stretch} -> {recovered}"
+            );
+        }
+        let linear = Band::Linear { factor: 0.55 };
+        for overflow in [-120.0, 0.0, 80.0] {
+            let recovered = linear.unstretch(linear.stretch(overflow, dim), dim);
+            assert!((recovered - overflow).abs() < 1.0e-4);
+        }
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub struct FrameTiming {
     pub semantics_ms: f64,
     pub submit_ms: f64,
     pub present_ms: f64,
+    pub presented: bool,
+    pub present_error: Option<raster::Status>,
     pub shapes_built: u32,
     pub shapes_measure_hit: u32,
     pub shapes_measure_miss: u32,
@@ -40,11 +42,33 @@ pub struct FrameTiming {
 }
 
 impl FrameTiming {
+    pub fn ui_over_budget(self) -> bool {
+        let ui = self.schedule.ui_ms();
+        self.interval_ms > 0.0
+            && !self.schedule.compositor_only
+            && if self.schedule.is_split_pipeline() {
+                ui > self.interval_ms
+            } else {
+                self.work_ms > self.interval_ms && ui >= self.schedule.raster_ms()
+            }
+    }
+
+    pub fn raster_over_budget(self) -> bool {
+        let raster = self.schedule.raster_ms();
+        self.interval_ms > 0.0
+            && if self.schedule.is_split_pipeline() {
+                raster > self.interval_ms
+            } else {
+                self.work_ms > self.interval_ms
+                    && (self.schedule.compositor_only || raster > self.schedule.ui_ms())
+            }
+    }
+
     pub fn over_budget(self) -> bool {
-        if self.schedule.budget_ns == 0 {
-            self.interval_ms > 0.0 && self.work_ms > self.interval_ms
+        if self.schedule.is_split_pipeline() {
+            self.ui_over_budget() || self.raster_over_budget()
         } else {
-            self.schedule.missed_vsync
+            self.interval_ms > 0.0 && self.work_ms.max(self.schedule.e2e_ms()) > self.interval_ms
         }
     }
 }
@@ -252,7 +276,11 @@ pub(crate) fn record_frame(
         sets: phases.trace.sets,
         runtime: timing.runtime,
         number: timing.number,
-        at_ms: mono_ms(),
+        at_ms: if timing.schedule.present_done_ns > 0 {
+            timing.schedule.present_done_ns as f64 / 1_000_000.0
+        } else {
+            mono_ms()
+        },
         work_ms: timing.work_ms,
         budget_ms: timing.interval_ms,
         session_ms: timing.session_ms,
@@ -262,6 +290,8 @@ pub(crate) fn record_frame(
         record_ms: timing.record_ms,
         submit_ms: timing.submit_ms,
         present_ms: timing.present_ms,
+        presented: timing.presented,
+        present_error: timing.present_error,
         layers: timing.layer_count,
         atlas_entries: timing.atlas_entries,
         pictures: timing.pictures,
@@ -277,6 +307,9 @@ pub(crate) fn record_frame(
         layout_cause: phases.trace.layout_cause,
         gestures: phases.trace.gestures,
         over_budget: timing.over_budget(),
+        ui_over_budget: timing.ui_over_budget(),
+        raster_over_budget: timing.raster_over_budget(),
+        gpu_over_budget: false,
         phases: crate::diagnostics::PhaseSample {
             motion_ms: phases.script.motion_ms,
             dispatch_ms: phases.script.dispatch_ms,
@@ -462,17 +495,51 @@ pub(crate) fn ms_i64(ms: f64) -> i64 {
 }
 
 pub(crate) fn mono_ms() -> f64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_secs_f64()
-        * 1000.0
+    crate::diagnostics::telemetry::mono_ns() as f64 / 1_000_000.0
 }
 
 #[cfg(test)]
 mod tests {
     use super::{FrameTiming, write_inspect};
+
+    #[test]
+    fn split_throughput_uses_stage_budgets_even_when_the_target_is_missed() {
+        use crate::diagnostics::telemetry::ScheduleTiming;
+
+        let mut schedule = ScheduleTiming {
+            topology: Some("platform-ui"),
+            vsync_ns: Some(1_000_000),
+            ui_start_ns: 1_000_000,
+            ui_done_ns: 11_000_000,
+            raster_start_ns: 11_000_000,
+            target_present_ns: Some(17_000_000),
+            budget_ns: 16_666_667,
+            ..ScheduleTiming::default()
+        };
+        schedule.finish_present(21_000_000);
+        assert!(schedule.missed_vsync);
+        assert_eq!(schedule.target_lead_ms(), Some(16.));
+        assert_eq!(schedule.deadline_overrun_ms(), Some(4.));
+        assert_eq!(schedule.e2e_ms(), 20.);
+        let mut timing = FrameTiming {
+            schedule,
+            work_ms: 20.,
+            interval_ms: 1000. / 60.,
+            ..FrameTiming::default()
+        };
+        assert!(!timing.over_budget());
+        timing.schedule.topology = Some("shared");
+        assert!(timing.over_budget());
+        assert!(timing.ui_over_budget());
+        assert!(!timing.raster_over_budget());
+        timing.schedule.topology = Some("platform-ui");
+        timing.schedule.target_present_ns = Some(40_000_000);
+        timing.schedule.finish_present(29_000_000);
+        assert!(!timing.schedule.missed_vsync);
+        assert_eq!(timing.schedule.deadline_overrun_ms(), Some(0.));
+        assert!(timing.raster_over_budget());
+        assert!(timing.over_budget());
+    }
 
     #[test]
     fn inspect_writes_the_timing_fields_already_recorded() {

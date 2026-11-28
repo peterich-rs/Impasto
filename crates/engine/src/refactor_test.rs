@@ -132,7 +132,9 @@ fn overscroll_past_the_edge_uses_the_curve_and_does_not_rewrite_pictures()
     tree.record()?;
     tree.set_scroll_offset(scroll, 0.0, 50.0)?;
     let (_, overscroll) = tree.overscroll(scroll)?;
-    let expected = crate::motion::Band::Curve { c: 0.55 }.stretch(50.0, tree.rect(scroll)?.h);
+    let expected = crate::motion::ScrollPhysics::BOUNCING
+        .band
+        .stretch(50.0, tree.rect(scroll)?.h);
     assert!(
         (overscroll - expected).abs() < 0.01,
         "overscroll={overscroll} expected={expected}"

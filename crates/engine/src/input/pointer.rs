@@ -47,6 +47,24 @@ impl Buttons {
     }
 }
 
+/// Phase of a scroll-wheel or trackpad scroll stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollPhase {
+    /// Discrete mouse wheel click without trackpad begin/end boundaries.
+    #[default]
+    Discrete,
+    /// Contact may start. No scroll displacement belongs to this event.
+    MayBegin,
+    Began,
+    Changed,
+    Ended,
+    Cancelled,
+    /// The platform began generating scroll deltas after release.
+    MomentumBegan,
+    MomentumChanged,
+    MomentumEnded,
+}
+
 /// A pointer sample in scene points, origin at the top left.
 ///
 /// `time_ms` is the host event time in milliseconds. Drag velocity is the
@@ -68,6 +86,8 @@ pub struct PointerEvent {
     pub modifiers: Modifiers,
     pub dx: f32,
     pub dy: f32,
+    /// Trackpad/wheel gesture phase when `phase == Phase::Wheel`.
+    pub scroll_phase: ScrollPhase,
     /// Relative magnification. Zero unless [`Phase::Zoom`].
     pub zoom: f32,
     pub pen: Option<PenSample>,
@@ -138,12 +158,24 @@ impl PointerEvent {
             modifiers: Modifiers::empty(),
             dx: 0.0,
             dy: 0.0,
+            scroll_phase: ScrollPhase::Discrete,
             zoom: 0.0,
             pen: None,
         }
     }
 
     pub fn wheel(x: f32, y: f32, time_ms: f64, dx: f32, dy: f32) -> Self {
+        Self::wheel_with_phase(x, y, time_ms, dx, dy, ScrollPhase::Discrete)
+    }
+
+    pub fn wheel_with_phase(
+        x: f32,
+        y: f32,
+        time_ms: f64,
+        dx: f32,
+        dy: f32,
+        scroll_phase: ScrollPhase,
+    ) -> Self {
         Self {
             pointer: PointerId(0),
             kind: PointerKind::Mouse,
@@ -156,6 +188,7 @@ impl PointerEvent {
             modifiers: Modifiers::empty(),
             dx,
             dy,
+            scroll_phase,
             zoom: 0.0,
             pen: None,
         }
@@ -175,6 +208,7 @@ impl PointerEvent {
             modifiers: Modifiers::empty(),
             dx: 0.0,
             dy: 0.0,
+            scroll_phase: ScrollPhase::Discrete,
             zoom: scale,
             pen: None,
         }

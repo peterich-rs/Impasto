@@ -14,9 +14,8 @@ let engine: QuoteEngine | null = null;
 let refs = 0;
 const [running, setRunning] = createSignal(true);
 const [pulse, setPulse] = createSignal(0);
-let timer: ReturnType<typeof setTimeout> | undefined;
+let timer: ReturnType<typeof setInterval> | undefined;
 let lastTick: number | undefined;
-let publicationAt: number | undefined;
 export const marketRunning = running;
 export const marketPulse = pulse;
 
@@ -37,7 +36,6 @@ export function toggleMarket(): void {
 }
 
 function tickMarket(): void {
-  timer = undefined;
   if (refs === 0 || !untrack(running) || engine === null) return;
   const now = performance.now();
   const elapsed = lastTick === undefined ? PUBLICATION_MS : now - lastTick;
@@ -46,19 +44,16 @@ function tickMarket(): void {
   // Skip catch-up bursts when the app wakes late.
   engine.step(Math.min(PUBLICATION_MS + 100, elapsed));
   setPulse((value) => value + 1);
-  publicationAt = (publicationAt ?? now) + PUBLICATION_MS;
-  if (publicationAt <= now) publicationAt = now + PUBLICATION_MS;
-  syncMarketTimer(publicationAt - now);
 }
 
-function syncMarketTimer(delay = 0): void {
+function syncMarketTimer(): void {
   if (refs > 0 && untrack(running)) {
-    timer ??= setTimeout(tickMarket, delay);
+    // The scheduler keeps the next publication if this tick is interrupted.
+    timer ??= setInterval(tickMarket, PUBLICATION_MS);
   } else {
-    if (timer !== undefined) clearTimeout(timer);
+    if (timer !== undefined) clearInterval(timer);
     timer = undefined;
     lastTick = undefined;
-    publicationAt = undefined;
   }
 }
 export type QuotesApi = {
