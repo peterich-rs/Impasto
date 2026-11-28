@@ -1035,6 +1035,13 @@ impl Tree {
         Some(motion.simulation.x(time_ms))
     }
 
+    /// Updates the time base for new motions without sampling existing ones.
+    pub fn set_motion_clock(&mut self, target_ms: f64) {
+        if target_ms.is_finite() {
+            self.clock_ms = target_ms;
+        }
+    }
+
     /// Samples every active motion at `target_ms`. Returns whether any remain.
     pub fn tick_motions(&mut self, target_ms: f64) -> bool {
         if !target_ms.is_finite() {
@@ -1102,7 +1109,7 @@ impl Tree {
         std::mem::take(&mut self.motion_ends)
     }
 
-    /// Replaces any motion of `prop` on `id`. The sample clock is the last tick.
+    /// Replaces any motion of `prop` on `id`, starting at the current motion clock.
     pub fn animate(
         &mut self,
         id: NodeId,
@@ -1762,7 +1769,14 @@ impl Tree {
             )
         };
         let node = self.node_mut(id)?;
-        let changed = (node.x, node.y, node.w, node.h) != (x, y, w, h);
+        let changed = (node.x, node.y, node.w, node.h) != (x, y, w, h)
+            || (
+                node.content_x,
+                node.content_y,
+                node.content_w,
+                node.content_h,
+            ) != (content_x, content_y, content_w, content_h);
+        let parent = node.parent;
         node.x = x;
         node.y = y;
         node.w = w;
@@ -1773,6 +1787,13 @@ impl Tree {
         node.content_h = content_h;
         if changed {
             self.stage_repaint(id, super::RepaintReason::LAYOUT_GEOMETRY);
+            self.dirty_picture(id);
+            if (self.renders_layer_node(id) || self.is_picture_owner(id))
+                && let Some(parent) = parent
+            {
+                self.dirty_picture(parent);
+            }
+            self.layer_epoch = self.layer_epoch.wrapping_add(1);
         }
         Ok(())
     }

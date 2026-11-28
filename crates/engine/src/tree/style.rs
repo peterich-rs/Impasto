@@ -200,7 +200,11 @@ impl Presentation {
             }
             P::TextOverflow(value) => {
                 if let Some(text) = &mut self.text {
-                    Arc::make_mut(&mut text.style).overflow = *value;
+                    let style = Arc::make_mut(&mut text.style);
+                    style.overflow = *value;
+                    if *value == crate::scene::TextOverflow::Ellipsis && style.ellipsis.is_none() {
+                        style.ellipsis = Some("…".to_owned());
+                    }
                 }
             }
             P::Underline(value) => {

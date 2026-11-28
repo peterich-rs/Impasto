@@ -11,7 +11,9 @@ use embedder::{
     Boot, BootError, Command, FrameRateHint, FrameToken, Lifecycle, Link, Restoration, Services,
     SurfaceId, SurfaceTarget, Vsync, WindowSession,
 };
-use engine::input::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
+use engine::input::{
+    Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind, ScrollPhase,
+};
 use engine::session::{Brightness, FrameTime, Insets, Metrics, PlatformSettings, WindowDisplay};
 use objc2::MainThreadMarker;
 use raster::Rasterizer;
@@ -787,6 +789,7 @@ pub unsafe extern "C" fn impasto_ios_pointer(
             modifiers: Modifiers::from_bits(u8::try_from(modifiers & 0b1111).unwrap_or_default()),
             dx,
             dy,
+            scroll_phase: ScrollPhase::Discrete,
             zoom,
             pen: None,
         }));

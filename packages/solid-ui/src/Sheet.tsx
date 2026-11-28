@@ -15,7 +15,7 @@ import { sceneApi, nodeId } from "./scene-ext.ts";
 import { registerOverlay } from "./overlay/registry.ts";
 import type { SheetProps } from "./props.ts";
 import { Role } from "./semantics.ts";
-import { ScrollArea, bouncing } from "./ScrollArea.tsx";
+import { ScrollArea, bouncing, type ScrollPhysics } from "./ScrollArea.tsx";
 import { createScrollController } from "./ScrollController.ts";
 import { bindScrollStyle, interpolate } from "./scroll-style.ts";
 import { createNodeRef, createStyleTarget } from "./target.ts";
@@ -28,7 +28,7 @@ import { useTheme } from "./use-theme.ts";
 export function Sheet(props: SheetProps): NodeHandle {
   const theme = useTheme();
   const grip = createScrollController();
-  const dragPhysics = { ...bouncing, band: { linear: 1 }, chain: false };
+  const dragPhysics: ScrollPhysics = { ...bouncing, band: { linear: 1 }, chain: false, accept: "always" };
   function releaseGrip(): void {
     const node = grip.node();
     if (node !== 0 && scene.overscroll(node).y <= -48) {

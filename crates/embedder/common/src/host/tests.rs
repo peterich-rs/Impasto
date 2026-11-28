@@ -114,6 +114,8 @@ impl Vsync for RecVsync {
 struct SessionLog {
     io: Vec<IoEvent>,
     frames: Vec<FrameTime>,
+    input_frame: Option<FrameTime>,
+    pointer_frames: Vec<Option<FrameTime>>,
     wants: bool,
     launch_urls: Vec<String>,
     clipboard: Option<String>,
@@ -126,7 +128,15 @@ struct MockSession {
 impl engine::session::Session for MockSession {
     fn metrics(&mut self, _: &Metrics) {}
 
-    fn pointer(&mut self, _: engine::input::PointerEvent) {}
+    fn prepare_frame_input(&mut self, time: FrameTime) {
+        self.log.borrow_mut().input_frame = Some(time);
+    }
+
+    fn pointer(&mut self, _: engine::input::PointerEvent) {
+        let mut log = self.log.borrow_mut();
+        let time = log.input_frame;
+        log.pointer_frames.push(time);
+    }
 
     fn frame(&mut self, time: FrameTime) -> FrameOutput {
         let mut log = self.log.borrow_mut();
@@ -167,6 +177,8 @@ impl TestHarness {
         let log = Rc::new(RefCell::new(SessionLog {
             io: Vec::new(),
             frames: Vec::new(),
+            input_frame: None,
+            pointer_frames: Vec::new(),
             wants: false,
             launch_urls: Vec::new(),
             clipboard: None,
@@ -289,6 +301,38 @@ fn now() -> FrameTime {
         interval_ms: 16.0,
         mono_ms: 1.0,
     }
+}
+
+#[test]
+fn queued_pointer_uses_the_frame_time_before_dispatch() {
+    let mut harness = TestHarness::new();
+    harness.open_dummy();
+    let token = harness
+        .vsync
+        .last_token()
+        .expect("surface requests a frame");
+    assert!(!harness.command(Command::Frame { token, time: now() }));
+    let release = engine::input::PointerEvent::wheel_with_phase(
+        10.0,
+        10.0,
+        500.0,
+        0.0,
+        0.0,
+        engine::input::ScrollPhase::Ended,
+    );
+    assert!(!harness.command(Command::Pointer(release)));
+    let time = FrameTime {
+        vsync_ms: 500.0,
+        target_ms: 508.0,
+        interval_ms: 8.0,
+        mono_ms: 120.0,
+    };
+    let token = harness
+        .vsync
+        .last_token()
+        .expect("pointer requests a frame");
+    assert!(!harness.command(Command::Frame { token, time }));
+    assert_eq!(harness.session.borrow().pointer_frames, [Some(time)]);
 }
 
 #[test]

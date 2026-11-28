@@ -12,7 +12,7 @@ import {
 } from "@impasto/solid-renderer";
 import { Button } from "./Button.tsx";
 import { RefreshControl } from "./RefreshControl.tsx";
-import { ScrollArea, type ScrollPhysics } from "./ScrollArea.tsx";
+import { ScrollArea, bouncing, type ScrollPhysics } from "./ScrollArea.tsx";
 import {
   createScrollController,
   refreshListener,
@@ -261,7 +261,9 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
             contentMin={extent()}
             initialOffset={initial}
             controller={scroll}
-            physics={props.physics}
+            physics={props.refresh || props.onRefresh
+              ? { ...(props.physics ?? bouncing), accept: props.physics?.accept ?? "always" }
+              : props.physics}
             class={props.viewportProps?.class}
             classList={props.viewportProps?.classList}
             style={props.viewportProps?.style}

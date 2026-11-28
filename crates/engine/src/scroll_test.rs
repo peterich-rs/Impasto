@@ -1,5 +1,5 @@
 use crate::{
-    input::{Phase, PointerEvent, RecognizerSet},
+    input::{Phase, PointerEvent, RecognizerSet, ScrollPhase as WheelPhase},
     motion::{
         OverscrollMode, PullMode, ScrollAccept, ScrollAxis, ScrollPhase, ScrollPhysics, SnapAlign,
         SnapGrid,
@@ -747,7 +747,10 @@ fn rate_decay_matches_its_tau_equivalent() {
 #[test]
 fn curve_band_stretches_less_per_point_the_deeper_it_goes() {
     use crate::motion::Band;
-    let band = Band::Curve { c: 0.55 };
+    let band = Band::Curve {
+        c: 0.55,
+        max_dimension: None,
+    };
     let dimension = 400.0_f32;
     let first = band.stretch(10.0, dimension);
     let second = band.stretch(20.0, dimension);
@@ -1216,5 +1219,223 @@ fn a_row_picture_rebuilds_without_the_rest_of_the_scroll() -> Result<(), crate::
         .map(|picture| picture.generation)
         .expect("row picture");
     assert_eq!(rebuilt, held, "moving the spacer must reuse the row");
+    Ok(())
+}
+
+#[test]
+fn continuous_wheel_overscroll_accumulates_and_returns_cleanly() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = viewport_scroll(ScrollAxis::Vertical, 200.0, 600.0)?;
+    tree.set_scroll_physics(
+        scroll,
+        ScrollPhysics {
+            accept: ScrollAccept::Always,
+            ..ScrollPhysics::default()
+        },
+    )?;
+    tree.layout()?;
+
+    tree.pointer(PointerEvent::wheel_with_phase(
+        20.0,
+        20.0,
+        0.0,
+        0.0,
+        -20.0,
+        crate::input::ScrollPhase::Began,
+    ));
+    let first = tree.overscroll(scroll)?.1;
+    assert!(first < 0.0, "expected negative top overscroll, got {first}");
+
+    tree.pointer(PointerEvent::wheel_with_phase(
+        20.0,
+        20.0,
+        16.0,
+        0.0,
+        -10.0,
+        crate::input::ScrollPhase::Changed,
+    ));
+    let second = tree.overscroll(scroll)?.1;
+    assert!(
+        second < first,
+        "continued pull must deepen overscroll ({first} -> {second})"
+    );
+
+    tree.pointer(PointerEvent::wheel_with_phase(
+        20.0,
+        20.0,
+        32.0,
+        0.0,
+        0.0,
+        crate::input::ScrollPhase::Ended,
+    ));
+    assert!(tree.tick_motions(32.0));
+    let returning = tree.overscroll(scroll)?.1;
+    tree.pointer(PointerEvent::wheel_with_phase(
+        20.0,
+        20.0,
+        40.0,
+        0.0,
+        -500.0,
+        WheelPhase::MomentumBegan,
+    ));
+    assert!(
+        tree.motion_active(),
+        "momentum interrupted the return spring"
+    );
+    assert_eq!(tree.overscroll(scroll)?.1, returning);
+    for step in 1..=30 {
+        let _ = tree.tick_motions(32.0 + f64::from(step) * 16.0);
+    }
+    assert!(
+        tree.overscroll(scroll)?.1.abs() < 0.5,
+        "overscroll spring should settle to zero, got {:?}",
+        tree.overscroll(scroll)?
+    );
+    Ok(())
+}
+
+#[test]
+fn trackpad_momentum_stays_with_its_scroll_and_bounces_once() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 200.0, 200.0)?;
+    let root = tree.row(0.0)?;
+    tree.set_fill(root)?;
+    let left = tree.scroll_with(ScrollAxis::Vertical)?;
+    let right = tree.scroll_with(ScrollAxis::Vertical)?;
+    for id in [left, right] {
+        tree.set_axis_size(
+            id,
+            crate::tree::AxisSize::Points(100.0),
+            crate::tree::AxisSize::Points(200.0),
+        )?;
+        let body = tree.sized(100.0, 600.0)?;
+        tree.add_child(id, body)?;
+        tree.add_child(root, id)?;
+    }
+    tree.layout()?;
+    let left_x = tree.rect(left)?.x + 10.0;
+    let right_x = tree.rect(right)?.x + 10.0;
+    let wheel = |x, time, dy, phase| PointerEvent::wheel_with_phase(x, 10.0, time, 0.0, dy, phase);
+    tree.pointer(wheel(left_x, 0.0, 20.0, WheelPhase::Began));
+    tree.pointer(wheel(left_x, 8.0, 0.0, WheelPhase::Ended));
+    tree.pointer(wheel(right_x, 16.0, 40.0, WheelPhase::MomentumBegan));
+    assert_eq!(tree.scroll_offset(left)?.1, 60.0);
+    assert_eq!(tree.scroll_offset(right)?.1, 0.0);
+    assert_eq!(tree.scroll_phase(left)?, ScrollPhase::Coasting);
+
+    tree.set_motion_clock(24.0);
+    tree.pointer(wheel(right_x, 24.0, 4000.0, WheelPhase::MomentumChanged));
+    assert_eq!(tree.scroll_offset(left)?.1, 400.0);
+    assert_eq!(
+        tree.overscroll(left)?.1,
+        0.0,
+        "impact starts at the boundary"
+    );
+    assert_eq!(tree.scroll_phase(left)?, ScrollPhase::Settling);
+    let _ = tree.tick_motions(66.0);
+    let peak = tree.overscroll(left)?.1;
+    assert!((15.0..=30.01).contains(&peak), "impact peaked at {peak}");
+    assert!(
+        tree.pointer(wheel(right_x, 70.0, -3000.0, WheelPhase::MomentumChanged))
+            .is_empty()
+    );
+    tree.pointer(wheel(right_x, 100.0, 0.0, WheelPhase::MomentumEnded));
+    assert_eq!(tree.overscroll(left)?.1, peak, "tail disturbed the bounce");
+    assert_eq!(tree.scroll_offset(right)?.1, 0.0);
+    assert!(!tree.tick_motions(324.0));
+    assert_eq!(tree.overscroll(left)?.1, 0.0);
+    assert_eq!(tree.scroll_phase(left)?, ScrollPhase::Idle);
+    tree.pointer(wheel(right_x, 330.0, 20.0, WheelPhase::Began));
+    assert_eq!(tree.scroll_offset(right)?.1, 20.0);
+    Ok(())
+}
+
+#[test]
+fn trackpad_release_after_a_pause_starts_at_the_held_stretch() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = viewport_scroll(ScrollAxis::Vertical, 100.0, 1600.0)?;
+    tree.set_viewport(0.0, 0.0, 100.0, 900.0)?;
+    tree.set_max_size(scroll, 100.0, 900.0)?;
+    tree.set_scroll_physics(
+        scroll,
+        ScrollPhysics {
+            accept: ScrollAccept::Overflow,
+            ..ScrollPhysics::default()
+        },
+    )?;
+    tree.layout()?;
+    let wheel = |time, dy, phase| PointerEvent::wheel_with_phase(20.0, 20.0, time, 0.0, dy, phase);
+    tree.pointer(wheel(0.0, -300.0, WheelPhase::MayBegin));
+    assert_eq!(tree.overscroll(scroll)?.1, 0.0);
+    tree.pointer(wheel(8.0, -300.0, WheelPhase::Began));
+    let held = tree.overscroll(scroll)?.1;
+    assert!(
+        (-80.0..=-70.0).contains(&held),
+        "desktop pull stretched to {held}"
+    );
+    assert!(!tree.tick_motions(8.0));
+
+    tree.set_motion_clock(508.0);
+    tree.pointer(wheel(508.0, 0.0, WheelPhase::Ended));
+    assert!(tree.tick_motions(508.0));
+    assert_eq!(tree.overscroll(scroll)?.1, held);
+    assert!(tree.tick_motions(608.0));
+    let returning = tree.overscroll(scroll)?.1;
+    assert!(
+        returning < 0.0 && returning > held * 0.35,
+        "returning stretch: {returning}"
+    );
+    assert!(!tree.tick_motions(858.0));
+    assert_eq!(tree.overscroll(scroll)?.1, 0.0);
+    Ok(())
+}
+
+#[test]
+fn overflow_wheel_skips_short_content_and_keeps_explicit_always() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = viewport_scroll(ScrollAxis::Vertical, 100.0, 50.0)?;
+    tree.set_scroll_physics(
+        scroll,
+        ScrollPhysics {
+            accept: ScrollAccept::Overflow,
+            ..ScrollPhysics::default()
+        },
+    )?;
+    let pull = PointerEvent::wheel_with_phase(20.0, 20.0, 0.0, 0.0, -60.0, WheelPhase::Began);
+    assert!(tree.pointer(pull).is_empty());
+    assert_eq!(tree.overscroll(scroll)?.1, 0.0);
+    tree.set_scroll_physics(
+        scroll,
+        ScrollPhysics {
+            accept: ScrollAccept::Always,
+            ..ScrollPhysics::default()
+        },
+    )?;
+    assert_eq!(tree.pointer(pull), [Gesture::Wheel(scroll, 0.0, -60.0)]);
+    assert!(tree.overscroll(scroll)?.1 < 0.0);
+    Ok(())
+}
+
+#[test]
+fn regrabbing_during_overscroll_preserves_stretch_without_snap() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = viewport_scroll(ScrollAxis::Vertical, 200.0, 600.0)?;
+    tree.set_scroll_physics(
+        scroll,
+        ScrollPhysics {
+            accept: ScrollAccept::Always,
+            ..ScrollPhysics::default()
+        },
+    )?;
+    tree.layout()?;
+
+    tree.resolve_scroll(scroll, 0.0, -60.0)?;
+    let pulled = tree.overscroll(scroll)?.1;
+    assert!(pulled < -10.0);
+
+    tree.pointer(event(Phase::Down, 20.0, 40.0, 0.0));
+    // Drag past slop downward (further into negative offset/overscroll).
+    let _ = tree.pointer(event(Phase::Move, 20.0, 55.0, 16.0));
+    let after_grab = tree.overscroll(scroll)?.1;
+    assert!(
+        after_grab <= pulled + 0.5,
+        "re-grabbing should not snap overscroll back ({pulled} -> {after_grab})"
+    );
     Ok(())
 }

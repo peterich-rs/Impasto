@@ -661,3 +661,70 @@ fn translate_transform_matches_flat() -> Result<(), crate::Error> {
     assert_eq!(local, Some(0.0));
     Ok(())
 }
+
+#[test]
+fn widened_layer_button_shifts_and_repaints_adjacent_sibling() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 400.0, 60.0)?;
+    let row = tree.row(8.0)?;
+
+    let tool1 = tree.decorated([10, 20, 30, 255], 4.0)?;
+    let label1 = tree.text("Show raw", 12.0, [255, 255, 255, 255])?;
+    tree.add_child(tool1, label1)?;
+
+    let tool2 = tree.decorated([10, 20, 30, 255], 4.0)?;
+    let label2 = tree.text("Copy stack", 12.0, [255, 255, 255, 255])?;
+    tree.add_child(tool2, label2)?;
+
+    tree.add_child(row, tool1)?;
+    tree.add_child(row, tool2)?;
+    tree.layout()?;
+
+    // Promote tool1 to its own retained layer via a rect color update (like hover).
+    let mut patch = crate::style::Patch::new();
+    patch.set(crate::style::Property::BackgroundColor(
+        crate::style::PaintColor::rgba([40, 50, 60, 255]),
+    ))?;
+    tree.patch_style(tool1, patch)?;
+    let before = tree.record()?;
+    let copy_x_before = before
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            crate::scene::Command::Text { x, shaped, .. }
+                if shaped
+                    .as_deref()
+                    .is_some_and(|s| crate::text::test_support::mono_text(s) == "Copy stack") =>
+            {
+                Some(*x)
+            }
+            _ => None,
+        })
+        .expect("Copy stack drawn before");
+    assert_eq!(copy_x_before, tree.rect(tool2)?.x);
+
+    tree.set_text(label1, "Show symbolicated")?;
+    tree.layout()?;
+    let after = tree.record()?;
+    agree_list(&tree, &after)?;
+    let copy_x_after = after
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            crate::scene::Command::Text { x, shaped, .. }
+                if shaped
+                    .as_deref()
+                    .is_some_and(|s| crate::text::test_support::mono_text(s) == "Copy stack") =>
+            {
+                Some(*x)
+            }
+            _ => None,
+        })
+        .expect("Copy stack drawn after");
+    assert!(
+        copy_x_after > copy_x_before,
+        "Copy stack x should shift right ({copy_x_before} -> {copy_x_after})"
+    );
+    assert_eq!(copy_x_after, tree.rect(tool2)?.x);
+    Ok(())
+}

@@ -159,6 +159,48 @@ impl LayoutStore {
         Ok(())
     }
 
+    fn detach_from_containing(&mut self, child: NodeId) -> Option<NodeId> {
+        let containing = self.get_mut(child).ok()?.containing.take()?;
+        if let Ok(owner) = self.get_mut(containing) {
+            owner.hoisted.retain(|&id| id != child);
+            Some(containing)
+        } else {
+            None
+        }
+    }
+
+    fn detach_subtree_from_ancestors(&mut self, root: NodeId, origin: NodeId) {
+        let mut subtree = HashSet::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if !subtree.insert(id) {
+                continue;
+            }
+            if let Ok(node) = self.get(id) {
+                stack.extend_from_slice(&node.children);
+            }
+        }
+        let mut to_invalidate = HashSet::new();
+        for &id in &subtree {
+            let Some(containing) = self.get(id).ok().and_then(|node| node.containing) else {
+                continue;
+            };
+            if subtree.contains(&containing) {
+                continue;
+            }
+            if let Some(owner) = self.detach_from_containing(id)
+                && owner != origin
+            {
+                to_invalidate.insert(owner);
+            }
+        }
+        for owner in to_invalidate {
+            if self.get(owner).is_ok() {
+                self.invalidate(owner, origin, "structure");
+            }
+        }
+    }
+
     #[cfg(feature = "js")]
     pub(super) fn reconcile_children(
         &mut self,
@@ -175,14 +217,13 @@ impl LayoutStore {
             }
         }
         for &child in removed {
-            let node = self.get_mut(child)?;
-            node.parent = None;
-            let containing = node.containing.take();
-            node.latest_layout = None;
-            self.pending.remove(&child);
-            if let Some(containing) = containing.filter(|&id| id != parent) {
-                self.invalidate(containing, parent, "structure");
+            {
+                let node = self.get_mut(child)?;
+                node.parent = None;
+                node.latest_layout = None;
             }
+            self.pending.remove(&child);
+            self.detach_subtree_from_ancestors(child, parent);
         }
         self.get_mut(parent)?.children = children;
         self.invalidate(parent, parent, "structure");
@@ -191,21 +232,42 @@ impl LayoutStore {
 
     pub(super) fn remove_child(&mut self, parent: NodeId, child: NodeId) -> Result<()> {
         self.get_mut(parent)?.children.retain(|&id| id != child);
-        let removed = self.get_mut(child)?;
-        removed.parent = None;
-        let containing = removed.containing.take();
-        removed.latest_layout = None;
-        self.pending.remove(&child);
-        self.invalidate(parent, parent, "structure");
-        if let Some(containing) = containing.filter(|&id| id != parent) {
-            self.invalidate(containing, parent, "structure");
+        {
+            let removed = self.get_mut(child)?;
+            removed.parent = None;
+            removed.latest_layout = None;
         }
+        self.pending.remove(&child);
+        self.detach_subtree_from_ancestors(child, parent);
+        self.invalidate(parent, parent, "structure");
         Ok(())
     }
 
     pub(super) fn remove(&mut self, id: NodeId) -> Result<()> {
         if let Some(parent) = self.get(id)?.parent {
             self.remove_child(parent, id)?;
+        }
+        self.detach_from_containing(id);
+        let (children, hoisted) = {
+            let node = self.get_mut(id)?;
+            (
+                std::mem::take(&mut node.children),
+                std::mem::take(&mut node.hoisted),
+            )
+        };
+        for child in children {
+            if let Ok(node) = self.get_mut(child)
+                && node.parent == Some(id)
+            {
+                node.parent = None;
+            }
+        }
+        for hoisted_child in hoisted {
+            if let Ok(node) = self.get_mut(hoisted_child)
+                && node.containing == Some(id)
+            {
+                node.containing = None;
+            }
         }
         self.pending.remove(&id);
         self.rounded_changes.remove(&id);
@@ -543,8 +605,16 @@ where
         let track = block.is_none() && (self.store.at(id).measure || self.store.eligible(id));
         let output = compute_cached_layout(self, id, input, |tree, id, input| {
             let mut output = match (display, tree.child_count(id)) {
-                (Display::None, _) => compute_hidden_layout(tree, id),
+                (Display::None, _) => {
+                    if input.run_mode == RunMode::PerformLayout {
+                        tree.clear_hoisted_children(id);
+                    }
+                    compute_hidden_layout(tree, id)
+                }
                 (_, 0) => {
+                    if input.run_mode == RunMode::PerformLayout {
+                        tree.clear_hoisted_children(id);
+                    }
                     let node = tree.store.at(id);
                     (tree.measure)(input, node.measure_index(), &node.style)
                 }

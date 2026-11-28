@@ -78,7 +78,7 @@ pub(super) fn on_frame(
             runtime.frame_number,
         );
     }
-    let (paused, gesture_ms) = deliver_frame_input(runtime);
+    let (paused, gesture_ms) = deliver_frame_input(runtime, time);
     let session_started = Instant::now();
     let Some(SessionFrame {
         again,
@@ -395,8 +395,11 @@ fn frame_schedule(
     })
 }
 
-fn deliver_frame_input(runtime: &mut UiHost) -> (bool, f64) {
+fn deliver_frame_input(runtime: &mut UiHost, time: FrameTime) -> (bool, f64) {
     let frame = runtime.input.begin_frame();
+    if let Some(session) = runtime.session.as_mut() {
+        session_call(|| session.prepare_frame_input(time));
+    }
     if let Some(metrics) = frame.metrics {
         runtime.point_scale = metrics.device_pixel_ratio;
         if let Some(session) = runtime.session.as_mut() {
