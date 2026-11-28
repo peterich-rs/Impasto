@@ -4,13 +4,14 @@ targets = ["macos"]
 
 [macos.window]
 title = "Impasto DevTools"
-width = 1360
-height = 860
-min_width = 840
-min_height = 520
+width = 1400
+height = 880
+min_width = 960
+min_height = 600
 autosave_name = "impasto.devtools.main"
 
 [dependencies]
 "@impasto/solid-renderer" = "builtin"
 "@impasto/solid-ui" = "builtin"
 "@impasto/file-system" = "builtin"
+"@impasto/clipboard" = "builtin"

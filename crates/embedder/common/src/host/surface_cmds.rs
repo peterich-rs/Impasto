@@ -186,6 +186,9 @@ fn apply(runtime: &mut UiHost, result: OpenOutcome, acks: &Arc<Acks>) -> Result<
             runtime.try_surface = false;
             runtime.revision = runtime.revision.wrapping_add(1);
             note_scale(runtime, metrics.device_pixel_ratio);
+            if let Some(hub) = &runtime.hub {
+                hub.note_metrics(metrics);
+            }
             runtime.input.set_metrics(metrics);
             arm(runtime);
             tracing::info!(target: "impasto::render::surface", surface = id.0, "surface opened");
@@ -233,6 +236,9 @@ fn changed(
         move |runtime, (changed, pending)| match (changed, pending) {
             (Changed::Staged { resized }, _) if runtime.active_surface == Some(id) => {
                 note_scale(runtime, metrics.device_pixel_ratio);
+                if let Some(hub) = &runtime.hub {
+                    hub.note_metrics(metrics);
+                }
                 let metrics_changed = runtime.input.set_metrics(metrics);
                 if metrics_changed || (resized && !runtime.input.is_paused()) {
                     arm(runtime);

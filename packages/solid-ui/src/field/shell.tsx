@@ -451,7 +451,7 @@ export function FieldShell(props: FieldProps): NodeHandle {
           publish(true);
         }}
         onKey={(key) => {
-          if (blocked()) {
+          if (blocked() || props.onKeyDown?.(key)) {
             return;
           }
           controller.handleKey(
