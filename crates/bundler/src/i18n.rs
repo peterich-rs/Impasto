@@ -16,13 +16,10 @@ pub(crate) const MODULE: &str = "virtual:impasto-locales";
 #[serde(untagged)]
 enum Message {
     Text(String),
-    Plural {
-        one: String,
-        other: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        zero: Option<String>,
-    },
+    Plural(BTreeMap<String, String>),
 }
+
+const PLURAL_FORMS: [&str; 6] = ["zero", "one", "two", "few", "many", "other"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Signature {
@@ -218,31 +215,26 @@ fn flatten(prefix: &str, json: Value, output: &mut Messages) -> Result<()> {
         let message = match value {
             Value::String(value) => Message::Text(value.clone()),
             Value::Object(forms)
-                if forms.contains_key("one")
-                    || forms.contains_key("other")
-                    || forms.contains_key("zero") =>
-            {
                 if forms
                     .keys()
-                    .any(|name| !matches!(name.as_str(), "zero" | "one" | "other"))
-                {
-                    bail!("{key}: unexpected plural form");
+                    .any(|name| PLURAL_FORMS.contains(&name.as_str())) =>
+            {
+                if !forms.contains_key("other") {
+                    bail!("{key}: expected a string for plural form other");
                 }
-                let get = |form: &str| {
-                    forms
-                        .get(form)
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .with_context(|| format!("{key}: expected a string for plural form {form}"))
-                };
-                Message::Plural {
-                    one: get("one")?,
-                    other: get("other")?,
-                    zero: forms
-                        .contains_key("zero")
-                        .then(|| get("zero"))
-                        .transpose()?,
-                }
+                let variants = forms
+                    .iter()
+                    .map(|(form, value)| {
+                        if !PLURAL_FORMS.contains(&form.as_str()) {
+                            bail!("{key}: unexpected plural form {form}");
+                        }
+                        let text = value.as_str().with_context(|| {
+                            format!("{key}: expected a string for plural form {form}")
+                        })?;
+                        Ok((form.clone(), text.to_owned()))
+                    })
+                    .collect::<Result<_>>()?;
+                Message::Plural(variants)
             }
             Value::Object(_) => {
                 flatten(&key, value.clone(), output)?;
@@ -264,10 +256,10 @@ impl Message {
                 plural: false,
                 parameters: parameters(text)?,
             }),
-            Self::Plural { one, other, zero } => {
-                let mut names = parameters(other)?;
+            Self::Plural(forms) => {
+                let mut names = parameters(&forms["other"])?;
                 names.insert("count".to_owned());
-                for text in std::iter::once(one).chain(zero) {
+                for text in forms.values() {
                     let mut branch = parameters(text)?;
                     branch.insert("count".to_owned());
                     if branch != names {
@@ -533,4 +525,33 @@ fn namespace_prefix(expression: &oxc::ast::ast::Expression<'_>) -> Option<String
     };
     let (namespace, _) = head.split_once('.')?;
     Some(namespace.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_all_cldr_plural_categories_and_other_alone() -> Result<()> {
+        let mut messages = Messages::new();
+        flatten(
+            "",
+            serde_json::json!({
+                "apples": {"zero": "zero", "one": "one", "two": "two", "few": "few", "many": "many", "other": "other"},
+                "pears": {"other": "other"}
+            }),
+            &mut messages,
+        )?;
+        assert!(matches!(messages.get("apples"), Some(Message::Plural(forms)) if forms.len() == 6));
+        assert!(matches!(messages.get("pears"), Some(Message::Plural(forms)) if forms.len() == 1));
+        assert!(
+            flatten(
+                "",
+                serde_json::json!({"apples": {"two": "two"}}),
+                &mut Messages::new()
+            )
+            .is_err()
+        );
+        Ok(())
+    }
 }

@@ -6,10 +6,12 @@
 )]
 
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
+use crate::options::{CookieJar, Pins, ProxyOptions};
 use crate::wire::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
     RedirectMode,
@@ -19,15 +21,36 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{
-    NSData, NSError, NSHTTPURLResponse, NSMutableURLRequest, NSString, NSURL,
+    NSArray, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSMutableURLRequest, NSNumber,
+    NSString, NSURL, NSURLAuthenticationChallenge, NSURLCredential, NSURLCredentialPersistence,
     NSURLErrorBadURL as BAD_URL, NSURLErrorCancelled as CANCELLED, NSURLErrorTimedOut as TIMED_OUT,
     NSURLErrorUnsupportedURL as UNSUPPORTED_URL, NSURLRequest, NSURLRequestCachePolicy,
-    NSURLResponse, NSURLSession, NSURLSessionConfiguration, NSURLSessionDataDelegate,
-    NSURLSessionDataTask, NSURLSessionDelegate, NSURLSessionResponseDisposition, NSURLSessionTask,
+    NSURLResponse, NSURLSession, NSURLSessionAuthChallengeDisposition as AuthDisposition,
+    NSURLSessionConfiguration, NSURLSessionDataDelegate, NSURLSessionDataTask,
+    NSURLSessionDelegate, NSURLSessionResponseDisposition, NSURLSessionTask,
     NSURLSessionTaskDelegate,
 };
 
-pub(super) struct Http;
+pub(super) struct Http {
+    session: Session,
+    proxy: Option<url::Url>,
+}
+
+impl Http {
+    pub(super) fn new(proxy: Option<&ProxyOptions>) -> Result<Self, HttpError> {
+        autoreleasepool(|_| {
+            let configuration = NSURLSessionConfiguration::ephemeralSessionConfiguration();
+            configuration
+                .setRequestCachePolicy(NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData);
+            configuration.setHTTPShouldSetCookies(false);
+            let proxy = proxy
+                .map(|proxy| configure_proxy(&configuration, proxy))
+                .transpose()?;
+            let session = Session(NSURLSession::sessionWithConfiguration(&configuration));
+            Ok(Self { session, proxy })
+        })
+    }
+}
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 const CANCEL_CHECK: Duration = Duration::from_millis(20);
@@ -40,6 +63,10 @@ enum Received {
         headers: Vec<(String, String)>,
     },
     Body(Vec<u8>),
+    Upload {
+        loaded: u64,
+        total: Option<u64>,
+    },
     Completed(Result<(), HttpError>),
 }
 
@@ -49,6 +76,12 @@ struct ReceiverState {
     redirect_mode: RedirectMode,
     max_bytes: usize,
     bytes: AtomicUsize,
+    cookies: Option<Arc<CookieJar>>,
+    pins: Option<Arc<Pins>>,
+    proxy: Option<url::Url>,
+    progress: bool,
+    reported: AtomicU64,
+    explicit_cookies: bool,
 }
 
 define_class!(
@@ -69,11 +102,12 @@ define_class!(
             &self,
             _: &NSURLSession,
             task: &NSURLSessionTask,
-            _: &NSHTTPURLResponse,
+            response: &NSHTTPURLResponse,
             request: &NSURLRequest,
             completion: &DynBlock<dyn Fn(*mut NSURLRequest)>,
         ) {
             let state = self.ivars();
+            self.store_cookies(response);
             match state.redirect_mode {
                 RedirectMode::Manual => {
                     completion.call((ptr::null_mut(),));
@@ -105,7 +139,63 @@ define_class!(
                 task.cancel();
                 return;
             }
-            completion.call((ptr::from_ref(request).cast_mut(),));
+            let Some(url) = request.URL() else {
+                completion.call((ptr::null_mut(),));
+                return;
+            };
+            if reject_plaintext(&url, state.pins.as_deref()) {
+                let _ = state.send.send(Received::Completed(Err(pin_mismatch())));
+                completion.call((ptr::null_mut(),));
+                task.cancel();
+                return;
+            }
+            // SAFETY: mutableCopy for a URL request returns an owned NSMutableURLRequest.
+            let next: Retained<NSMutableURLRequest> = unsafe { msg_send![request, mutableCopy] };
+            if origin(response.URL().as_deref()) != origin(Some(&url)) {
+                for name in ["Authorization", "Cookie", "Proxy-Authorization"] {
+                    next.setValue_forHTTPHeaderField(None, &NSString::from_str(name));
+                }
+            }
+            if state.cookies.is_some() && !state.explicit_cookies {
+                next.setValue_forHTTPHeaderField(None, &NSString::from_str("Cookie"));
+            }
+            attach_cookies(&next, &url, state.cookies.as_deref());
+            completion.call((ptr::from_ref(&**next).cast_mut(),));
+        }
+
+        #[unsafe(method(URLSession:task:didReceiveChallenge:completionHandler:))]
+        unsafe fn URLSession_task_didReceiveChallenge_completionHandler(
+            &self,
+            _: &NSURLSession,
+            _: &NSURLSessionTask,
+            challenge: &NSURLAuthenticationChallenge,
+            completion: &Challenge,
+        ) {
+            self.challenge(challenge, completion);
+        }
+
+        #[unsafe(method(URLSession:task:didSendBodyData:totalBytesSent:totalBytesExpectedToSend:))]
+        fn URLSession_task_didSendBodyData_totalBytesSent_totalBytesExpectedToSend(
+            &self,
+            _: &NSURLSession,
+            _: &NSURLSessionTask,
+            _: i64,
+            loaded: i64,
+            total: i64,
+        ) {
+            let state = self.ivars();
+            if !state.progress {
+                return;
+            }
+            let Ok(loaded) = u64::try_from(loaded) else {
+                return;
+            };
+            let total = u64::try_from(total).ok();
+            let previous = state.reported.load(Ordering::Relaxed);
+            if Some(loaded) == total || loaded.saturating_sub(previous) >= 64 * 1024 {
+                state.reported.store(loaded, Ordering::Relaxed);
+                let _ = state.send.send(Received::Upload { loaded, total });
+            }
         }
 
         #[unsafe(method(URLSession:task:didCompleteWithError:))]
@@ -134,7 +224,10 @@ define_class!(
                 let response: &AnyObject = response;
                 let result = response
                     .downcast_ref::<NSHTTPURLResponse>()
-                    .and_then(response_head);
+                    .and_then(|response| {
+                        self.store_cookies(response);
+                        response_head(response)
+                    });
                 let disposition = match result {
                     Some(head) => {
                         if self.ivars().send.send(head).is_ok() {
@@ -189,19 +282,218 @@ define_class!(
 impl Receiver {
     fn new(
         send: SyncSender<Received>,
-        redirect_mode: RedirectMode,
-        max_bytes: usize,
+        request: &HttpRequest,
+        proxy: Option<url::Url>,
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(ReceiverState {
             send,
             redirects: AtomicUsize::new(0),
-            redirect_mode,
-            max_bytes,
+            redirect_mode: request.redirect,
+            max_bytes: request.max_body_bytes.unwrap_or(HTTP_BODY_LIMIT),
             bytes: AtomicUsize::new(0),
+            cookies: request.extra.cookies.clone(),
+            pins: request.extra.pins.clone(),
+            proxy,
+            progress: request.extra.progress,
+            reported: AtomicU64::new(0),
+            explicit_cookies: request
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("cookie")),
         });
         // SAFETY: this is an allocated NSObject subclass initialized once.
         unsafe { msg_send![super(this), init] }
     }
+}
+
+type Challenge = DynBlock<dyn Fn(AuthDisposition, *mut NSURLCredential)>;
+
+impl Receiver {
+    fn store_cookies(&self, response: &NSHTTPURLResponse) {
+        if let Some(jar) = &self.ivars().cookies
+            && let Some(Received::Head {
+                url: Some(url),
+                headers,
+                ..
+            }) = response_head(response)
+        {
+            jar.update(&url, &headers);
+        }
+    }
+
+    fn challenge(&self, challenge: &NSURLAuthenticationChallenge, completion: &Challenge) {
+        let space = challenge.protectionSpace();
+        let host = space.host().to_string();
+        if space.isProxy()
+            && let Some(proxy) = &self.ivars().proxy
+            && proxy.host_str() == Some(host.as_str())
+            && !proxy.username().is_empty()
+            && challenge.previousFailureCount() == 0
+        {
+            let credential = NSURLCredential::credentialWithUser_password_persistence(
+                &NSString::from_str(proxy.username()),
+                &NSString::from_str(proxy.password().unwrap_or_default()),
+                NSURLCredentialPersistence::None,
+            );
+            completion.call((
+                AuthDisposition::UseCredential,
+                Retained::as_ptr(&credential).cast_mut(),
+            ));
+            return;
+        }
+        let pins = self
+            .ivars()
+            .pins
+            .as_deref()
+            .filter(|pins| pins.required(&host));
+        if space.authenticationMethod().to_string() != "NSURLAuthenticationMethodServerTrust"
+            || pins.is_none()
+        {
+            completion.call((AuthDisposition::PerformDefaultHandling, ptr::null_mut()));
+            return;
+        }
+        if let Some(pins) = pins
+            && let Some(credential) = trusted_credential(&space, &host, pins)
+        {
+            completion.call((
+                AuthDisposition::UseCredential,
+                Retained::as_ptr(&credential).cast_mut(),
+            ));
+        } else {
+            let _ = self
+                .ivars()
+                .send
+                .send(Received::Completed(Err(pin_mismatch())));
+            completion.call((
+                AuthDisposition::CancelAuthenticationChallenge,
+                ptr::null_mut(),
+            ));
+        }
+    }
+}
+
+#[repr(C)]
+struct NativeSecTrust {
+    opaque: [u8; 0],
+}
+
+// SAFETY: Security.h declares SecTrustRef as a pointer to the opaque __SecTrust structure.
+unsafe impl objc2::encode::RefEncode for NativeSecTrust {
+    const ENCODING_REF: objc2::encode::Encoding =
+        objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct("__SecTrust", &[]));
+}
+
+fn trusted_credential(
+    space: &objc2_foundation::NSURLProtectionSpace,
+    host: &str,
+    pins: &Pins,
+) -> Option<Retained<NSURLCredential>> {
+    use core_foundation::base::TCFType as _;
+    use security_framework::trust::SecTrust;
+    // SAFETY: serverTrust is the Security-framework SecTrustRef owned by the protection space.
+    let raw: *mut NativeSecTrust = unsafe { msg_send![space, serverTrust] };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: the non-null borrowed SecTrustRef is retained for the lifetime of the wrapper.
+    let trust = unsafe { SecTrust::wrap_under_get_rule(raw.cast()) };
+    trust.evaluate_with_error().ok()?;
+    let chain = trust
+        .chain()
+        .iter()
+        .map(|certificate| certificate.to_der())
+        .collect::<Vec<_>>();
+    if !pins.verify(host, chain.iter().map(Vec::as_slice)) {
+        return None;
+    }
+    // SAFETY: credentialForTrust: accepts the live evaluated trust and returns an autoreleased credential.
+    unsafe { msg_send![objc2::class!(NSURLCredential), credentialForTrust: raw] }
+}
+
+fn origin(url: Option<&NSURL>) -> Option<url::Origin> {
+    let url = url?.absoluteString()?.to_string();
+    url::Url::parse(&url).ok().map(|url| url.origin())
+}
+
+fn attach_cookies(request: &NSMutableURLRequest, url: &NSURL, jar: Option<&CookieJar>) {
+    let field = NSString::from_str("Cookie");
+    if request.valueForHTTPHeaderField(&field).is_none()
+        && let Some(jar) = jar
+        && let Some(url) = url.absoluteString()
+        && let Some(value) = jar.value(&url.to_string())
+    {
+        request.setValue_forHTTPHeaderField(Some(&NSString::from_str(&value)), &field);
+    }
+}
+
+fn reject_plaintext(url: &NSURL, pins: Option<&Pins>) -> bool {
+    pins.is_some_and(|pins| {
+        url.host()
+            .is_some_and(|host| pins.required(&host.to_string()))
+    }) && url
+        .scheme()
+        .is_some_and(|scheme| scheme.to_string() != "https")
+}
+
+fn pin_mismatch() -> HttpError {
+    HttpError::new(HttpFailure::TlsPinMismatch, "HTTP certificate pin mismatch")
+}
+
+fn configure_proxy(
+    configuration: &NSURLSessionConfiguration,
+    options: &ProxyOptions,
+) -> Result<url::Url, HttpError> {
+    let parsed = url::Url::parse(&options.url)
+        .ok()
+        .filter(|url| url.scheme() == "http" && url.host().is_some())
+        .ok_or_else(|| HttpError::new(HttpFailure::BadUrl, "Unsupported HTTP proxy URL"))?;
+    let host: Retained<AnyObject> = NSString::from_str(parsed.host_str().unwrap_or_default())
+        .into_super()
+        .into_super();
+    let port: Retained<AnyObject> = NSNumber::numberWithUnsignedShort(parsed.port().unwrap_or(80))
+        .into_super()
+        .into_super()
+        .into_super();
+    let enabled: Retained<AnyObject> = NSNumber::numberWithBool(true)
+        .into_super()
+        .into_super()
+        .into_super();
+    let bypass = options
+        .bypass
+        .iter()
+        .flatten()
+        .map(|rule| NSString::from_str(rule))
+        .collect::<Vec<_>>();
+    let exclusions: Retained<AnyObject> = NSArray::from_retained_slice(&bypass)
+        .into_super()
+        .into_super();
+    let keys = [
+        "HTTPEnable",
+        "HTTPProxy",
+        "HTTPPort",
+        "HTTPSEnable",
+        "HTTPSProxy",
+        "HTTPSPort",
+        "ExceptionsList",
+    ]
+    .map(NSString::from_str);
+    let values = [
+        enabled.clone(),
+        host.clone(),
+        port.clone(),
+        enabled,
+        host,
+        port,
+        exclusions,
+    ];
+    let dict = NSDictionary::from_retained_objects(&keys.each_ref().map(|key| &**key), &values);
+    // SAFETY: Objective-C lightweight generics are erased; all keys and values are objects.
+    let dict = unsafe {
+        Retained::<NSDictionary<NSString, AnyObject>>::cast_unchecked::<NSDictionary>(dict)
+    };
+    // SAFETY: CFNetwork accepts NSString keys and NSNumber, NSString, or NSArray values.
+    unsafe { configuration.setConnectionProxyDictionary(Some(&dict)) };
+    Ok(parsed)
 }
 
 fn response_head(response: &NSHTTPURLResponse) -> Option<Received> {
@@ -248,6 +540,14 @@ impl Drop for Session {
     }
 }
 
+struct RunningTask(Retained<NSURLSessionTask>);
+
+impl Drop for RunningTask {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 impl HttpClient for Http {
     fn perform(&self, request: &HttpRequest) -> Result<HttpResponse, HttpError> {
         let mut head = None;
@@ -261,6 +561,7 @@ impl HttpClient for Http {
                     headers,
                 } => head = Some((status, url.to_owned(), redirected, headers.to_vec())),
                 HttpPiece::Chunk(bytes, _) => body.extend_from_slice(bytes),
+                HttpPiece::Upload { .. } => {}
             }
             true
         })?;
@@ -287,30 +588,25 @@ impl HttpClient for Http {
             if request.cancel.is_cancelled() {
                 return Err(aborted());
             }
-            let configuration = NSURLSessionConfiguration::ephemeralSessionConfiguration();
-            configuration.setTimeoutIntervalForRequest(timeout.as_secs_f64());
-            configuration.setTimeoutIntervalForResource(timeout.as_secs_f64());
-            configuration
-                .setRequestCachePolicy(NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData);
-            configuration.setHTTPShouldSetCookies(false);
             let native = native_request(request, timeout)?;
             let (send, receive) = mpsc::sync_channel(2);
-            let delegate = Receiver::new(
-                send,
-                request.redirect,
-                request.max_body_bytes.unwrap_or(HTTP_BODY_LIMIT),
-            );
-            // SAFETY: NSURLSession creates its own serial delegate queue; the
-            // receiver owns all state by value, and its ivars are Send + Sync.
-            let session = Session(unsafe {
-                NSURLSession::sessionWithConfiguration_delegate_delegateQueue(
-                    &configuration,
-                    Some(ProtocolObject::from_ref(&*delegate)),
-                    None,
-                )
-            });
-            let task = session.0.dataTaskWithRequest(&native);
-            task.resume();
+            let delegate = Receiver::new(send, request, self.proxy.clone());
+            let task: Retained<NSURLSessionTask> = if let Some(path) = &request.extra.upload {
+                let path = path
+                    .to_str()
+                    .ok_or_else(|| HttpError::new(HttpFailure::Io, "Upload path is not UTF-8"))?;
+                let file = NSURL::fileURLWithPath(&NSString::from_str(path));
+                self.session
+                    .0
+                    .uploadTaskWithRequest_fromFile(&native, &file)
+                    .into_super()
+                    .into_super()
+            } else {
+                self.session.0.dataTaskWithRequest(&native).into_super()
+            };
+            task.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            let task = RunningTask(task);
+            task.0.resume();
             let start = Instant::now();
             loop {
                 if request.cancel.is_cancelled() {
@@ -353,6 +649,11 @@ impl HttpClient for Http {
                             return Ok(());
                         }
                     }
+                    Received::Upload { loaded, total } => {
+                        if !sink(HttpPiece::Upload { loaded, total }) {
+                            return Ok(());
+                        }
+                    }
                     Received::Body(bytes) => {
                         if !sink(HttpPiece::Chunk(&bytes, false)) {
                             return Ok(());
@@ -376,6 +677,9 @@ fn native_request(
     let url = NSURL::URLWithString(&NSString::from_str(&request.url))
         .filter(|url| is_http_url(url))
         .ok_or_else(|| HttpError::new(HttpFailure::BadUrl, "unsupported HTTP URL"))?;
+    if reject_plaintext(&url, request.extra.pins.as_deref()) {
+        return Err(pin_mismatch());
+    }
     if !is_token(&request.method) {
         return Err(HttpError::new(
             HttpFailure::BadUrl,
@@ -401,7 +705,10 @@ fn native_request(
         }
         native.addValue_forHTTPHeaderField(&NSString::from_str(value), &NSString::from_str(name));
     }
-    if !request.body.is_empty() || !matches!(request.method.as_str(), "GET" | "HEAD") {
+    attach_cookies(&native, &url, request.extra.cookies.as_deref());
+    if request.extra.upload.is_none()
+        && (!request.body.is_empty() || !matches!(request.method.as_str(), "GET" | "HEAD"))
+    {
         native.setHTTPBody(Some(&NSData::with_bytes(&request.body)));
     }
     Ok(native)
@@ -500,12 +807,14 @@ mod tests {
             cancel: CancelToken::new(),
             timeout_ms: Some(4_000),
             redirect: RedirectMode::Follow,
+            extra: Default::default(),
             max_body_bytes: None,
         };
         let mut status = 0;
         let mut body = Vec::new();
         let mut done = false;
-        let transfer = Http.stream(&request, &mut |piece| {
+        let client = Http::new(None).map_err(|error| error.message)?;
+        let transfer = client.stream(&request, &mut |piece| {
             match piece {
                 HttpPiece::Head { status: code, .. } => status = code,
                 HttpPiece::Chunk(bytes, last) => {

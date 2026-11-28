@@ -76,7 +76,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.rootViewController = content
         self.host = host
         self.window = window
-        host.prepare()
+        host.prepare(connectionOptions: options)
         for url in initialLinks.dropFirst() { host.open(url) }
         if interactive {
             window.makeKeyAndVisible()

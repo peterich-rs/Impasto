@@ -172,6 +172,10 @@ public final class ImpastoHost {
         startPreparation()
     }
 
+    func prepare(connectionOptions: UIScene.ConnectionOptions) {
+        startPreparation(connectionOptions: connectionOptions)
+    }
+
     /// Waits for the session to become ready. Cancelling the task stops this wait.
     /// Call close() to end the session and all other waits.
     public func prepare() async throws {
@@ -194,7 +198,7 @@ public final class ImpastoHost {
         }
     }
 
-    private func startPreparation() {
+    private func startPreparation(connectionOptions: UIScene.ConnectionOptions? = nil) {
         guard state == .idle else { return }
         guard resources.isFileURL else {
             transition(.failed("Invalid local resource directory"))
@@ -207,6 +211,7 @@ public final class ImpastoHost {
             guard state == .preparing else { return }
             installedPlugins.append(plugin)
             plugin.installed(in: self)
+            if let connectionOptions { plugin.sceneConnected(connectionOptions) }
         }
         guard state == .preparing else { return }
         if let controller { attachPlugins(to: controller) }

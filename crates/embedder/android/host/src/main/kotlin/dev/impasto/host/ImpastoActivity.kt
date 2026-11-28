@@ -11,12 +11,12 @@ import android.util.Log
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.Executors
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 
 /** Entry point for an Impasto window and its engine session. */
-open class ImpastoActivity : ComponentActivity() {
+open class ImpastoActivity : FragmentActivity() {
     private var host: ImpastoHost? = null
     protected open val platformViewFactories: Map<String, PlatformViewFactory> = emptyMap()
     protected open fun registerPlugins(host: ImpastoHost) {}

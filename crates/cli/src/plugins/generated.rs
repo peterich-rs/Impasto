@@ -48,6 +48,20 @@ pub fn prepare(app: &App, target: &str, verbose: bool) -> Result<NativeBuild> {
         .map(|profile| toml::to_string(&BTreeMap::from([("profile", profile)])))
         .transpose()?
         .unwrap_or_default();
+    if resolved
+        .crates
+        .iter()
+        .any(|(_, name)| name == "impasto-intl")
+    {
+        let locales = intl_locales(app)?;
+        let blob = impasto_intl::datagen::export_data(&locales).map_err(anyhow::Error::msg)?;
+        write_blob(&registry.join("src/intl.postcard.deflate"), &blob)?;
+        resolved
+            .rust_features
+            .entry("impasto-intl".into())
+            .or_default()
+            .insert("embedded-data".into());
+    }
     let mut sources = resolved.installed.clone();
     sources.insert("impasto".into(), framework.join("crates/impasto"));
     for (path, _) in &resolved.crates {
@@ -57,6 +71,7 @@ pub fn prepare(app: &App, target: &str, verbose: bool) -> Result<NativeBuild> {
     let signature = {
         let mut hasher = std::hash::DefaultHasher::new();
         sources.hash(&mut hasher);
+        resolved.rust_features.hash(&mut hasher);
         for (name, dependency) in &app.plugins {
             name.hash(&mut hasher);
             dependency.dependencies.hash(&mut hasher);
@@ -76,9 +91,16 @@ pub fn prepare(app: &App, target: &str, verbose: bool) -> Result<NativeBuild> {
     for (index, (path, name)) in resolved.crates.iter().enumerate() {
         use std::fmt::Write as _;
         let alias = format!("plugin_{index}");
+        let features = resolved
+            .rust_features
+            .get(name)
+            .map_or_else(String::new, |features| {
+                let values = features.iter().cloned().map(toml::Value::String).collect();
+                format!(", features = {}", toml::Value::Array(values))
+            });
         writeln!(
             package_toml,
-            "{alias} = {{ package = {name:?}, path = {} }}",
+            "{alias} = {{ package = {name:?}, path = {}{features} }}",
             path_literal(path)?
         )?;
         writeln!(
@@ -282,6 +304,46 @@ fn validate_descriptors(
     Ok(())
 }
 
+fn intl_locales(app: &App) -> Result<Vec<String>> {
+    let configured = app
+        .plugin_options
+        .get("@impasto/intl")
+        .and_then(|options| options.locales.as_ref());
+    let mut locales = BTreeSet::from(["en".to_owned()]);
+    if let Some(configured) = configured {
+        locales.extend(configured.iter().cloned());
+    } else {
+        let directory = app.root.join("locales");
+        if directory.is_dir() {
+            for file in fs::read_dir(directory)? {
+                let path = file?.path();
+                if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
+                    locales.insert(
+                        path.file_stem()
+                            .and_then(|name| name.to_str())
+                            .context("语种名称需要 UTF-8")?
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+    }
+    Ok(locales.into_iter().collect())
+}
+
+fn write_blob(path: &Path, blob: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    if fs::read(path).is_ok_and(|old| old == blob) {
+        return Ok(());
+    }
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(path.parent().context("缺少 ICU 数据目录")?)?;
+    temporary.write_all(blob)?;
+    temporary.persist(path)?;
+    Ok(())
+}
+
 pub(super) fn write_runtime_registry(
     registry: &Path,
     crates: &[(PathBuf, String)],
@@ -293,7 +355,14 @@ pub(super) fn write_runtime_registry(
     );
     for (index, (_, name)) in crates.iter().enumerate() {
         if retained.is_none_or(|retained| retained.contains(name)) {
-            writeln!(code, "    plugin_{index}::register(registrar);")?;
+            if name == "impasto-intl" {
+                writeln!(
+                    code,
+                    "    plugin_{index}::register_with_data(registrar, include_bytes!(\"intl.postcard.deflate\"));"
+                )?;
+            } else {
+                writeln!(code, "    plugin_{index}::register(registrar);")?;
+            }
         }
     }
     code.push_str("}\n");

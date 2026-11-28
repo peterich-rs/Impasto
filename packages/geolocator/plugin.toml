@@ -1,0 +1,45 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[dependencies]
+"@impasto/permissions" = "builtin"
+
+[ios]
+path = "apple/ios"
+package = "ImpastoGeolocator"
+plugin_class = "ImpastoGeolocatorPlugin"
+usage_description_keys = ["NSLocationWhenInUseUsageDescription"]
+dependency_features = { "@impasto/permissions" = ["locationWhenInUse"] }
+
+[macos]
+path = "apple/macos"
+package = "ImpastoGeolocator"
+plugin_class = "ImpastoGeolocatorPlugin"
+dependency_features = { "@impasto/permissions" = ["locationWhenInUse"] }
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.geolocator"
+plugin_class = "GeolocatorPlugin"
+dependency_features = { "@impasto/permissions" = ["locationWhenInUse"] }
+
+[android.features.background]
+dependency_features = { "@impasto/permissions" = ["locationAlways"] }
+
+[android.permissions]
+"android.permission.ACCESS_COARSE_LOCATION" = []
+"android.permission.ACCESS_FINE_LOCATION" = []
+
+[android.permission_rules."android.permission.ACCESS_BACKGROUND_LOCATION"]
+feature = "background"
+
+[ios.features.background]
+product = "ImpastoGeolocatorBackground"
+registrar = "BackgroundFeature"
+usage_description_keys = ["NSLocationAlwaysAndWhenInUseUsageDescription"]
+dependency_features = { "@impasto/permissions" = ["locationAlways"] }
+background_modes = ["location"]

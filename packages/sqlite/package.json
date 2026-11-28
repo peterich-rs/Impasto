@@ -1,0 +1,16 @@
+{
+  "name": "@impasto/sqlite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts",
+    "./native": "./src/native.stub.ts",
+    "./query": "./src/query.ts"
+  },
+  "dependencies": {
+    "@impasto/file-system": "workspace:*",
+    "@impasto/crypto": "workspace:*"
+  }
+}

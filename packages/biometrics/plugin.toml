@@ -1,0 +1,25 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[ios]
+path = "apple/ios"
+package = "ImpastoBiometrics"
+plugin_class = "ImpastoBiometricsPlugin"
+usage_description_keys = ["NSFaceIDUsageDescription"]
+
+[macos]
+path = "apple/macos"
+package = "ImpastoBiometrics"
+plugin_class = "ImpastoBiometricsPlugin"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.biometrics"
+plugin_class = "BiometricsPlugin"
+
+[android.permissions]
+"android.permission.USE_BIOMETRIC" = []

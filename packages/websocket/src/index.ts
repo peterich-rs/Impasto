@@ -32,3 +32,12 @@ export function connect(
 ): Promise<WebSocketClient> {
   return connectWith(native, url, options);
 }
+
+export type { HeadersInit, WebSocketHeartbeatOptions } from "./client.ts";
+export { ReconnectingWebSocket } from "./reconnect.ts";
+export type { ReconnectPolicy, ReconnectStatus } from "./reconnect.ts";
+import { ReconnectingWebSocket, type ReconnectPolicy } from "./reconnect.ts";
+
+export function connectReconnecting(url: string, options?: ConnectOptions & { readonly reconnect?: ReconnectPolicy }) {
+  return new ReconnectingWebSocket(connect, url, options, native.watchOnline);
+}

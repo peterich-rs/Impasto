@@ -197,8 +197,10 @@ pub(crate) fn valid_package_name(name: &str) -> bool {
 pub(super) fn resolve(app: &App, target: &str) -> Result<Resolved> {
     let mut result = Resolved::default();
     resolve_source_entries(app, &mut result.entries)?;
-    for alias in ordered_plugins(&app.plugins)? {
-        resolve_plugin(app, target, alias, &mut result)?;
+    let ordered = ordered_plugins(&app.plugins)?;
+    let required = dependency_features(app, target, &ordered)?;
+    for alias in ordered {
+        resolve_plugin(app, target, alias, required.get(alias), &mut result)?;
     }
     result.platform.resolve_permission_attributes()?;
     if let Some(native) = &app.native {
@@ -238,7 +240,58 @@ fn resolve_source_entries(app: &App, entries: &mut BTreeMap<String, PathBuf>) ->
     Ok(())
 }
 
-fn resolve_plugin(app: &App, target: &str, alias: &str, result: &mut Resolved) -> Result<()> {
+fn dependency_features(
+    app: &App,
+    target: &str,
+    ordered: &[&str],
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut required = BTreeMap::<String, BTreeSet<String>>::new();
+    for &alias in ordered.iter().rev() {
+        let dependency = &app.plugins[alias];
+        let manifest = app.root.join(&dependency.path).join("plugin.toml");
+        let plugin: Plugin = toml::from_str(&fs::read_to_string(&manifest)?)
+            .with_context(|| format!("解析 {}", manifest.display()))?;
+        if !plugin.plugin.platforms.iter().any(|name| name == target) {
+            continue;
+        }
+        let project = match target {
+            "ios" => &plugin.ios,
+            "android" => &plugin.android,
+            "macos" => &plugin.macos,
+            _ => bail!("未知插件目标 {target}"),
+        };
+        let mut features = project
+            .select_features(target, app, app.plugin_options.get(alias))?
+            .unwrap_or_default();
+        if let Some(extra) = required.get(alias) {
+            features.extend(extra.iter().cloned());
+        }
+        let dependencies = project.dependency_features.iter().chain(
+            features
+                .iter()
+                .filter_map(|name| project.features.get(name))
+                .flat_map(|feature| &feature.dependency_features),
+        );
+        for (name, features) in dependencies {
+            if !dependency.dependencies.contains(name) {
+                bail!("插件 {alias} 请求了未声明依赖 {name} 的特性");
+            }
+            required
+                .entry(name.clone())
+                .or_default()
+                .extend(features.iter().cloned());
+        }
+    }
+    Ok(required)
+}
+
+fn resolve_plugin(
+    app: &App,
+    target: &str,
+    alias: &str,
+    required: Option<&BTreeSet<String>>,
+    result: &mut Resolved,
+) -> Result<()> {
     let dependency = &app.plugins[alias];
     let root = app
         .root
@@ -255,9 +308,10 @@ fn resolve_plugin(app: &App, target: &str, alias: &str, result: &mut Resolved) -
     let options = app.plugin_options.get(alias);
     if let Some(features) = options.and_then(|options| options.enabled.as_ref()) {
         for feature in features {
-            if ![&plugin.ios, &plugin.macos, &plugin.android]
-                .iter()
-                .any(|project| project.features.contains_key(feature))
+            if !plugin.rust.optional_features.contains_key(feature)
+                && ![&plugin.ios, &plugin.macos, &plugin.android]
+                    .iter()
+                    .any(|project| project.features.contains_key(feature))
             {
                 bail!("插件 {alias} 没有特性 {feature}");
             }
@@ -311,6 +365,17 @@ fn resolve_plugin(app: &App, target: &str, alias: &str, result: &mut Resolved) -
     if !enabled {
         return Ok(());
     }
+    let mut features = plugin.rust.features;
+    if let Some(enabled) = options.and_then(|options| options.enabled.as_ref()) {
+        for feature in enabled {
+            if let Some(cargo) = plugin.rust.optional_features.get(feature) {
+                features.extend(cargo.iter().cloned());
+            }
+        }
+    }
+    if !features.is_empty() {
+        result.rust_features.insert(cargo_name.clone(), features);
+    }
     if let Some(minimum) = &plugin.plugin.min_impasto_version
         && version(minimum)? > version(impasto::VERSION)?
     {
@@ -322,9 +387,20 @@ fn resolve_plugin(app: &App, target: &str, alias: &str, result: &mut Resolved) -
         "android" => plugin.android,
         _ => bail!("未知插件目标 {target}"),
     };
+    let mut selected = platform.select_features(target, app, options)?;
+    if let Some(required) = required {
+        for feature in required {
+            if !platform.features.contains_key(feature) {
+                bail!("依赖 {cargo_name} 没有 {target} 特性 {feature}");
+            }
+        }
+        selected
+            .get_or_insert_with(BTreeSet::new)
+            .extend(required.iter().cloned());
+    }
     result
         .platform
-        .add_project(platform, &root, target, &cargo_name, app, options)
+        .add_project(platform, &root, target, &cargo_name, options, selected)
         .with_context(|| format!("合并插件 {alias} 的 {target} 设置"))?;
     result.allowed.insert(
         cargo_name.clone(),

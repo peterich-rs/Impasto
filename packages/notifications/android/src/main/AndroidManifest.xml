@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver android:name="dev.impasto.plugins.notifications.AlarmReceiver" android:exported="false" />
+        <receiver android:name="dev.impasto.plugins.notifications.ActionReceiver" android:exported="false" />
+        <receiver android:name="dev.impasto.plugins.notifications.BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -373,6 +373,7 @@ fn darwin(app: &App, target: &str, framework: &Path, inputs: &Platform) -> Resul
     );
     let mut imports = String::from("@_exported import ImpastoHost\n");
     let mut calls = String::new();
+    let mut startup = String::new();
     for plugin in &inputs.projects {
         let alias = aliases.join(&plugin.package);
         symlink(&plugin.path, &alias)?;
@@ -389,6 +390,9 @@ fn darwin(app: &App, target: &str, framework: &Path, inputs: &Platform) -> Resul
             .plugin_class
             .as_deref()
             .context("缺少 Swift 插件注册类")?;
+        if let Some(prepare) = &plugin.prepare {
+            writeln!(startup, "        {}.{class}.{prepare}()", plugin.module)?;
+        }
         if let Some(features) = &plugin.features {
             let mut feature_products = std::collections::BTreeSet::new();
             let mut feature_modules = std::collections::BTreeSet::new();
@@ -470,9 +474,11 @@ let package = Package(
         ""
     };
     let prepare = if target == "ios" {
-        "    public static func prepare() -> Bool { installRustPlugins() }\n\n"
+        format!(
+            "    public static func prepare() -> Bool {{\n{startup}        return installRustPlugins()\n    }}\n\n"
+        )
     } else {
-        ""
+        String::new()
     };
     write(
         &sources.join("GeneratedPluginRegistrant.swift"),

@@ -1,0 +1,18 @@
+[package]
+name = "impasto-geolocator"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+impasto.workspace = true
+impasto-permissions = { version = "0.1.0", registry = "impasto" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+futures-core = "0.3"
+
+[lints]
+workspace = true

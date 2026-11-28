@@ -5,12 +5,14 @@ use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::Duration;
 
 use crate::trace;
-use crate::{NativeWebSocketEvent, SocketData};
+use crate::{NativeWebSocketEvent, SocketData, SocketError};
 use bytes::Bytes;
 use futures_util::future::{Either, select};
 use futures_util::{SinkExt as _, StreamExt as _};
 use http::Uri;
-use impasto::{Bytes as JsBytes, CancelToken, DiagnosticsSink, TypedSink};
+use impasto::{
+    Bytes as JsBytes, CancelToken, DiagnosticsSink, ImpastoError, ImpastoType, TypedSink,
+};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -52,11 +54,56 @@ pub enum WebSocketEvent {
     Error(String),
 }
 
+#[derive(Default, ImpastoType)]
+pub struct WebSocketSettings {
+    pub headers: Option<Vec<(String, String)>>,
+    pub heartbeat: Option<Heartbeat>,
+}
+
+#[derive(Clone, Copy, ImpastoType)]
+pub struct Heartbeat {
+    interval_ms: u32,
+    timeout_ms: Option<u32>,
+}
+
+impl Heartbeat {
+    pub fn interval(self) -> Duration {
+        Duration::from_millis(u64::from(self.interval_ms))
+    }
+    pub fn timeout(self) -> Duration {
+        Duration::from_millis(u64::from(self.timeout_ms.unwrap_or(self.interval_ms)))
+    }
+    fn valid(self) -> bool {
+        !self.interval().is_zero() && !self.timeout().is_zero()
+    }
+}
+
+fn handshake_headers(headers: &[(String, String)]) -> Result<http::HeaderMap, String> {
+    let mut output = http::HeaderMap::new();
+    for (name, value) in headers {
+        let name = http::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| "invalid WebSocket handshake header".to_owned())?;
+        if name.as_str().starts_with("sec-websocket-")
+            || matches!(
+                name.as_str(),
+                "upgrade" | "connection" | "host" | "content-length" | "transfer-encoding"
+            )
+        {
+            return Err("reserved WebSocket handshake header".to_owned());
+        }
+        let value = http::HeaderValue::from_str(value)
+            .map_err(|_| "invalid WebSocket handshake header value".to_owned())?;
+        output.append(name, value);
+    }
+    Ok(output)
+}
+
 pub trait WebSocketTransport: Send + Sync {
     fn run(
         &self,
         url: &str,
         protocols: &[String],
+        settings: &WebSocketSettings,
         commands: std_mpsc::Receiver<WebSocketCommand>,
         active: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(WebSocketEvent) -> bool,
@@ -112,6 +159,7 @@ struct QueuedCommand {
 struct PendingSocketRun {
     url: String,
     protocols: Vec<String>,
+    settings: WebSocketSettings,
     rx: mpsc::Receiver<QueuedCommand>,
     transport: Option<Arc<dyn WebSocketTransport>>,
     devtools: Option<Arc<dyn DiagnosticsSink>>,
@@ -143,12 +191,20 @@ impl SocketSession {
     pub fn open(
         url: String,
         protocols: Vec<String>,
+        settings: WebSocketSettings,
         tracker: &SocketSlotTracker,
         transport: Option<Arc<dyn WebSocketTransport>>,
         devtools: Option<Arc<dyn DiagnosticsSink>>,
     ) -> Result<Arc<Self>, String> {
         validate_ws_url(&url)?;
         validate_subprotocols(&protocols)?;
+        handshake_headers(settings.headers.as_deref().unwrap_or_default())?;
+        if settings
+            .heartbeat
+            .is_some_and(|heartbeat| !heartbeat.valid())
+        {
+            return Err("invalid WebSocket heartbeat interval".to_owned());
+        }
         let ticket = tracker.acquire()?;
         let (tx, rx) = mpsc::channel(CMD_CHANNEL_CAP);
         let id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed) + 1;
@@ -167,6 +223,7 @@ impl SocketSession {
                 PendingSocketRun {
                     url,
                     protocols,
+                    settings,
                     rx,
                     transport,
                     devtools,
@@ -363,23 +420,30 @@ async fn run_socket(
     let PendingSocketRun {
         url,
         protocols,
+        settings,
         rx,
         devtools,
         ..
     } = run;
-    run_native_async(url, protocols, rx, &shared, &mut sink, devtools).await;
+    run_native_async(url, protocols, settings, rx, &shared, &mut sink, devtools).await;
     shared.mark_closed();
 }
 
 async fn run_native_async(
     url: String,
     protocols: Vec<String>,
+    settings: WebSocketSettings,
     mut rx: mpsc::Receiver<QueuedCommand>,
     shared: &SocketShared,
     sink: &mut TypedSink<NativeWebSocketEvent>,
     devtools: Option<Arc<dyn DiagnosticsSink>>,
 ) {
-    let request = match build_ws_request(&url, &protocols) {
+    let request = match build_ws_request(&url, &protocols).and_then(|mut request| {
+        request.headers_mut().extend(handshake_headers(
+            settings.headers.as_deref().unwrap_or_default(),
+        )?);
+        Ok(request)
+    }) {
         Ok(req) => req,
         Err(message) => {
             emit_error_and_close(sink, shared, devtools.as_deref(), &url, message, 1006).await;
@@ -471,6 +535,10 @@ async fn run_native_async(
     let mut close_deadline: Option<tokio::time::Instant> =
         close_sent.then(|| tokio::time::Instant::now() + CLOSE_HANDSHAKE_TIMEOUT);
 
+    let heartbeat = settings.heartbeat;
+    let mut next_ping =
+        heartbeat.map(|heartbeat| tokio::time::Instant::now() + heartbeat.interval());
+    let mut pong_deadline = None;
     loop {
         if shared.is_cancelled() {
             let _ = ws_tx.close().await;
@@ -482,30 +550,52 @@ async fn run_native_async(
             Incoming(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
             Command(Option<QueuedCommand>),
             CloseTimeout,
+            Ping,
+            PongTimeout,
         }
 
-        let step = {
-            let cancelled = std::pin::pin!(shared.cancelled());
-            let next_msg = std::pin::pin!(ws_rx.next());
-            let next_cmd = std::pin::pin!(rx.recv());
-            match close_deadline {
-                Some(deadline) => {
-                    let sleep = std::pin::pin!(tokio::time::sleep_until(deadline));
-                    match select(select(cancelled, sleep), next_msg).await {
-                        Either::Left((Either::Left(((), _)), _)) => Step::Cancel,
-                        Either::Left((Either::Right(((), _)), _)) => Step::CloseTimeout,
-                        Either::Right((msg, _)) => Step::Incoming(msg),
-                    }
-                }
-                None => match select(cancelled, select(next_msg, next_cmd)).await {
-                    Either::Left(((), _)) => Step::Cancel,
-                    Either::Right((Either::Left((msg, _)), _)) => Step::Incoming(msg),
-                    Either::Right((Either::Right((cmd, _)), _)) => Step::Command(cmd),
-                },
-            }
+        let step = tokio::select! {
+            () = shared.cancelled() => Step::Cancel,
+            () = until(close_deadline) => Step::CloseTimeout,
+            () = until(next_ping.filter(|_| !close_sent && pong_deadline.is_none())) => Step::Ping,
+            () = until(pong_deadline.filter(|_| !close_sent)) => Step::PongTimeout,
+            message = ws_rx.next() => Step::Incoming(message),
+            command = rx.recv(), if !close_sent => Step::Command(command),
         };
 
         match step {
+            Step::Ping => {
+                if let Some(heartbeat) = heartbeat {
+                    if ws_tx.send(Message::Ping(Bytes::new())).await.is_err() {
+                        emit_error_and_close(
+                            sink,
+                            shared,
+                            devtools.as_deref(),
+                            &url,
+                            "WebSocket ping failed".into(),
+                            1006,
+                        )
+                        .await;
+                        break;
+                    }
+                    pong_deadline = Some(tokio::time::Instant::now() + heartbeat.timeout());
+                }
+            }
+            Step::PongTimeout => {
+                let _ = ws_tx
+                    .send(make_close_message(Some(1000), String::new()))
+                    .await;
+                emit_error_and_close(
+                    sink,
+                    shared,
+                    devtools.as_deref(),
+                    &url,
+                    "WebSocket heartbeat timed out".into(),
+                    1006,
+                )
+                .await;
+                break;
+            }
             Step::Cancel => {
                 let _ = ws_tx.close().await;
                 break;
@@ -664,9 +754,23 @@ async fn run_native_async(
                     let _ = send_event_async(sink, ev).await;
                     break;
                 }
-                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                Message::Pong(payload) if payload.is_empty() && pong_deadline.take().is_some() => {
+                    next_ping = heartbeat
+                        .map(|heartbeat| tokio::time::Instant::now() + heartbeat.interval());
+                }
+                Message::Ping(_) => {
+                    let _ = ws_tx.flush().await;
+                }
+                Message::Pong(_) | Message::Frame(_) => {}
             },
         }
+    }
+}
+
+async fn until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -680,6 +784,7 @@ async fn run_blocking_transport(
     let PendingSocketRun {
         url,
         protocols,
+        settings,
         mut rx,
         devtools,
         ..
@@ -710,6 +815,7 @@ async fn run_blocking_transport(
         let outcome = transport.run(
             &url,
             &protocols,
+            &settings,
             std_rx,
             &|| !active_cancel.is_cancelled() && !active_sink_cancel.is_cancelled(),
             &mut |event| {
@@ -799,7 +905,13 @@ fn encode_event(event: WebSocketEvent) -> NativeWebSocketEvent {
             reason,
             clean,
         },
-        WebSocketEvent::Error(message) => NativeWebSocketEvent::Error { message },
+        WebSocketEvent::Error(message) => {
+            let error = SocketError(message);
+            NativeWebSocketEvent::Error {
+                code: Some(error.code().to_owned()),
+                message: error.0,
+            }
+        }
     }
 }
 

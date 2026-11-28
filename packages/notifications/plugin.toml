@@ -1,0 +1,54 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[dependencies]
+"@impasto/file-system" = "builtin"
+"@impasto/permissions" = "builtin"
+
+[ios]
+path = "apple/ios"
+package = "ImpastoNotifications"
+plugin_class = "ImpastoNotificationsPlugin"
+dependency_features = { "@impasto/permissions" = ["notification"] }
+
+prepare = "prepareLaunch"
+
+[macos]
+path = "apple/macos"
+package = "ImpastoNotifications"
+plugin_class = "ImpastoNotificationsPlugin"
+dependency_features = { "@impasto/permissions" = ["notification"] }
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.notifications"
+plugin_class = "NotificationsPlugin"
+dependency_features = { "@impasto/permissions" = ["notification"] }
+
+[android.features.exactAlarm]
+dependency_features = { "@impasto/permissions" = ["scheduleExactAlarm"] }
+
+[android.permissions]
+"android.permission.POST_NOTIFICATIONS" = []
+"android.permission.RECEIVE_BOOT_COMPLETED" = []
+
+[android.permission_rules."android.permission.POST_NOTIFICATIONS"]
+
+[android.permission_rules."android.permission.SCHEDULE_EXACT_ALARM"]
+feature = "exactAlarm"
+
+[ios.features.criticalAlerts]
+product = "ImpastoNotificationsCriticalAlerts"
+registrar = "CriticalAlertsFeature"
+required_entitlements = ["com.apple.developer.usernotifications.critical-alerts"]
+dependency_features = { "@impasto/permissions" = ["criticalAlerts"] }
+
+[macos.features.criticalAlerts]
+product = "ImpastoNotificationsCriticalAlerts"
+registrar = "CriticalAlertsFeature"
+required_entitlements = ["com.apple.developer.usernotifications.critical-alerts"]
+dependency_features = { "@impasto/permissions" = ["criticalAlerts"] }

@@ -11,3 +11,6 @@ package = "dev.impasto.plugins.http"
 
 [android.permissions]
 "android.permission.INTERNET" = ["@impasto/http/native#send"]
+
+[dependencies]
+"@impasto/file-system" = "builtin"

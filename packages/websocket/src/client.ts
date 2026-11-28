@@ -14,12 +14,42 @@ export interface WebSocketCloseInfo {
 }
 
 export interface ConnectOptions {
-  protocols?: string | string[];
-  signal?: AbortSignal;
+  readonly protocols?: string | string[];
+  readonly signal?: AbortSignal;
+  readonly headers?: HeadersInit;
+  readonly heartbeat?: WebSocketHeartbeatOptions;
+}
+
+export interface WebSocketHeartbeatOptions {
+  readonly intervalMs: number;
+  readonly timeoutMs?: number;
+}
+
+type HeaderTuple = [string, string];
+export type HeadersInit = Record<string, string> | readonly (readonly [string, string])[]
+  | { forEach(callback: (value: string, name: string) => void): void };
+interface SocketSettings { headers?: HeaderTuple[]; heartbeat?: WebSocketHeartbeatOptions; }
+
+function headerTuples(value: HeadersInit | undefined): value is readonly (readonly [string, string])[] {
+  return Array.isArray(value);
+}
+
+function settings(options: ConnectOptions): SocketSettings | undefined {
+  const { headers, heartbeat } = options;
+  if (headers === undefined && heartbeat === undefined) return undefined;
+  const fields: HeaderTuple[] = [];
+  if (headerTuples(headers)) {
+    for (const [name, value] of headers) fields.push([name, value]);
+  } else if (headers && typeof headers.forEach === "function") {
+    headers.forEach((value, name) => fields.push([name, value]));
+  } else if (headers) {
+    fields.push(...Object.entries(headers));
+  }
+  return { headers: fields, heartbeat };
 }
 
 export interface WebSocketTransport {
-  open(url: string, protocols?: string[]): NativeWebSocketHandle;
+  open(url: string, protocols?: string[], settings?: SocketSettings): NativeWebSocketHandle;
   events(id: number, signal?: AbortSignal): ReadableStream<NativeWebSocketEvent>;
 }
 
@@ -182,7 +212,7 @@ export class WebSocketClient {
           return this;
         }
         if (ev.type === "error") {
-          throw new Error(ev.message);
+          throw Object.assign(new Error(ev.message), { code: ev.code });
         }
         if (ev.type === "close") {
           const info = { code: ev.code, reason: ev.reason, wasClean: ev.clean };
@@ -234,11 +264,11 @@ export class WebSocketClient {
       const ev = await this.nextEvent();
       if (!ev) return;
       if (ev.type === "message") {
-        yield ev.text ? ev.data : toUint8Array(ev.data);
+        yield typeof ev.data === "string" ? ev.data : toUint8Array(ev.data);
       } else if (ev.type === "close") {
         return;
       } else if (ev.type === "error") {
-        throw new Error(ev.message);
+        throw Object.assign(new Error(ev.message), { code: ev.code });
       }
     }
   }
@@ -250,7 +280,7 @@ export function openClient(
   options: ConnectOptions = {},
 ): WebSocketClient {
   const protocols = normalizeProtocols(options.protocols);
-  const handle = transport.open(url, protocols);
+  const handle = transport.open(url, protocols, settings(options));
   try {
     const id = handle.id();
     const stream = transport.events(id, options.signal);

@@ -1,12 +1,19 @@
 import type { NativeHttpEvent, NativeHttpRequest } from "@impasto/http/native";
 import { FormData } from "./form-data.ts";
 import { Headers, type HeadersInit } from "./headers.ts";
+import { abortableWait, Interceptors, retryDelay, type CookieEntry, type CookieJarConfig,
+  type DownloadResult, type DownloadToFileOptions, type FileUploadBody, type HttpProgressEvent,
+  type HttpProxyConfig, type HttpSecurityConfig, type RetryPolicy } from "./middleware.ts";
 
 export interface HttpTransport {
   send(
     request: NativeHttpRequest,
     signal?: AbortSignal,
   ): ReadableStream<NativeHttpEvent>;
+  download?(request: NativeHttpRequest, file: Pick<DownloadToFileOptions, "destinationPath" | "scope" | "resume" | "overwrite">,
+    signal?: AbortSignal): ReadableStream<NativeHttpEvent>;
+  upload?(request: NativeHttpRequest, file: FileUploadBody, signal?: AbortSignal): ReadableStream<NativeHttpEvent>;
+  cookies?: { get(url: string): Promise<CookieEntry[]>; set(url: string, rawSetCookie: string): Promise<void>; clear(): Promise<void> };
 }
 
 export type RedirectMode = "follow" | "error" | "manual";
@@ -32,6 +39,9 @@ export interface HttpRequestOptions {
   redirect?: RedirectMode;
   maxBodyBytes?: number;
   signal?: AbortSignal;
+  retry?: RetryPolicy | false;
+  onUploadProgress?: (event: HttpProgressEvent) => void;
+  onDownloadProgress?: (event: HttpProgressEvent) => void;
 }
 
 export interface HttpClientDefaults {
@@ -40,6 +50,10 @@ export interface HttpClientDefaults {
   timeoutMs?: number;
   redirect?: RedirectMode;
   maxBodyBytes?: number;
+  retry?: RetryPolicy;
+  cookieJar?: CookieJarConfig;
+  proxy?: HttpProxyConfig;
+  security?: HttpSecurityConfig;
 }
 
 export interface HttpResponseData {
@@ -61,7 +75,7 @@ export type HttpErrorCode =
   | "canceled"
   | "too-large"
   | "bad-url"
-  | "http-status";
+  | "http-status" | "tls-pin-mismatch" | "outside-scope" | "io";
 
 export class HttpError extends Error {
   readonly code: HttpErrorCode;
@@ -203,6 +217,8 @@ export async function executeNativeStream(
     signal?: AbortSignal;
     emptyBody?: boolean;
     fetchStyle?: boolean;
+    onUploadProgress?: (event: HttpProgressEvent) => void;
+    onDownloadProgress?: (event: HttpProgressEvent) => void;
   },
 ): Promise<StreamHead> {
   const signal = options?.signal;
@@ -221,9 +237,18 @@ export async function executeNativeStream(
   }
 
   const reader = nativeStream.getReader();
+  async function next(): Promise<ReadableStreamReadResult<NativeHttpEvent>> {
+    for (;;) {
+      const event = await reader.read();
+      if (event.done) return event;
+      if (event.value.type === "uploadProgress") options?.onUploadProgress?.({ loaded: event.value.loaded, total: event.value.total ?? null });
+      else if (event.value.type === "downloadProgress") options?.onDownloadProgress?.({ loaded: event.value.loaded, total: event.value.total ?? null });
+      else return event;
+    }
+  }
   let first: ReadableStreamReadResult<NativeHttpEvent>;
   try {
-    first = await reader.read();
+    first = await next();
   } catch (err) {
     reader.releaseLock();
     throw mapNativeError(err, fetchStyle);
@@ -245,8 +270,8 @@ export async function executeNativeStream(
     head.status === 304;
 
   if (omitBody) {
-    void reader.cancel().catch(() => {});
-    reader.releaseLock();
+    try { while (!(await next()).done) { /* Drain progress and trailers. */ } }
+    finally { reader.releaseLock(); }
     return {
       status: head.status,
       url: head.url,
@@ -261,7 +286,7 @@ export async function executeNativeStream(
       async pull(controller) {
         try {
           for (;;) {
-            const step = await reader.read();
+            const step = await next();
             if (step.done) {
               controller.close();
               reader.releaseLock();
@@ -320,6 +345,12 @@ function buildUrl(
 export class HttpClient {
   readonly #transport: HttpTransport;
   readonly #defaults: HttpClientDefaults;
+  readonly interceptors = {
+    request: new Interceptors<HttpRequestOptions & { url: string }, unknown>(),
+    response: new Interceptors<HttpResponseData, unknown>(),
+    error: new Interceptors<HttpResponseData, HttpError>(),
+  };
+  get cookies() { return this.#transport.cookies; }
 
   constructor(transport: HttpTransport, defaults: HttpClientDefaults = {}) {
     this.#transport = transport;
@@ -327,6 +358,43 @@ export class HttpClient {
   }
 
   async send(input: string, options: HttpRequestOptions = {}): Promise<HttpResponseData> {
+    return this.#run(input, options, this.#transport);
+  }
+
+  async #run(input: string, options: HttpRequestOptions, transport: HttpTransport): Promise<HttpResponseData> {
+    try {
+      const request = await this.interceptors.request.run({ ...options, url: input });
+      const retry = request.retry ?? this.#defaults.retry;
+      const verb = (request.method ?? "GET").toUpperCase();
+      const canRetry = retry && !(request.body instanceof ReadableStream)
+        && (retry.retryMethods ?? ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"]).includes(verb);
+      for (let attempt = 0;; ++attempt) {
+        let response: HttpResponseData | undefined;
+        let error: unknown;
+        try { response = await this.#send(request.url, request, transport); }
+        catch (failure) { error = failure; }
+        const retryStatus = response && retry && (retry.retryStatuses ?? [408, 429, 500, 502, 503, 504]).includes(response.status);
+        if (!canRetry || !retry || attempt >= retry.maxRetries || request.signal?.aborted
+          || !retryStatus && !(error instanceof HttpError && error.code === "network")) {
+          if (response) return await this.interceptors.response.run(response);
+          throw error;
+        }
+        const cause = response ? new HttpError("http-status", `HTTP ${response.status}`, {
+          status: response.status, url: response.url, headers: response.headers,
+        }) : error as HttpError;
+        if (retry.shouldRetry && !await retry.shouldRetry(cause, attempt + 1)) {
+          if (response) return await this.interceptors.response.run(response);
+          throw error;
+        }
+        await response?.body?.cancel().catch(() => undefined);
+        await abortableWait(retryDelay(retry, attempt, response?.headers.get("retry-after")), request.signal);
+      }
+    } catch (error) {
+      return this.interceptors.error.recover(error as HttpError);
+    }
+  }
+
+  async #send(input: string, options: HttpRequestOptions, transport: HttpTransport): Promise<HttpResponseData> {
     const url = buildUrl(input, this.#defaults.baseUrl, options.query);
     const method = (options.method ?? "GET").toUpperCase();
     const headers = new Headers(this.#defaults.headers);
@@ -354,7 +422,7 @@ export class HttpClient {
     }
 
     const head = await executeNativeStream(
-      this.#transport,
+      transport,
       {
         method,
         url,
@@ -363,11 +431,14 @@ export class HttpClient {
         timeoutMs: options.timeoutMs ?? this.#defaults.timeoutMs,
         redirect: options.redirect ?? this.#defaults.redirect ?? "follow",
         maxBodyBytes: options.maxBodyBytes ?? this.#defaults.maxBodyBytes,
+        progress: Boolean(options.onUploadProgress || options.onDownloadProgress),
       },
       {
         signal: options.signal,
         emptyBody: method === "HEAD",
         fetchStyle: false,
+        onUploadProgress: options.onUploadProgress,
+        onDownloadProgress: options.onDownloadProgress,
       },
     );
 
@@ -401,6 +472,46 @@ export class HttpClient {
         return copy.buffer;
       },
     };
+  }
+
+  async uploadFile(input: string, file: FileUploadBody, options: HttpRequestOptions = {}): Promise<HttpResponseData> {
+    const upload = this.#transport.upload;
+    if (!upload) throw new HttpError("io", "File uploads require the native HTTP transport");
+    if (options.body != null || options.json !== undefined) throw new TypeError("A file upload already supplies a request body");
+    return this.#run(input, { method: "POST", ...options }, {
+      send: (request, signal) => upload(request, file, signal),
+    });
+  }
+
+  async downloadToFile(input: string, options: DownloadToFileOptions): Promise<DownloadResult> {
+    const download = this.#transport.download;
+    if (!download) throw new HttpError("io", "File downloads require the native HTTP transport");
+    let saved: Extract<NativeHttpEvent, { type: "file" }> | undefined;
+    const response = await this.#run(input, options, {
+      send: (request, signal) => {
+        const reader = download(request, options, signal).getReader();
+        return new ReadableStream<NativeHttpEvent>({
+          async pull(controller) {
+            try {
+              for (;;) {
+                const item = await reader.read();
+                if (item.done) { controller.close(); reader.releaseLock(); return; }
+                if (item.value.type === "file") saved = item.value;
+                else { controller.enqueue(item.value); return; }
+              }
+            } catch (error) { controller.error(error); reader.releaseLock(); }
+          },
+          async cancel(reason) { try { await reader.cancel(reason); } finally { reader.releaseLock(); } },
+        });
+      },
+    });
+    const reader = response.body?.getReader();
+    if (reader) try { while (!(await reader.read()).done) { /* Native transfer emits progress only. */ } }
+    finally { reader.releaseLock(); }
+    if (!response.ok) throw new HttpError("http-status", `HTTP ${response.status}`, response);
+    if (!saved) throw new HttpError("io", "No file was written");
+    return { status: response.status, url: response.url, redirected: response.redirected, headers: response.headers,
+      bytesWritten: saved.bytesWritten, resumed: saved.resumed, path: saved.path };
   }
 
   async request(input: string, options: HttpRequestOptions = {}): Promise<HttpResponseData> {

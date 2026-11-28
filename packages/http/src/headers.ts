@@ -39,7 +39,7 @@ export class Headers {
       }
       return;
     }
-    if (Symbol.iterator in Object(init)) {
+    if (Symbol.iterator in init) {
       for (const pair of init as Iterable<[string, string]>) {
         this.append(pair[0], pair[1]);
       }

@@ -19,4 +19,4 @@ export type {
   ResponseInit,
 };
 
-export const fetch = createFetch(native);
+export const fetch = createFetch({ send: native.send });
