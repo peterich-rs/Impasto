@@ -382,6 +382,17 @@ pub(super) struct RepaintUpdate {
 #[cfg(any(debug_assertions, feature = "devtools-server"))]
 seq_field!(RepaintUpdate);
 
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+#[derive(Clone)]
+pub(super) struct RuntimeUpdate {
+    pub seq: u64,
+    pub at_ms: f64,
+    pub observation: Arc<serde_json::Value>,
+}
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+seq_field!(RuntimeUpdate);
+
 /// Process-local telemetry store, shared by the host and its consumers.
 pub struct TelemetryHub {
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
@@ -390,6 +401,14 @@ pub struct TelemetryHub {
     repaint_readers: AtomicU64,
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     latest_layers: Mutex<Option<(u64, Arc<engine::scene::LayerTree>)>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) runtime: Mutex<Ring<RuntimeUpdate>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) resources: Mutex<Ring<RuntimeUpdate>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    runtime_readers: AtomicU64,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    resource_readers: AtomicU64,
     profile: AtomicU8,
     capture_phase: AtomicU8,
     capture_gpu: AtomicBool,
@@ -451,6 +470,14 @@ impl TelemetryHub {
             repaint_readers: AtomicU64::new(0),
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
             latest_layers: Mutex::new(None),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            runtime: Mutex::new(Ring::new(300)),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            resources: Mutex::new(Ring::new(300)),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            runtime_readers: AtomicU64::new(0),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            resource_readers: AtomicU64::new(0),
             profile: AtomicU8::new(TelemetryProfile::Counters as u8),
             capture_phase: AtomicU8::new(CAPTURE_IDLE),
             capture_gpu: AtomicBool::new(false),
@@ -806,6 +833,74 @@ impl TelemetryHub {
             .cloned()
     }
 
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn runtime_reader(&self, channel: devtools_protocol::Channel, active: bool) {
+        use devtools_protocol::Channel;
+        let readers = match channel {
+            Channel::Runtime => &self.runtime_readers,
+            Channel::Resources => &self.resource_readers,
+            _ => return,
+        };
+        if active {
+            readers.fetch_add(1, Ordering::Relaxed);
+        } else {
+            readers.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn reads_runtime(&self) -> bool {
+        self.runtime_readers.load(Ordering::Relaxed) != 0
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn reads_resources(&self) -> bool {
+        self.resource_readers.load(Ordering::Relaxed) != 0
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_runtime(&self, value: serde_json::Value) {
+        self.record_runtime(&self.runtime, value);
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_resources(&self, value: serde_json::Value) {
+        self.record_runtime(&self.resources, value);
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    fn record_runtime(&self, ring: &Mutex<Ring<RuntimeUpdate>>, value: serde_json::Value) {
+        lock(ring).push(|seq| RuntimeUpdate {
+            seq,
+            at_ms: crate::timing::mono_ms(),
+            observation: Arc::new(value),
+        });
+        self.bump();
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_js_samples(
+        &self,
+        frame_id: u64,
+        samples: Vec<engine::session::StackSample>,
+    ) {
+        if samples.is_empty() {
+            return;
+        }
+        let mut ring = lock(&self.resources);
+        for sample in samples {
+            let value = serde_json::json!({
+                "kind": "stack", "frame_id": frame_id, "entry": sample.entry, "stack": sample.stack,
+            });
+            ring.push(|seq| RuntimeUpdate {
+                seq,
+                at_ms: super::telemetry::mono_ns_at(sample.at) as f64 / 1_000_000.0,
+                observation: Arc::new(value),
+            });
+        }
+        self.bump();
+    }
+
     pub(crate) fn collects_frames(&self) -> bool {
         self.profile.load(Ordering::Relaxed) != TelemetryProfile::Off as u8 || self.recording()
     }
@@ -825,7 +920,14 @@ impl TelemetryHub {
             _ => TraceDetail::Stages,
         };
         let gpu = std::env::var("IMPASTO_TRACE_GPU").as_deref() != Ok("0");
-        self.begin_capture(Some((path, overwrite)), CaptureOptions { detail, gpu })
+        self.begin_capture(
+            Some((path, overwrite)),
+            CaptureOptions {
+                detail,
+                gpu,
+                js_sampling: detail == TraceDetail::Detailed,
+            },
+        )
     }
 
     pub(super) fn begin_capture(
@@ -839,7 +941,7 @@ impl TelemetryHub {
             return None;
         }
         let id = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
-        let timeline = TimelineRecording::begin(id, options.detail)?;
+        let timeline = TimelineRecording::begin(id, options.detail, options.js_sampling)?;
         *capture = Some(CaptureSlot {
             archive: TraceCapture {
                 id,
@@ -1058,6 +1160,7 @@ const TRACE_DRAIN: Duration = Duration::from_millis(80);
 pub(super) struct CaptureOptions {
     pub detail: TraceDetail,
     pub gpu: bool,
+    pub js_sampling: bool,
 }
 
 struct CaptureSlot {
@@ -1139,6 +1242,7 @@ mod tests {
                 CaptureOptions {
                     detail: TraceDetail::Stages,
                     gpu: true,
+                    js_sampling: false,
                 },
             )
             .unwrap();

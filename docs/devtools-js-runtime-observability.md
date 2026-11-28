@@ -26,7 +26,7 @@
 
 ### 2.1 完整映射 `JSMemoryUsage`（纯 `std` 值结构）
 
-QuickJS 原生 `qjs::JSMemoryUsage`（已由 `rquickjs` 的 `Runtime::memory_usage()` 暴露）包含 23 项精确分类，当前 [vm.rs:68](../crates/javascript/src/runtime/quickjs/vm.rs#L68) 只取了其中 `memory_used_size` 单个字段。在 `crates/javascript/src/runtime/mod.rs` 定义平台无关的值结构：
+QuickJS 原生 `qjs::JSMemoryUsage`（已由 `rquickjs` 的 `Runtime::memory_usage()` 暴露）包含 26 项精确分类，当前 [vm.rs:68](../crates/javascript/src/runtime/quickjs/vm.rs#L68) 只取了其中 `memory_used_size` 单个字段。在 `crates/javascript/src/runtime/mod.rs` 定义平台无关的值结构：
 
 ```rust
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

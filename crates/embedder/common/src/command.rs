@@ -47,6 +47,16 @@ impl SurfaceTarget {
 #[cfg(any(debug_assertions, feature = "devtools-server"))]
 #[derive(Debug)]
 pub enum DevtoolsQuery {
+    JsMemoryDetail,
+    JsResources,
+    JsRunGc,
+    SetSampler {
+        owner: u64,
+        config: engine::session::SamplerConfig,
+    },
+    ClearSampler {
+        owner: u64,
+    },
     ViewSnapshot {
         max_nodes: usize,
     },

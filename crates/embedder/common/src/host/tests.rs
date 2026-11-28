@@ -175,6 +175,9 @@ impl TestHarness {
         let runtime = UiHost {
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
             overlay_owner: None,
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            sampler_owner: None,
+            last_runtime_sample: None,
             shaper,
             graphics: RasterPort::Local(Box::new(RasterHost {
                 raster,

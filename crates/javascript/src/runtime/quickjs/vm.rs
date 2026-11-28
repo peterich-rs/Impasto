@@ -1,12 +1,13 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::time::Instant;
 
 use rquickjs::object::Property;
 use rquickjs::{Context, Ctx, Function, Object, Persistent, Runtime, Value};
 
-use crate::runtime::monotonic_ms;
+use crate::runtime::{JsGcResult, JsMemoryDetail, SamplerConfig, StackSample, monotonic_ms};
 
-use super::sampling::{Sampler, StackSample};
+use super::sampling::Sampler;
 
 pub type Saved = Persistent<Value<'static>>;
 
@@ -56,6 +57,9 @@ pub struct Vm {
     pub rejection_overflows: Cell<usize>,
     pub promise_peak: Cell<usize>,
     pub rejection_peak: Cell<usize>,
+    pub(crate) job_limit_hits: Cell<u64>,
+    pub(crate) budget_overruns: Cell<u64>,
+    interrupted: Cell<bool>,
     eval_budget_ms: Cell<i64>,
     callback_budget_ms: Cell<i64>,
     armed: Cell<bool>,
@@ -67,6 +71,72 @@ pub struct Vm {
 impl Vm {
     pub(crate) fn heap_bytes(&self) -> Option<usize> {
         usize::try_from(self.runtime.as_ref()?.memory_usage().memory_used_size).ok()
+    }
+
+    pub(crate) fn memory_detail(&self) -> Option<JsMemoryDetail> {
+        if self.is_active() {
+            return None;
+        }
+        let usage = self.runtime.as_ref()?.memory_usage();
+        let unsigned = |value| u64::try_from(value).unwrap_or_default();
+        Some(JsMemoryDetail {
+            malloc_size: unsigned(usage.malloc_size),
+            malloc_limit: unsigned(usage.malloc_limit),
+            memory_used_size: unsigned(usage.memory_used_size),
+            malloc_count: unsigned(usage.malloc_count),
+            memory_used_count: unsigned(usage.memory_used_count),
+            atom_count: unsigned(usage.atom_count),
+            atom_size: unsigned(usage.atom_size),
+            str_count: unsigned(usage.str_count),
+            str_size: unsigned(usage.str_size),
+            obj_count: unsigned(usage.obj_count),
+            obj_size: unsigned(usage.obj_size),
+            prop_count: unsigned(usage.prop_count),
+            prop_size: unsigned(usage.prop_size),
+            shape_count: unsigned(usage.shape_count),
+            shape_size: unsigned(usage.shape_size),
+            js_func_count: unsigned(usage.js_func_count),
+            js_func_size: unsigned(usage.js_func_size),
+            js_func_code_size: unsigned(usage.js_func_code_size),
+            js_func_pc2line_count: unsigned(usage.js_func_pc2line_count),
+            js_func_pc2line_size: unsigned(usage.js_func_pc2line_size),
+            c_func_count: unsigned(usage.c_func_count),
+            array_count: unsigned(usage.array_count),
+            fast_array_count: unsigned(usage.fast_array_count),
+            fast_array_elements: unsigned(usage.fast_array_elements),
+            binary_object_count: unsigned(usage.binary_object_count),
+            binary_object_size: unsigned(usage.binary_object_size),
+        })
+    }
+
+    pub(crate) fn run_gc(&self) -> Option<JsGcResult> {
+        let before = self.memory_detail()?;
+        let start = Instant::now();
+        self.runtime.as_ref()?.run_gc();
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let after = self.memory_detail()?;
+        Some(JsGcResult {
+            before,
+            after,
+            duration_ms,
+            freed_bytes: before
+                .memory_used_size
+                .saturating_sub(after.memory_used_size),
+        })
+    }
+
+    pub(crate) fn set_sampler(&self, config: SamplerConfig) -> bool {
+        if let Some(sampler) = &self.sampler {
+            sampler.set_config(config);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn note_job_limit(&self) {
+        self.job_limit_hits
+            .set(self.job_limit_hits.get().saturating_add(1));
     }
 
     pub(crate) fn configured(
@@ -104,6 +174,9 @@ impl Vm {
             rejection_overflows: Cell::new(0),
             promise_peak: Cell::new(0),
             rejection_peak: Cell::new(0),
+            job_limit_hits: Cell::new(0),
+            budget_overruns: Cell::new(0),
+            interrupted: Cell::new(false),
             eval_budget_ms: Cell::new(limits.eval_budget_ms),
             callback_budget_ms: Cell::new(limits.callback_budget_ms),
             armed: Cell::new(false),
@@ -199,8 +272,10 @@ impl Vm {
                 // SAFETY: `this` still addresses the armed `Vm`.
                 let vm = unsafe { &*this };
                 let expired = monotonic_ms() > vm.deadline.get();
-                if !expired && let Some(sampler) = &vm.sampler {
-                    sampler.poll();
+                if expired {
+                    vm.interrupted.set(true);
+                } else if let Some(sampler) = &vm.sampler {
+                    sampler.poll(vm.entry.get().0);
                 }
                 expired
             })));
@@ -324,6 +399,7 @@ impl Vm {
             vm: self,
             previous_entry,
             previous_deadline,
+            previous_interrupt: self.interrupted.replace(false),
         }
     }
 
@@ -414,10 +490,15 @@ pub struct Budget<'a> {
     vm: &'a Vm,
     previous_entry: (&'static str, u64),
     previous_deadline: i64,
+    previous_interrupt: bool,
 }
 
 impl Drop for Budget<'_> {
     fn drop(&mut self) {
+        if self.vm.interrupted.replace(self.previous_interrupt) {
+            let count = self.vm.budget_overruns.get();
+            self.vm.budget_overruns.set(count.saturating_add(1));
+        }
         self.vm.entry.set(self.previous_entry);
         self.vm.deadline.set(self.previous_deadline);
     }

@@ -159,10 +159,11 @@ pub(super) struct TimelineRecording {
 
 static RECORDING_ID: AtomicU64 = AtomicU64::new(0);
 static DETAIL: AtomicU8 = AtomicU8::new(0);
+static JS_SAMPLING: AtomicBool = AtomicBool::new(false);
 static OWNER: Mutex<Option<Weak<TimelineRecording>>> = Mutex::new(None);
 
 impl TimelineRecording {
-    pub fn begin(id: u64, detail: TraceDetail) -> Option<Arc<Self>> {
+    pub fn begin(id: u64, detail: TraceDetail, js_sampling: bool) -> Option<Arc<Self>> {
         let mut owner = lock(&OWNER);
         if owner
             .as_ref()
@@ -182,6 +183,7 @@ impl TimelineRecording {
         });
         *owner = Some(Arc::downgrade(&recording));
         RECORDING_ID.store(id, Ordering::Release);
+        JS_SAMPLING.store(js_sampling, Ordering::Relaxed);
         DETAIL.store(detail as u8, Ordering::Release);
         drop(owner);
         tracing::callsite::rebuild_interest_cache();
@@ -363,6 +365,7 @@ fn allowed(key: &str) -> bool {
             | "node"
             | "count"
             | "request_id"
+            | "js_entry"
             | "surface"
             | "serial"
             | "submitted"
@@ -449,7 +452,7 @@ impl Visit for SpanFields {
                 }
             }
             "js_stack" => {
-                let end = value.floor_char_boundary(2048.min(value.len()));
+                let end = value.floor_char_boundary(8192.min(value.len()));
                 self.set(key, FieldValue::Str(value[..end].to_owned()));
             }
             _ if allowed(key) => self.set(key, FieldValue::Str(limited(value))),
@@ -466,6 +469,9 @@ struct TimelineFilter;
 
 fn enabled(metadata: &Metadata<'_>) -> bool {
     let detail = DETAIL.load(Ordering::Acquire);
+    if metadata.target() == "impasto::js_profile" {
+        return detail != 0 && JS_SAMPLING.load(Ordering::Relaxed);
+    }
     detail != 0
         && metadata.target().starts_with("impasto::")
         && (metadata.is_span() || metadata.fields().field("trace_event").is_some())
@@ -712,6 +718,7 @@ mod tests {
                 CaptureOptions {
                     detail: TraceDetail::Stages,
                     gpu: false,
+                    js_sampling: false,
                 },
             )
             .unwrap();
@@ -723,7 +730,8 @@ mod tests {
                     None,
                     CaptureOptions {
                         detail: TraceDetail::Detailed,
-                        gpu: false
+                        gpu: false,
+                        js_sampling: false,
                     }
                 )
                 .is_none()
@@ -770,6 +778,7 @@ mod tests {
                 CaptureOptions {
                     detail: TraceDetail::Detailed,
                     gpu: false,
+                    js_sampling: false,
                 },
             )
             .unwrap();

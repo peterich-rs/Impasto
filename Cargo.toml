@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/engine",
     "crates/devtools-protocol",
+    "crates/devtools-symbols",
     "crates/raster",
     "crates/shader",
     "crates/javascript",
@@ -46,6 +47,7 @@ thiserror = "2"
 impasto = { path = "crates/impasto" }
 engine = { path = "crates/engine" }
 devtools-protocol = { path = "crates/devtools-protocol" }
+devtools-symbols = { path = "crates/devtools-symbols" }
 raster = { path = "crates/raster" }
 javascript = { path = "crates/javascript", default-features = false }
 embedder = { path = "crates/embedder/common" }

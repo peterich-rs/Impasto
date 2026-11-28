@@ -9,7 +9,11 @@ pub(super) fn handle(runtime: &mut UiHost, command: Command) -> Result<bool, Boo
         #[cfg(any(debug_assertions, feature = "devtools-server"))]
         Command::Devtools { query, reply } => {
             if !reply.is_closed()
-                || matches!(query, crate::command::DevtoolsQuery::ClearOverlay { .. })
+                || matches!(
+                    query,
+                    crate::command::DevtoolsQuery::ClearOverlay { .. }
+                        | crate::command::DevtoolsQuery::ClearSampler { .. }
+                )
             {
                 let _ = reply.send(devtools(runtime, query));
             }
@@ -242,7 +246,45 @@ fn devtools(runtime: &mut UiHost, query: crate::command::DevtoolsQuery) -> Resul
 
     let session = runtime.session.as_mut().ok_or("session closed")?;
     let mut value = None;
+    use crate::diagnostics::remote_runtime;
     match query {
+        DevtoolsQuery::JsMemoryDetail => session_call(|| {
+            value = session
+                .js_memory_detail()
+                .map(|detail| remote_runtime::memory(detail).to_string());
+        }),
+        DevtoolsQuery::JsResources => session_call(|| {
+            value = session
+                .js_resources_snapshot()
+                .map(|snapshot| remote_runtime::resources(snapshot).to_string());
+        }),
+        DevtoolsQuery::JsRunGc => session_call(|| {
+            value = session
+                .run_js_gc()
+                .map(|result| remote_runtime::gc(result).to_string());
+        }),
+        DevtoolsQuery::SetSampler { owner, config } => {
+            let mut applied = false;
+            session_call(|| applied = session.set_js_sampler_config(config));
+            if applied {
+                runtime.sampler_owner = Some(owner);
+            }
+            return if applied {
+                Ok(b"true".to_vec())
+            } else {
+                Err("sampler unavailable".to_owned())
+            };
+        }
+        DevtoolsQuery::ClearSampler { owner } => {
+            if runtime.sampler_owner == Some(owner) {
+                runtime.sampler_owner = None;
+                session_call(|| {
+                    session.set_js_sampler_config(engine::session::SamplerConfig::default());
+                });
+            }
+            return Ok(b"true".to_vec());
+        }
+
         DevtoolsQuery::ViewSnapshot { max_nodes } => {
             session_call(|| value = session.inspector_snapshot_limited(max_nodes))
         }

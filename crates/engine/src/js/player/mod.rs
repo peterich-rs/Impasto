@@ -447,6 +447,12 @@ impl Session for JsSession {
     }
 
     fn runtime_sample(&self) -> Option<crate::session::RuntimeSample> {
+        let mut sample = self.runtime_counters()?;
+        sample.heap_bytes = self.vm.host.runtime.heap_bytes();
+        Some(sample)
+    }
+
+    fn runtime_counters(&self) -> Option<crate::session::RuntimeSample> {
         let counts = self.vm.host.runtime.counts();
         Some(crate::session::RuntimeSample {
             promises: counts.promises,
@@ -454,8 +460,28 @@ impl Session for JsSession {
             requests: counts.requests,
             queued_events: counts.queued_events,
             queued_bytes: counts.queued_bytes,
-            heap_bytes: self.vm.host.runtime.heap_bytes(),
+            heap_bytes: None,
         })
+    }
+
+    fn js_memory_detail(&self) -> Option<crate::session::JsMemoryDetail> {
+        self.vm.host.runtime.memory_detail()
+    }
+
+    fn js_resources_snapshot(&self) -> Option<crate::session::JsResourcesSnapshot> {
+        Some(self.vm.host.resources_snapshot())
+    }
+
+    fn run_js_gc(&mut self) -> Option<crate::session::JsGcResult> {
+        self.vm.host.runtime.run_gc()
+    }
+
+    fn set_js_sampler_config(&mut self, config: crate::session::SamplerConfig) -> bool {
+        self.vm.set_sampler(config)
+    }
+
+    fn take_js_stack_samples(&mut self) -> Vec<crate::session::StackSample> {
+        self.vm.take_live_samples()
     }
 
     fn set_trace(&mut self, enabled: bool) {

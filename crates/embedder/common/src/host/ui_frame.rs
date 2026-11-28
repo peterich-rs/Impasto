@@ -500,8 +500,51 @@ fn run_session(
                 }
                 hub.refresh_inspector(!output.again, || session.inspector_snapshot());
             }
-            if counters && runtime.frame_number.is_multiple_of(30) {
-                runtime_sample = session.runtime_sample();
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            let reads_runtime = runtime
+                .telemetry
+                .as_deref()
+                .is_some_and(crate::diagnostics::TelemetryHub::reads_runtime);
+            #[cfg(not(any(debug_assertions, feature = "devtools-server")))]
+            let reads_runtime = false;
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            let reads_resources = runtime
+                .telemetry
+                .as_deref()
+                .is_some_and(crate::diagnostics::TelemetryHub::reads_resources);
+            #[cfg(not(any(debug_assertions, feature = "devtools-server")))]
+            let reads_resources = false;
+            if (counters || reads_runtime || reads_resources)
+                && runtime
+                    .last_runtime_sample
+                    .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(1))
+            {
+                runtime.last_runtime_sample = Some(Instant::now());
+                let memory = (counters || reads_runtime)
+                    .then(|| session.js_memory_detail())
+                    .flatten();
+                if counters {
+                    runtime_sample = session.runtime_counters().map(|mut sample| {
+                        sample.heap_bytes = memory
+                            .and_then(|detail| usize::try_from(detail.memory_used_size).ok())
+                            .or(sample.heap_bytes);
+                        sample
+                    });
+                }
+                #[cfg(any(debug_assertions, feature = "devtools-server"))]
+                if let Some(hub) = &runtime.telemetry {
+                    use crate::diagnostics::remote_runtime;
+                    if reads_runtime && let Some(detail) = memory {
+                        hub.note_runtime(serde_json::json!({"kind": "memory", "detail": remote_runtime::memory(detail)}));
+                    }
+                    if reads_resources && let Some(snapshot) = session.js_resources_snapshot() {
+                        hub.note_resources(serde_json::json!({"kind": "async", "detail": remote_runtime::resources(snapshot)}));
+                    }
+                }
+            }
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            if let Some(hub) = &runtime.telemetry {
+                hub.note_js_samples(runtime.frame_number, session.take_js_stack_samples());
             }
             again = output.again;
             leave = output.exit;

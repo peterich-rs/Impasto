@@ -13,6 +13,7 @@ headless-gpu = ["testing/headless-gpu"]
 
 [dependencies]
 devtools-protocol.workspace = true
+devtools-symbols.workspace = true
 getrandom = "0.4"
 impasto.workspace = true
 quote = "1"

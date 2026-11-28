@@ -326,6 +326,8 @@ async fn serve(stream: TcpStream, agent: Arc<Agent>) {
             Capability::RemoteOverlay,
             Capability::NetworkTimings,
             Capability::NetworkBodies,
+            Capability::JsRuntimeDetail,
+            Capability::SourceMapSymbols,
         ]);
         json!({"version": PROTOCOL_VERSION_V2, "capabilities": capabilities, "session": agent.info()})
     } else {
@@ -337,7 +339,7 @@ async fn serve(stream: TcpStream, agent: Arc<Agent>) {
     let _inspector = (!v2).then(|| hub.inspect_remote());
     let mut cursor = None;
     let mut subscription = Subscription::new(Arc::clone(hub));
-    let mut overlay = OverlayLease::default();
+    let mut lease = UiLease::default();
     let mut recording = None;
     let mut captures = JoinSet::new();
     let mut updates = interval(if v2 {
@@ -376,7 +378,7 @@ async fn serve(stream: TcpStream, agent: Arc<Agent>) {
                         &message,
                         &mut subscription,
                         &mut recording,
-                        &mut overlay,
+                        &mut lease,
                         &mut captures,
                     )
                 } else {
@@ -514,7 +516,14 @@ fn request(
                 Value::Null => true,
                 _ => return Some(error(id, -32602, "gpu must be boolean")),
             };
-            let Some(capture_id) = hub.begin_capture(None, CaptureOptions { detail, gpu }) else {
+            let Some(capture_id) = hub.begin_capture(
+                None,
+                CaptureOptions {
+                    detail,
+                    gpu,
+                    js_sampling: detail == TraceDetail::Detailed,
+                },
+            ) else {
                 return Some(error(id, -32002, "trace capture busy"));
             };
             let capture = Capture {
@@ -538,7 +547,7 @@ fn request_v2(
     message: &str,
     subscription: &mut Subscription,
     recording: &mut Option<Capture>,
-    overlay: &mut OverlayLease,
+    lease: &mut UiLease,
     pending: &mut JoinSet<Message>,
 ) -> Option<Message> {
     let Ok(rpc) = serde_json::from_str::<Value>(message) else {
@@ -621,7 +630,14 @@ fn request_v2(
             });
             return None;
         }
-        "view.snapshot" | "view.probe" | "view.set_overlay" | "view.repaint_leaderboard" => {
+        "view.snapshot"
+        | "view.probe"
+        | "view.set_overlay"
+        | "view.repaint_leaderboard"
+        | "js.memory_detail"
+        | "js.resources"
+        | "js.run_gc"
+        | "js.set_sampler_config" => {
             if pending.len() >= PENDING_RPC_LIMIT {
                 return Some(fail(-32002, "too many pending requests"));
             }
@@ -654,6 +670,18 @@ fn request_v2(
                     limit: usize::try_from(params["limit"].as_u64().unwrap_or(32).min(256))
                         .unwrap_or(32),
                 },
+                "js.memory_detail" => DevtoolsQuery::JsMemoryDetail,
+                "js.resources" => DevtoolsQuery::JsResources,
+                "js.run_gc" => DevtoolsQuery::JsRunGc,
+                "js.set_sampler_config" => {
+                    let Some(config) = sampler_config(params) else {
+                        return Some(fail(-32602, "invalid sampler configuration"));
+                    };
+                    DevtoolsQuery::SetSampler {
+                        owner: lease.claim(poster),
+                        config,
+                    }
+                }
                 _ => {
                     let mut params = params.clone();
                     if let Some(node) = params.get_mut("highlight_node")
@@ -665,7 +693,7 @@ fn request_v2(
                         return Some(fail(-32602, "invalid overlay configuration"));
                     };
                     DevtoolsQuery::ViewSetOverlay {
-                        owner: overlay.claim(poster),
+                        owner: lease.claim(poster),
                         config,
                     }
                 }
@@ -763,9 +791,9 @@ fn network_token(params: &Value) -> Option<u64> {
 }
 
 #[derive(Default)]
-struct OverlayLease(Option<(u64, Poster)>);
+struct UiLease(Option<(u64, Poster)>);
 
-impl OverlayLease {
+impl UiLease {
     fn claim(&mut self, poster: &Poster) -> u64 {
         static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
         self.0
@@ -774,17 +802,42 @@ impl OverlayLease {
     }
 }
 
-impl Drop for OverlayLease {
+impl Drop for UiLease {
     fn drop(&mut self) {
         if let Some((owner, poster)) = &self.0 {
-            let (reply, abandoned) = tokio::sync::oneshot::channel();
-            drop(abandoned);
-            poster.post(Command::Devtools {
-                query: DevtoolsQuery::ClearOverlay { owner: *owner },
-                reply,
-            });
+            for query in [
+                DevtoolsQuery::ClearOverlay { owner: *owner },
+                DevtoolsQuery::ClearSampler { owner: *owner },
+            ] {
+                let (reply, abandoned) = tokio::sync::oneshot::channel();
+                drop(abandoned);
+                poster.post(Command::Devtools { query, reply });
+            }
         }
     }
+}
+
+fn sampler_config(params: &Value) -> Option<engine::session::SamplerConfig> {
+    let enabled = params.get("enabled").map_or(Some(true), Value::as_bool)?;
+    if !enabled {
+        return Some(engine::session::SamplerConfig::default());
+    }
+    let get = |name, default| params.get(name).map_or(Some(default), Value::as_u64);
+    let interval_us = get("interval_us", 500)?;
+    let max_depth = usize::try_from(get("max_depth", 32)?).ok()?;
+    let max_samples = usize::try_from(get("max_samples", 128)?).ok()?;
+    if !(100..=1_000_000).contains(&interval_us)
+        || !(1..=64).contains(&max_depth)
+        || !(1..=512).contains(&max_samples)
+    {
+        return None;
+    }
+    Some(engine::session::SamplerConfig {
+        enabled,
+        interval_us,
+        max_depth,
+        max_samples,
+    })
 }
 
 fn capture_options(params: &Value) -> Option<CaptureOptions> {
@@ -799,7 +852,14 @@ fn capture_options(params: &Value) -> Option<CaptureOptions> {
         Value::Null => true,
         _ => return None,
     };
-    Some(CaptureOptions { detail, gpu })
+    let js_sampling = params
+        .get("js_sampling")
+        .map_or(Some(detail == TraceDetail::Detailed), Value::as_bool)?;
+    Some(CaptureOptions {
+        detail,
+        gpu,
+        js_sampling,
+    })
 }
 
 async fn ui_reply(

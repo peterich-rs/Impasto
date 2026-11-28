@@ -982,6 +982,9 @@ struct Installed {
 pub(crate) struct UiHost {
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     overlay_owner: Option<u64>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    sampler_owner: Option<u64>,
+    last_runtime_sample: Option<Instant>,
     shaper: Rc<RefCell<raster::ParleyShaper>>,
     graphics: RasterPort,
     active_surface: Option<SurfaceId>,
@@ -1386,6 +1389,9 @@ fn open_ui(
     Ok(UiHost {
         #[cfg(any(debug_assertions, feature = "devtools-server"))]
         overlay_owner: None,
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        sampler_owner: None,
+        last_runtime_sample: None,
         graphics,
         shaper,
         active_surface: None,

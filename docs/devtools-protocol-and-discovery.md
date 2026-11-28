@@ -211,7 +211,7 @@ sequenceDiagram
 | `view.repaint_leaderboard` | C→S | UI 队列 | Text | 返回累计/近 60 帧重绘次数 Top N 节点列表 |
 | `view.probe` | C→S | UI 队列 | Text | 按场景坐标执行 `debug_probe(x, y)`，返回命中链路 |
 | `view.set_overlay` | C→S | UI 队列 | Text | 控制设备端 `highlight_node`、`pick_mode`、`repaint_rainbow`、`layout_scan` |
-| `js.memory_detail` | C→S | UI 队列 | Text | 采集 QuickJS `JSMemoryUsage` 完整 23 项细分指标 |
+| `js.memory_detail` | C→S | UI 队列 | Text | 采集 QuickJS `JSMemoryUsage` 完整 26 项细分指标 |
 | `js.resources` | C→S | UI 队列 | Text | 返回活跃 Timers、Pending Promises、队列积压与峰值 |
 | `js.run_gc` | C→S | UI 队列 | Text | 触发 QuickJS GC 并返回回收前后内存差值与耗时 |
 | `net.get_body` | C→S | Tokio/Hub | Binary | 从 `NetBodyPool` 读取指定 `token` 的完整请求或响应体 |

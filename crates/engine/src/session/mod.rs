@@ -1,5 +1,9 @@
 //! 帧调度、输入交付和宿主服务的契约。
 
+pub use javascript::host::{
+    JsGcResult, JsMemoryDetail, JsResourcesSnapshot, RuntimeCounts, SamplerConfig, StackSample,
+    TimerKind, TimerSnapshot,
+};
 use std::sync::Arc;
 
 pub use javascript::host::{Credit, CreditPool, Delivery, RequestKey, Route, RuntimeKey};
@@ -191,6 +195,36 @@ pub trait Session {
     fn runtime_sample(&self) -> Option<RuntimeSample> {
         None
     }
+    /// Resource counts without an allocator walk.
+    fn runtime_counters(&self) -> Option<RuntimeSample> {
+        self.runtime_sample()
+    }
+
+    /// Detailed memory breakdown available between script turns.
+    fn js_memory_detail(&self) -> Option<JsMemoryDetail> {
+        None
+    }
+
+    /// Snapshot of active asynchronous resources.
+    fn js_resources_snapshot(&self) -> Option<JsResourcesSnapshot> {
+        None
+    }
+
+    /// Performs an owner-thread garbage collection.
+    fn run_js_gc(&mut self) -> Option<JsGcResult> {
+        None
+    }
+
+    /// Configures the cooperative stack sampler.
+    fn set_js_sampler_config(&mut self, _config: SamplerConfig) -> bool {
+        false
+    }
+
+    /// Drains live profiler samples collected in the current UI turn.
+    fn take_js_stack_samples(&mut self) -> Vec<StackSample> {
+        Vec::new()
+    }
+
     /// Registers an effect source for sessions with a paint tree.
     ///
     /// # Errors

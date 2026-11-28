@@ -11,6 +11,8 @@ pub(crate) mod remote;
 #[cfg(any(debug_assertions, feature = "devtools-server"))]
 mod remote_frame;
 #[cfg(any(debug_assertions, feature = "devtools-server"))]
+pub(crate) mod remote_runtime;
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
 mod remote_stream;
 #[cfg(any(debug_assertions, feature = "devtools-server"))]
 pub(crate) mod remote_views;

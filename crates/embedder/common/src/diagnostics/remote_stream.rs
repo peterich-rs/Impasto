@@ -49,6 +49,13 @@ impl Subscription {
     }
 
     pub(super) fn subscribe(&mut self, request: Subscribe, hub: &TelemetryHub) -> Value {
+        for channel in [Channel::Runtime, Channel::Resources] {
+            let previous = self.channels.contains(&channel);
+            let next = request.channels.contains(&channel);
+            if previous != next {
+                self.hub.runtime_reader(channel, next);
+            }
+        }
         self.channels.clear();
         for channel in request.channels {
             if !self.channels.contains(&channel) {
@@ -138,8 +145,8 @@ impl Subscription {
                         })
                     }),
                 ),
-                Channel::Runtime => ("runtime", empty(since)),
-                Channel::Resources => ("resources", empty(since)),
+                Channel::Runtime => ("runtime", changes(&hub.runtime, since, runtime)),
+                Channel::Resources => ("resources", changes(&hub.resources, since, runtime)),
             };
             if initial || update.reset || Some(update.revision) != since {
                 *cursor = Some(update.revision);
@@ -152,6 +159,11 @@ impl Subscription {
 
 impl Drop for Subscription {
     fn drop(&mut self) {
+        for channel in [Channel::Runtime, Channel::Resources] {
+            if self.channels.contains(&channel) {
+                self.hub.runtime_reader(channel, false);
+            }
+        }
         if self.repaint_active {
             self.hub.repaint_reader(false);
         }
@@ -174,10 +186,6 @@ fn changes<T: Clone + SeqField>(
     }
 }
 
-fn empty(since: Option<u64>) -> ChannelUpdate<Value> {
-    ChannelUpdate {
-        revision: 0,
-        reset: since != Some(0),
-        entries: Vec::new(),
-    }
+fn runtime(entry: &super::hub::RuntimeUpdate) -> Value {
+    json!({"seq": entry.seq, "at_ms": entry.at_ms, "value": entry.observation.as_ref()})
 }
