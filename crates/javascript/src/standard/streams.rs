@@ -22,7 +22,7 @@ struct Deferred<'js> {
     promise: Promise<'js>,
     resolve: Function<'js>,
     reject: Function<'js>,
-    retained: bool,
+    anchor: Option<ReadAnchor>,
 }
 
 impl<'js> Deferred<'js> {
@@ -32,25 +32,29 @@ impl<'js> Deferred<'js> {
             promise,
             resolve,
             reject,
-            retained: false,
+            anchor: None,
         })
     }
 
-    fn retain(&mut self, stream: &Class<'js, ReadableStream<'js>>) -> Result<()> {
-        let holder = read_anchors(self.promise.ctx())?;
+    fn retain(
+        &mut self,
+        stream: &Class<'js, ReadableStream<'js>>,
+        anchor: ReadAnchor,
+    ) -> Result<()> {
+        let holder = anchor.holder(self.promise.ctx())?;
         let map: Object = holder.get("map")?;
         holder.get::<_, Function>("set")?.call::<_, ()>((
             This(map),
             self.promise.clone(),
             stream.clone(),
         ))?;
-        self.retained = true;
+        self.anchor = Some(anchor);
         Ok(())
     }
 
     fn release(&self) -> Result<()> {
-        if self.retained {
-            let holder = read_anchors(self.promise.ctx())?;
+        if let Some(anchor) = self.anchor {
+            let holder = anchor.holder(self.promise.ctx())?;
             let map: Object = holder.get("map")?;
             holder
                 .get::<_, Function>("delete")?
@@ -67,6 +71,25 @@ impl<'js> Deferred<'js> {
     fn reject(&self, error: Value<'js>) -> Result<()> {
         self.release()?;
         self.reject.call((error,))
+    }
+}
+
+#[derive(Clone, Copy, Trace, JsLifetime)]
+enum ReadAnchor {
+    Script,
+    Native,
+}
+
+impl ReadAnchor {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Script => "script",
+            Self::Native => "native",
+        }
+    }
+
+    fn holder<'js>(self, ctx: &Ctx<'js>) -> Result<Object<'js>> {
+        read_anchors(ctx)?.get(self.key())
     }
 }
 
@@ -392,8 +415,13 @@ fn read<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js>>) -> Result
                 Err(Exception::throw_range(ctx, "Too many pending reads")),
             );
         } else {
+            let anchor = if state.cancel.is_some() {
+                ReadAnchor::Native
+            } else {
+                ReadAnchor::Script
+            };
             drop(state);
-            deferred.retain(stream)?;
+            deferred.retain(stream, anchor)?;
             stream.try_borrow_mut()?.pending.push_back(deferred.clone());
             source::pull_if_needed(ctx, stream)?;
             return Ok(deferred.promise);
@@ -600,14 +628,18 @@ fn exception_value<'js>(ctx: &Ctx<'js>, error: Error) -> Result<Value<'js>> {
 }
 
 pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>) -> Result<()> {
-    // The pending read promise keeps its stream alive even when the caller
-    // discards the reader after calling read. The weak key permits GC of both.
-    let holder = read_anchors(ctx)?;
-    let weak: Constructor = globals.get("WeakMap")?;
-    let map: Object = weak.construct(())?;
-    holder.set("set", map.get::<_, Function>("set")?)?;
-    holder.set("delete", map.get::<_, Function>("delete")?)?;
-    holder.set("map", map)?;
+    let anchors = read_anchors(ctx)?;
+    // A script read keeps its stream alive while the read promise is reachable.
+    // Native I/O can complete an awaited read even when QuickJS no longer roots
+    // the promise itself. Retain those reads until they settle or are canceled.
+    for (kind, constructor) in [(ReadAnchor::Script, "WeakMap"), (ReadAnchor::Native, "Map")] {
+        let holder = Object::new(ctx.clone())?;
+        let map: Object = globals.get::<_, Constructor>(constructor)?.construct(())?;
+        holder.set("set", map.get::<_, Function>("set")?)?;
+        holder.set("delete", map.get::<_, Function>("delete")?)?;
+        holder.set("map", map)?;
+        anchors.set(kind.key(), holder)?;
+    }
     globals.set(
         "ReadableStream",
         constructor::<ReadableStream<'js>, _, _>(ctx, source::construct)?,

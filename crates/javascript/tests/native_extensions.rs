@@ -176,6 +176,47 @@ fn catalog(method: Method) -> ModuleCatalog {
 }
 
 #[test]
+fn awaiting_a_native_read_keeps_the_stream_alive_through_gc() {
+    let (producer, receiver) = mpsc::channel();
+    let method = Method::stream_with_exec("open", move |_, sink, _| {
+        producer.send(sink).expect("receive native producer");
+    });
+    let mut runtime = Runtime::builder()
+        .modules(catalog(method))
+        .module(
+            "app:test",
+            "import {open} from '@impasto/test-native';
+             async function read() {
+               const reader = open().getReader();
+               return (await reader.read()).value;
+             }
+             if (await read() !== 'ready') throw Error('missing native stream item');",
+        )
+        .build()
+        .expect("build runtime");
+    let ticket = runtime.start_module("app:test").expect("start native read");
+    runtime.drive(0).expect("reach pending read");
+    let mut sink = receiver.try_recv().expect("native producer was started");
+    runtime.run_gc().expect("collect while read is pending");
+    assert!(
+        !sink.cancellation().is_cancelled(),
+        "GC canceled a pending read"
+    );
+    sink.try_send(PluginValue::Str("ready".into()))
+        .expect("complete pending read");
+    runtime.drive(1).expect("deliver native item");
+    assert_eq!(
+        runtime.take_module_result(ticket).expect("module result"),
+        Some(ModuleOutcome::Fulfilled)
+    );
+    runtime.run_gc().expect("collect after read settles");
+    assert!(
+        sink.cancellation().is_cancelled(),
+        "settled read retained the stream"
+    );
+}
+
+#[test]
 fn web_primitive_semantics_reuse_vm_jobs_and_allow_injected_entropy() {
     struct FixedEntropy;
     impl EntropySource for FixedEntropy {
