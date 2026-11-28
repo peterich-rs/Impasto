@@ -1,0 +1,72 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 60;
+    objects = {
+        A00000000000000000000001 = {
+            isa = PBXProject;
+            buildConfigurationList = A0000000000000000000000D;
+            compatibilityVersion = "Xcode 15.0";
+            developmentRegion = en;
+            knownRegions = (en, Base);
+            mainGroup = A00000000000000000000002;
+            productRefGroup = A00000000000000000000003;
+            packageReferences = (A00000000000000000000010);
+            targets = (A00000000000000000000004);
+        };
+        A00000000000000000000002 = {
+            isa = PBXGroup;
+            children = (A00000000000000000000005, A00000000000000000000006, A00000000000000000000007, A00000000000000000000003 , A00000000000000000000020, A00000000000000000000021);
+            sourceTree = "<group>";
+        };
+        A00000000000000000000003 = {
+            isa = PBXGroup;
+            children = (A00000000000000000000008);
+            name = Products;
+            sourceTree = "<group>";
+        };
+        A00000000000000000000004 = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = A0000000000000000000000E;
+            buildPhases = (A00000000000000000000009, A0000000000000000000000B, A00000000000000000000014, A0000000000000000000000C);
+            buildRules = ();
+            dependencies = ();
+            name = Runner;
+            packageProductDependencies = (A00000000000000000000011);
+            productName = Runner;
+            productReference = A00000000000000000000008;
+            productType = "com.apple.product-type.application";
+        };
+        A00000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Runner/App.swift; sourceTree = "<group>"; };
+        A00000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Debug.xcconfig; sourceTree = "<group>"; };
+        A00000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Release.xcconfig; sourceTree = "<group>"; };
+        A00000000000000000000008 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = devtools-desktop.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        A00000000000000000000009 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A0000000000000000000000A); runOnlyForDeploymentPostprocessing = 0; };
+        A0000000000000000000000A = {isa = PBXBuildFile; fileRef = A00000000000000000000005; };
+        A0000000000000000000000B = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000012); runOnlyForDeploymentPostprocessing = 0; };
+        A0000000000000000000000C = {
+            isa = PBXShellScriptBuildPhase;
+            alwaysOutOfDate = 1;
+            buildActionMask = 2147483647;
+            files = ();
+            name = "Copy Impasto resources";
+            runOnlyForDeploymentPostprocessing = 0;
+            shellPath = /bin/sh;
+            shellScript = "set -eu\nproducts=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\nmkdir -p \"$products\"\nrm -f \"$products/app.js\" \"$products/app.bin\"\nrm -rf \"$products/assets\"\ncp -R \"$IMPASTO_RESOURCES/.\" \"$products/\"\n";
+        };
+        A0000000000000000000000D = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000015, A00000000000000000000016); defaultConfigurationName = Release; };
+        A0000000000000000000000E = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000017, A00000000000000000000018); defaultConfigurationName = Release; };
+        A00000000000000000000010 = {isa = XCLocalSwiftPackageReference; relativePath = ../.impasto/darwin/macos/ImpastoGeneratedPlugins; };
+        A00000000000000000000011 = {isa = XCSwiftPackageProductDependency; package = A00000000000000000000010; productName = ImpastoGeneratedPlugins; };
+        A00000000000000000000012 = {isa = PBXBuildFile; productRef = A00000000000000000000011; };
+        A00000000000000000000014 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+        A00000000000000000000015 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {SDKROOT = macosx; ONLY_ACTIVE_ARCH = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; };
+        A00000000000000000000016 = {isa = XCBuildConfiguration; name = Release; buildSettings = {SDKROOT = macosx; ONLY_ACTIVE_ARCH = NO; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; }; };
+        A00000000000000000000017 = {isa = XCBuildConfiguration; name = Debug; baseConfigurationReference = A00000000000000000000006; buildSettings = {}; };
+        A00000000000000000000018 = {isa = XCBuildConfiguration; name = Release; baseConfigurationReference = A00000000000000000000007; buildSettings = {}; };
+        A00000000000000000000020 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Runner/Info.plist; sourceTree = "<group>"; };
+        A00000000000000000000021 = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner/Runner.entitlements; sourceTree = "<group>"; };
+    };
+    rootObject = A00000000000000000000001;
+}

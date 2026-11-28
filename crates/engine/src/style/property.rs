@@ -21,6 +21,43 @@ bitflags::bitflags! {
     }
 }
 
+/// Pointer shape selected by the foremost view's style.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
+pub enum CursorStyle {
+    Auto,
+    #[default]
+    Default,
+    Pointer,
+    Text,
+    ColResize,
+    RowResize,
+    Grab,
+    Grabbing,
+    Move,
+    NotAllowed,
+    Crosshair,
+}
+
+impl CursorStyle {
+    pub(super) fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "auto" => Self::Auto,
+            "default" => Self::Default,
+            "pointer" => Self::Pointer,
+            "text" => Self::Text,
+            "col-resize" => Self::ColResize,
+            "row-resize" => Self::RowResize,
+            "grab" => Self::Grab,
+            "grabbing" => Self::Grabbing,
+            "move" => Self::Move,
+            "not-allowed" => Self::NotAllowed,
+            "crosshair" => Self::Crosshair,
+            _ => return None,
+        })
+    }
+}
+
 /// Stable index used inside the style system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
@@ -117,6 +154,7 @@ pub enum Key {
     GridAutoFlow = 108,
     BorderRadii = 109,
     BorderCurve = 110,
+    Cursor = 111,
 }
 
 impl Key {
@@ -213,6 +251,7 @@ impl Key {
             Self::GridAutoColumns => "gridAutoColumns",
             Self::GridAutoRows => "gridAutoRows",
             Self::GridAutoFlow => "gridAutoFlow",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -264,6 +303,7 @@ impl Key {
             | Self::TextOverflow
             | Self::TextAlign => Impact::MEASURE | Impact::PAINT,
             Self::ObjectFit => Impact::PAINT,
+            Self::Cursor => Impact::HIT,
             Self::Display => Impact::LAYOUT | Impact::HIT | Impact::PAINT | Impact::SEMANTICS,
             Self::LayoutDirection => Impact::LAYOUT | Impact::HIT,
             _ => Impact::LAYOUT,
@@ -378,6 +418,7 @@ pub(super) const KEYS: &[Key] = &[
     Key::GridAutoColumns,
     Key::GridAutoRows,
     Key::GridAutoFlow,
+    Key::Cursor,
 ];
 
 /// One longhand value. Shorthands expand before a declaration is stored.
@@ -478,6 +519,7 @@ pub enum Property {
     GridAutoColumns(TrackList),
     GridAutoRows(TrackList),
     GridAutoFlow(GridFlow),
+    Cursor(CursorStyle),
 }
 
 impl Property {
@@ -574,6 +616,7 @@ impl Property {
             Self::GridAutoColumns(_) => Key::GridAutoColumns,
             Self::GridAutoRows(_) => Key::GridAutoRows,
             Self::GridAutoFlow(_) => Key::GridAutoFlow,
+            Self::Cursor(_) => Key::Cursor,
         }
     }
 
@@ -1442,6 +1485,11 @@ const FIELDS: &[FieldMeta] = &[
         name: "lineThrough",
         ts_type: "boolean",
         group: "text",
+    },
+    FieldMeta {
+        name: "cursor",
+        ts_type: "\"auto\" | \"default\" | \"pointer\" | \"text\" | \"col-resize\" | \"row-resize\" | \"grab\" | \"grabbing\" | \"move\" | \"not-allowed\" | \"crosshair\"",
+        group: "paint",
     },
     FieldMeta {
         name: "objectFit",

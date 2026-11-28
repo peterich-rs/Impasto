@@ -32,7 +32,7 @@ members = [
     "packages/system-info/rust",
     "packages/websocket/rust",
 ]
-exclude = ["examples/native-order/rust"]
+exclude = ["examples/native-order/rust", "examples/devtools-desktop/rust"]
 
 [workspace.package]
 edition = "2024"

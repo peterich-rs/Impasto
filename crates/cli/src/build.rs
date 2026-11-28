@@ -640,6 +640,14 @@ pub fn macos(app: &App, options: &BuildOptions) -> Result<PlatformArtifact> {
         .arg(format!("ARCHS={architecture}"))
         .args(["-configuration", configuration, "-derivedDataPath"])
         .arg(project.join("xcode"));
+    if let Some(window) = &app.macos.window {
+        let source = app.root.join("macos/Runner/Info.plist");
+        let generated = project.join("Info.plist");
+        configure_window_plist(window, &source, &generated)?;
+        let mut override_plist = std::ffi::OsString::from("INFOPLIST_FILE=");
+        override_plist.push(generated);
+        command.arg(override_plist);
+    }
     if !options.verbose {
         command.arg("-quiet");
     }
@@ -657,6 +665,52 @@ pub fn macos(app: &App, options: &BuildOptions) -> Result<PlatformArtifact> {
         path: application,
         plugin_manifest: manifest_snapshot(Some(&native))?,
     })
+}
+
+fn configure_window_plist(
+    window: &crate::app::MacWindowConfig,
+    source: &Path,
+    output: &Path,
+) -> Result<()> {
+    let directory = output.parent().context("missing Info.plist directory")?;
+    let temp = tempfile::NamedTempFile::new_in(directory)?;
+    fs::copy(source, temp.path())?;
+    for (key, value, kind) in [
+        (
+            "ImpastoWindowWidth",
+            window.width.map(|value| value.to_string()),
+            "-float",
+        ),
+        (
+            "ImpastoWindowHeight",
+            window.height.map(|value| value.to_string()),
+            "-float",
+        ),
+        (
+            "ImpastoWindowMinWidth",
+            window.min_width.map(|value| value.to_string()),
+            "-float",
+        ),
+        (
+            "ImpastoWindowMinHeight",
+            window.min_height.map(|value| value.to_string()),
+            "-float",
+        ),
+        ("ImpastoWindowTitle", window.title.clone(), "-string"),
+        (
+            "ImpastoWindowAutosaveName",
+            window.autosave_name.clone(),
+            "-string",
+        ),
+    ] {
+        if let Some(value) = value {
+            let mut plist = Command::new("/usr/bin/plutil");
+            plist.args(["-replace", key, kind, &value]).arg(temp.path());
+            toolchain::run(plist, "写入 macOS 窗口配置")?;
+        }
+    }
+    temp.persist(output)?;
+    Ok(())
 }
 
 pub(crate) fn darwin_settings(library: &Path, resources: &Path, flags: &str) -> Result<String> {

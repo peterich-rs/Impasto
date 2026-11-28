@@ -222,12 +222,17 @@ pub(crate) fn launch_native(attach: Option<&str>) -> Result<()> {
             "The Impasto DevTools desktop app requires macOS. Use --html for the browser client."
         );
     }
-    let sessions = local_sessions()?;
-    let newest = sessions.first().map(|session| session.pid.to_string());
-    let attach = attach.or(newest.as_deref());
+    if attach.is_none() {
+        // Prune stale records before the client presents its target list.
+        let _ = local_sessions();
+    }
     let bundled = crate::toolchain::distribution()
         .map(|root| root.join("Impasto DevTools.app"))
-        .filter(|app| app.is_dir());
+        .filter(|app| app.is_dir())
+        .or_else(|| {
+            let installed = PathBuf::from("/Applications/Impasto DevTools.app");
+            installed.is_dir().then_some(installed)
+        });
     let application = match bundled {
         Some(path) => path,
         None => {
@@ -247,7 +252,15 @@ pub(crate) fn launch_native(attach: Option<&str>) -> Result<()> {
         }
     };
     let mut command = Command::new("open");
-    command.arg("-n").arg(application);
+    command.arg("-n");
+    for variable in ["PATH", "IMPASTO_DEVTOOLS_DISCOVERY_DIR"] {
+        if let Some(value) = std::env::var_os(variable) {
+            let mut entry = std::ffi::OsString::from(format!("{variable}="));
+            entry.push(value);
+            command.arg("--env").arg(entry);
+        }
+    }
+    command.arg(application);
     if let Some(attach) = attach {
         command.args(["--args", "--attach", attach]);
     }
@@ -280,6 +293,17 @@ pub(crate) fn configure_android(
         bail!("Android DevTools configuration failed ({status})");
     }
     Ok(())
+}
+
+pub(crate) fn android_serial() -> Result<String> {
+    let output = Command::new("adb").arg("get-serialno").output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Select an Android device with -d <serial>"
+    );
+    let serial = String::from_utf8(output.stdout)?.trim().to_owned();
+    device_filename("android", &serial)?;
+    Ok(serial)
 }
 
 enum Tunnel {
@@ -354,7 +378,19 @@ fn forward(options: &Options) -> Result<(u16, Option<Tunnel>)> {
 
 pub(crate) fn run(mut options: Options) -> Result<()> {
     if !options.html {
-        return launch_native(options.attach.as_deref().or(options.device.as_deref()));
+        let device = if options.attach.is_none() {
+            match options.device.as_deref() {
+                Some("android") => Some(format!("android:{}", android_serial()?)),
+                Some(device) if device.starts_with("ios:") || device.starts_with("android:") => {
+                    Some(device.to_owned())
+                }
+                Some(device) => Some(format!("android:{device}")),
+                None => None,
+            }
+        } else {
+            None
+        };
+        return launch_native(options.attach.as_deref().or(device.as_deref()));
     }
     if let Some(attach) = &options.attach {
         if let Some((kind, serial)) = attach.split_once(':') {

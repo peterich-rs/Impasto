@@ -13,18 +13,21 @@ mod app;
     reason = "image bytes are read when the host resolves an asset"
 )]
 mod assets;
+mod menu;
 mod native;
 mod pixels;
 mod pointer;
 mod surface;
 mod text_client;
 mod vsync;
+mod window;
 
 use std::ffi::c_char;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
+use window::WindowOptions;
 
 pub fn main() -> ExitCode {
     ExitCode::from(exit_status())
@@ -69,7 +72,7 @@ fn launch(open_url: Option<OpenUrl>, callbacks: Option<Callbacks>) -> Result<(),
             loaded.dump_list,
             loaded.url,
             native,
-            &loaded.title,
+            loaded.window,
         )
     })
 }
@@ -80,7 +83,7 @@ struct Loaded {
     font: Vec<u8>,
     dump_list: bool,
     url: Option<String>,
-    title: String,
+    window: WindowOptions,
 }
 
 fn load() -> anyhow::Result<Loaded> {
@@ -113,7 +116,7 @@ fn load() -> anyhow::Result<Loaded> {
         font,
         dump_list: paths.dump_list,
         url: paths.url,
-        title: paths.title,
+        window: paths.window,
     })
 }
 
@@ -123,7 +126,7 @@ struct Paths {
     script: Option<PathBuf>,
     dump_list: bool,
     url: Option<String>,
-    title: String,
+    window: WindowOptions,
 }
 
 impl Paths {
@@ -149,7 +152,7 @@ impl Paths {
         });
         let mut dump_list = false;
         let mut url = None;
-        let mut title = bundle_title().unwrap_or_else(|| "Impasto".to_owned());
+        let mut window = WindowOptions::bundled();
         let mut positional = 0u8;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -161,7 +164,18 @@ impl Paths {
                 continue;
             }
             if arg == "--title" {
-                title = args.next().context("--title needs a window title")?;
+                window.title = args.next().context("--title needs a window title")?;
+                continue;
+            }
+            if matches!(
+                arg.as_str(),
+                "--width" | "--height" | "--min-width" | "--min-height"
+            ) {
+                window.set_dimension(&arg, args.next())?;
+                continue;
+            }
+            if arg == "--attach" {
+                let _ = args.next().context("--attach needs a DevTools target")?;
                 continue;
             }
             if arg == "--dump-list" {
@@ -181,29 +195,16 @@ impl Paths {
             }
             positional = positional.saturating_add(1);
         }
+        window.validate()?;
         Ok(Self {
             assets,
             font,
             script,
             dump_list,
             url,
-            title,
+            window,
         })
     }
 }
 
 pub use embedder::install_plugins;
-
-fn bundle_title() -> Option<String> {
-    use objc2_foundation::{NSBundle, NSString};
-    let bundle = NSBundle::mainBundle();
-    ["CFBundleDisplayName", "CFBundleName"]
-        .into_iter()
-        .find_map(|key| {
-            bundle
-                .objectForInfoDictionaryKey(&NSString::from_str(key))?
-                .downcast::<NSString>()
-                .ok()
-                .map(|value| value.to_string())
-        })
-}

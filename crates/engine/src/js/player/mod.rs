@@ -1521,6 +1521,10 @@ impl Session for JsSession {
             .min_by(f64::total_cmp)
     }
 
+    fn take_cursor(&mut self) -> Option<crate::style::CursorStyle> {
+        self.inner.tree.borrow_mut().take_cursor()
+    }
+
     fn begin_repaint_frame(&mut self, enabled: bool, frame_number: u64) {
         self.inner
             .tree

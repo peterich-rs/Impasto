@@ -17,8 +17,8 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel}
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, available, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSEvent, NSEventModifierFlags, NSFont, NSFontTextStyleBody, NSScreen, NSTextInputClient,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate,
+    NSCursor, NSEvent, NSEventModifierFlags, NSFont, NSFontTextStyleBody, NSScreen,
+    NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate,
     NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -31,13 +31,13 @@ use objc2_foundation::{
 use crate::text_client::Marked;
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
+use crate::menu;
 use crate::pointer::{PointerSample, pointer_event, scene_f32};
 use crate::surface::MetalSurface;
 use crate::vsync::DisplayLink;
 use engine::input::{Button, Modifiers, Phase, PointerEvent};
 
-const CONTENT_WIDTH: f64 = 360.0;
-const CONTENT_HEIGHT: f64 = 640.0;
+use crate::window::WindowOptions;
 const FONT_FAMILY: &str = "Sans";
 
 fn modifiers_of(event: &NSEvent) -> Modifiers {
@@ -219,6 +219,30 @@ define_class!(
             self.ivars().a11y.root_children()
         }
 
+        #[unsafe(method(copy:))]
+        fn copy_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.post_edits(vec![InputEvent::Copy]);
+        }
+
+        #[unsafe(method(cut:))]
+        fn cut_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.post_edits(vec![InputEvent::Cut]);
+        }
+
+        #[unsafe(method(paste:))]
+        fn paste_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.post_edits(vec![InputEvent::Paste {
+                plain: read_pasteboard(), html: read_pasteboard_html(),
+            }]);
+        }
+
+        #[unsafe(method(selectAll:))]
+        fn select_all_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.post_edits(vec![InputEvent::Key(engine::session::KeyPress {
+                key: Key::Char('a'), modifiers: Modifiers::empty().with(Modifiers::META), shift: false,
+            })]);
+        }
+
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let modifiers = modifiers_of(event);
@@ -287,6 +311,9 @@ define_class!(
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, event: &NSEvent) {
+            if NSEvent::pressedMouseButtons() == 0 {
+                NSCursor::arrowCursor().set();
+            }
             self.post_outside(event);
         }
 
@@ -676,7 +703,6 @@ impl Host {
 
     fn finish_launching(&self) {
         let window = &self.ivars().window;
-        window.center();
         window.makeKeyAndOrderFront(None);
         let app = NSApplication::sharedApplication(self.mtm());
         if available!(macos = 14.0) {
@@ -690,9 +716,10 @@ impl Host {
         }
         let scale = point_scale(window, self.mtm());
         let layer = Retained::as_ptr(&self.ivars().layer) as *mut c_void;
+        let size = self.update_drawable(scale);
         let metrics = metrics(
-            scene_f32(CONTENT_WIDTH),
-            scene_f32(CONTENT_HEIGHT),
+            scene_f32(size.width),
+            scene_f32(size.height),
             scene_f32(scale),
         );
         self.ivars()
@@ -707,33 +734,34 @@ impl Host {
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
-    fn post_metrics(&self) {
+    fn update_drawable(&self, scale: f64) -> CGSize {
         let window = &self.ivars().window;
-        let scale = point_scale(window, self.mtm());
-        let size = window
+        let mut size = window
             .contentView()
-            .map(|view| view.bounds().size)
-            .unwrap_or(CGSize::new(CONTENT_WIDTH, CONTENT_HEIGHT));
-        let width = if size.width.is_finite() {
+            .map_or(window.contentMinSize(), |view| view.bounds().size);
+        size.width = if size.width.is_finite() {
             size.width.max(0.0)
         } else {
             0.0
         };
-        let height = if size.height.is_finite() {
+        size.height = if size.height.is_finite() {
             size.height.max(0.0)
         } else {
             0.0
         };
         let layer = &self.ivars().layer;
         layer.setContentsScale(scale);
-        layer.setFrame(CGRect::new(
-            CGPoint::new(0.0, 0.0),
-            CGSize::new(width, height),
-        ));
-        layer.setDrawableSize(CGSize::new(width * scale, height * scale));
+        layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), size));
+        layer.setDrawableSize(CGSize::new(size.width * scale, size.height * scale));
+        size
+    }
+
+    fn post_metrics(&self) {
+        let scale = point_scale(&self.ivars().window, self.mtm());
+        let size = self.update_drawable(scale);
         self.ivars().link.post(Command::Metrics(metrics(
-            scene_f32(width),
-            scene_f32(height),
+            scene_f32(size.width),
+            scene_f32(size.height),
             scene_f32(scale),
         )));
     }
@@ -887,20 +915,68 @@ impl Services for MacServices {
         }));
     }
 
+    fn set_cursor(&self, cursor: engine::style::CursorStyle) {
+        use engine::style::CursorStyle;
+
+        on_main(Box::new(move || {
+            let cursor = match cursor {
+                CursorStyle::Auto | CursorStyle::Default => NSCursor::arrowCursor(),
+                CursorStyle::Pointer => NSCursor::pointingHandCursor(),
+                CursorStyle::Text => NSCursor::IBeamCursor(),
+                CursorStyle::Grab | CursorStyle::Move => NSCursor::openHandCursor(),
+                CursorStyle::Grabbing => NSCursor::closedHandCursor(),
+                CursorStyle::NotAllowed => NSCursor::operationNotAllowedCursor(),
+                CursorStyle::Crosshair => NSCursor::crosshairCursor(),
+                CursorStyle::ColResize => {
+                    if available!(macos = 15.0) {
+                        NSCursor::columnResizeCursor()
+                    } else {
+                        #[allow(deprecated, reason = "system column cursor on macOS 13 and 14")]
+                        NSCursor::resizeLeftRightCursor()
+                    }
+                }
+                CursorStyle::RowResize => {
+                    if available!(macos = 15.0) {
+                        NSCursor::rowResizeCursor()
+                    } else {
+                        #[allow(deprecated, reason = "system row cursor on macOS 13 and 14")]
+                        NSCursor::resizeUpDownCursor()
+                    }
+                }
+            };
+            cursor.set();
+        }));
+    }
+
     fn extra_fonts(&self) -> Vec<(String, Vec<u8>)> {
-        const PATHS: &[&str] = &[
-            "/System/Library/Fonts/Hiragino Sans GB.ttc",
-            "/System/Library/Fonts/STHeiti Medium.ttc",
-            "/System/Library/Fonts/Supplemental/Songti.ttc",
+        let candidates: &[(&str, &[&str])] = &[
+            (
+                "SansCJK",
+                &[
+                    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+                    "/System/Library/Fonts/STHeiti Medium.ttc",
+                    "/System/Library/Fonts/Supplemental/Songti.ttc",
+                ],
+            ),
+            (
+                "Monospace",
+                &[
+                    "/System/Library/Fonts/SFNSMono.ttf",
+                    "/System/Library/Fonts/Menlo.ttc",
+                    "/System/Library/Fonts/Monaco.ttf",
+                    "/System/Library/Fonts/Supplemental/Andale Mono.ttf",
+                ],
+            ),
         ];
-        for path in PATHS {
-            if let Ok(bytes) = std::fs::read(path)
-                && !bytes.is_empty()
-            {
-                return vec![("SansCJK".to_string(), bytes)];
-            }
-        }
-        Vec::new()
+        candidates
+            .iter()
+            .filter_map(|(family, paths)| {
+                paths
+                    .iter()
+                    .find_map(|path| std::fs::read(path).ok().filter(|font| !font.is_empty()))
+                    .map(|bytes| ((*family).to_owned(), bytes))
+            })
+            .collect()
     }
 
     fn apply_ime(&self, update: &engine::session::ImeUpdate) {
@@ -981,7 +1057,7 @@ pub fn run(
     dump_list: bool,
     initial_url: Option<String>,
     native: crate::native::Host,
-    title: &str,
+    options: WindowOptions,
 ) -> Result<(), RunError> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Err(RunError::Window(anyhow::anyhow!(
@@ -1121,9 +1197,10 @@ pub fn run(
 
     let app = NSApplication::sharedApplication(mtm);
     let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    menu::install(&app, mtm, &options.title);
     let frame = CGRect::new(
         CGPoint::new(0.0, 0.0),
-        CGSize::new(CONTENT_WIDTH, CONTENT_HEIGHT),
+        CGSize::new(options.width, options.height),
     );
     // SAFETY: the style is titled, closable, miniaturizable, and resizable, with buffered backing.
     let window = unsafe {
@@ -1139,7 +1216,20 @@ pub fn run(
         )
     };
     vsync.attach(&window, mtm);
-    window.setTitle(&NSString::from_str(title));
+    window.setTitle(&NSString::from_str(&options.title));
+    window.setContentMinSize(CGSize::new(
+        options.min_width.unwrap_or(0.0),
+        options.min_height.unwrap_or(0.0),
+    ));
+    window.center();
+    if let Some(name) = &options.autosave_name {
+        let name = NSString::from_str(name);
+        let _ = window.setFrameAutosaveName(&name);
+        let _ = window.setFrameUsingName(&name);
+        if options.size_overridden {
+            window.setContentSize(frame.size);
+        }
+    }
     window.setAcceptsMouseMovedEvents(true);
     // SAFETY: `HostState` keeps this window retained until the process leaves `run`.
     unsafe { window.setReleasedWhenClosed(false) };
@@ -1148,7 +1238,10 @@ pub fn run(
     let layer = CAMetalLayer::layer();
     layer.setContentsScale(scale);
     layer.setFrame(frame);
-    layer.setDrawableSize(CGSize::new(CONTENT_WIDTH * scale, CONTENT_HEIGHT * scale));
+    layer.setDrawableSize(CGSize::new(
+        frame.size.width * scale,
+        frame.size.height * scale,
+    ));
 
     let view = ContentView::new(mtm, frame, link.poster());
     ime_view.store(Retained::as_ptr(&view).cast_mut().cast(), Ordering::Release);

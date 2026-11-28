@@ -1,0 +1,13 @@
+version = 2
+roots = [
+    "@impasto/file-system",
+    "@impasto/solid-renderer",
+    "@impasto/solid-ui",
+]
+
+[graph]
+"@impasto/file-system" = []
+"@impasto/solid-renderer" = []
+"@impasto/solid-ui" = []
+
+[packages]

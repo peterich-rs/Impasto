@@ -14,7 +14,7 @@ pub(crate) fn write(output: &Path) -> Result<()> {
     let parent = parent.canonicalize()?;
     let output = parent.join(output.file_name().context("invalid distribution path")?);
     if framework.starts_with(&output)
-        || ["crates", "packages"]
+        || ["crates", "packages", "examples/devtools-desktop"]
             .iter()
             .any(|directory| output.starts_with(framework.join(directory)))
     {
@@ -47,7 +47,7 @@ pub(crate) fn write(output: &Path) -> Result<()> {
         "local.properties",
         "xcuserdata",
     ];
-    for directory in ["packages", "crates"] {
+    for directory in ["packages", "crates", "examples/devtools-desktop"] {
         copy_sources(
             &framework,
             &framework.join(directory),

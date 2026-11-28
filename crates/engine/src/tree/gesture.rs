@@ -222,6 +222,9 @@ impl Tree {
         event: PointerEvent,
         history: &[PointerSample],
     ) -> Vec<Gesture> {
+        if event.kind == PointerKind::Mouse {
+            self.cursor_pointer = (event.phase != Phase::Cancel).then_some((event.x, event.y));
+        }
         if self.pick_remote_pointer(event) {
             return Vec::new();
         }

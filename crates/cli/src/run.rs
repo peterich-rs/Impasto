@@ -51,12 +51,7 @@ pub fn run(options: RunOptions) -> Result<()> {
     }
     if device != "macos" {
         let serial = if device == "android" {
-            let output = Command::new("adb").arg("get-serialno").output()?;
-            anyhow::ensure!(
-                output.status.success(),
-                "Select an Android device with -d <serial>"
-            );
-            String::from_utf8(output.stdout)?.trim().to_owned()
+            crate::devtools::android_serial()?
         } else {
             device.to_owned()
         };

@@ -9,7 +9,10 @@ export interface Dialogs {
 const platform: Dialogs = {
   pickFiles: (options) => native.pickFiles(options && { ...options, accept: options.accept?.slice() }),
   pickDirectory: native.pickDirectory,
-  saveFile: native.saveFile,
+  saveFile: (options) => native.saveFile({
+    ...options,
+    allowedExtensions: options.allowedExtensions?.slice(),
+  }),
 };
 let mock: Dialogs | undefined;
 

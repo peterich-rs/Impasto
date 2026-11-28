@@ -313,3 +313,34 @@ fn recorded_repaints_are_coalesced_and_generations_do_not_share_stats() -> Resul
     );
     Ok(())
 }
+
+#[test]
+fn desktop_cursor_follows_hit_ancestry_and_deduplicates_updates() -> Result<(), Error> {
+    use crate::style::{CursorStyle, Declaration, Property, Style};
+
+    let mut tree = tree();
+    let root = tree.column(0.0)?;
+    let label = tree.text("resize", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(root, label)?;
+    tree.set_inline_style(
+        root,
+        Style::fragment(vec![Declaration::set(Property::Cursor(
+            CursorStyle::ColResize,
+        ))])?,
+    )?;
+    tree.layout()?;
+    tree.pointer(pointer(2.0, 2.0, crate::input::Phase::Move));
+    assert_eq!(tree.take_cursor(), Some(CursorStyle::ColResize));
+    assert_eq!(tree.take_cursor(), None);
+
+    tree.set_inline_style(
+        label,
+        Style::fragment(vec![Declaration::set(Property::Cursor(CursorStyle::Text))])?,
+    )?;
+    tree.flush_styles()?;
+    assert!(!tree.needs_layout());
+    assert_eq!(tree.take_cursor(), Some(CursorStyle::Text));
+    tree.pointer(pointer(-1.0, -1.0, crate::input::Phase::Move));
+    assert_eq!(tree.take_cursor(), Some(CursorStyle::Default));
+    Ok(())
+}

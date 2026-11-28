@@ -771,6 +771,15 @@ impl Tree {
         }
         self.apply_presentation(id, prepared.presentation)?;
         self.apply_box_flags(id, &prepared.resolved)?;
+        match prepared.resolved.property(Key::Cursor) {
+            Some(Property::Cursor(cursor)) if *cursor != crate::style::CursorStyle::Auto => {
+                self.cursors.insert(id, *cursor);
+            }
+            _ if !self.cursors.is_empty() => {
+                self.cursors.remove(&id);
+            }
+            _ => {}
+        }
         if let Some(slot) = self.style_nodes.get_mut(&id.index) {
             slot.computed = prepared.resolved;
             slot.computed_ready = true;

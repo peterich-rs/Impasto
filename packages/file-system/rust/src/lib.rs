@@ -230,6 +230,7 @@ pub struct PickedDirectory {
 pub struct SaveFileOptions {
     suggested_name: String,
     mime_type: Option<String>,
+    allowed_extensions: Option<Vec<String>>,
     bytes: Option<Bytes>,
     source_path: Option<String>,
     scope: Option<Scope>,
@@ -543,8 +544,30 @@ impl FileSystemPlugin {
         if !self.platform.is_hosted() {
             return Ok(false);
         }
+        let extensions = options
+            .allowed_extensions
+            .unwrap_or_default()
+            .into_iter()
+            .map(|extension| {
+                let extension = extension.strip_prefix('.').unwrap_or(&extension);
+                if extension.is_empty()
+                    || !extension
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                {
+                    return Err(FileError::new("io", "invalid save file extension"));
+                }
+                Ok(extension.to_ascii_lowercase())
+            })
+            .collect::<Result<Vec<_>, FileError>>()?;
         let paths = self.paths.clone();
-        let suggested_name = options.suggested_name;
+        let mut suggested_name = options.suggested_name;
+        if Path::new(&suggested_name).extension().is_none()
+            && let Some(extension) = extensions.first()
+        {
+            suggested_name.push('.');
+            suggested_name.push_str(extension);
+        }
         let name = suggested_name.clone();
         let directory = self
             .io(move || {
@@ -560,7 +583,7 @@ impl FileSystemPlugin {
                 Ok(staging)
             })
             .await?;
-        let payload = serde_json::json!({ "path": directory.path().join(&suggested_name), "suggestedName": suggested_name, "mimeType": options.mime_type });
+        let payload = serde_json::json!({ "path": directory.path().join(&suggested_name), "suggestedName": suggested_name, "mimeType": options.mime_type, "allowedExtensions": extensions });
         Ok(self.platform.request("saveFile", &payload).await?)
     }
 }
@@ -568,4 +591,86 @@ impl FileSystemPlugin {
 /// Registers the sandbox filesystem bindings.
 pub fn register(registrar: &mut PluginRegistrar) {
     registrar.add(FileSystemPlugin::plugin());
+}
+
+/// Reads a staged picker import on the caller's blocking queue, then removes the copy.
+///
+/// The relative path must name the file returned by the picker. The reader can stream
+/// from the file and is called while the staged copy still exists.
+pub fn consume_import<T, E>(
+    paths: &AppPaths,
+    relative_path: &str,
+    read: impl FnOnce(&Path, fs::File) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<FileError>,
+{
+    let mut parts = files::relative_path(relative_path)?.split('/');
+    let (Some("Imports"), Some(id), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(FileError::outside(relative_path).into());
+    };
+    if id.len() != 36
+        || !id.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Err(FileError::outside(relative_path).into());
+    }
+    let base = fs::canonicalize(root(paths, Scope::Documents)?).map_err(FileError::from)?;
+    let path = files::resolve(&base, relative_path)?;
+    if fs::canonicalize(&path).map_err(FileError::from)? != path {
+        return Err(FileError::outside(relative_path).into());
+    }
+    let cleanup = ImportCleanup(&path);
+    let file = files::open_file(&path)?;
+    let result = read(&path, file);
+    drop(cleanup);
+    result
+}
+
+struct ImportCleanup<'a>(&'a Path);
+
+impl Drop for ImportCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
+        if let Some(directory) = self.0.parent() {
+            let _ = fs::remove_dir(directory);
+        }
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    #[test]
+    fn consumes_only_a_staged_import_and_cleans_up_after_an_error() -> Result<(), FileError> {
+        let root = tempfile::tempdir()?;
+        let relative = "Imports/CC886D74-7CB5-4E70-BF0E-75C39AD05FD7/session.pftrace";
+        let staged = root.path().join(relative);
+        fs::create_dir_all(files::parent(&staged)?)?;
+        fs::write(&staged, b"trace")?;
+        let paths = AppPaths::new(Some(root.path().to_owned()), None, None);
+        let result = consume_import(&paths, relative, |_, mut file| {
+            let mut header = [0; 5];
+            file.read_exact(&mut header)?;
+            assert_eq!(&header, b"trace");
+            Err::<(), _>(FileError::new("io", "parser failed"))
+        });
+        assert!(result.is_err());
+        assert!(!files::parent(&staged)?.exists());
+        assert!(
+            consume_import(&paths, "Imports/../private.txt", |_, _| Ok::<_, FileError>(
+                ()
+            ))
+            .is_err()
+        );
+        Ok(())
+    }
 }

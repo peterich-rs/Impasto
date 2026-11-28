@@ -124,6 +124,8 @@ pub trait Services: Send {
         None
     }
     fn back_enabled(&self, _enabled: bool) {}
+    /// Applies a pointer cursor. Hosts without a desktop pointer may ignore it.
+    fn set_cursor(&self, _cursor: engine::style::CursorStyle) {}
     fn window_session(&self) -> WindowSession {
         WindowSession::default()
     }

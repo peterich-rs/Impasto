@@ -112,6 +112,7 @@ export interface PaintStyle {
   blur?: number | null;
   backdrop?: number | null;
   blend?: "src-over" | "multiply" | "screen" | null;
+  cursor?: "auto" | "default" | "pointer" | "text" | "col-resize" | "row-resize" | "grab" | "grabbing" | "move" | "not-allowed" | "crosshair" | null;
   objectFit?: "fill" | "contain" | "cover" | null;
 }
 

@@ -100,6 +100,10 @@ impl Tree {
             safe: (0.0, 0.0, 0.0, 0.0),
             refresh_pending: Vec::new(),
             debug: super::debug::DebugState::default(),
+            cursors: Default::default(),
+            cursor_pointer: None,
+            cursor_hit: Default::default(),
+            cursor_sent: Default::default(),
             style_nodes: HashMap::new(),
             style_queue: Vec::new(),
             style_source_owners: HashMap::new(),
@@ -836,6 +840,12 @@ impl Tree {
     /// Drops whatever occupies `index` and recycles it until the generation cap.
     pub(super) fn retire(&mut self, index: u32) {
         self.debug.sources.remove(&index);
+        if let Some(slot) = self.slots.get(index as usize) {
+            self.cursors.remove(&NodeId {
+                index,
+                generation: slot.generation,
+            });
+        }
         if let Some(tracker) = self.debug.repaint.as_mut() {
             tracker.retire(index);
         }

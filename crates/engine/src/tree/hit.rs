@@ -29,6 +29,7 @@ struct HitQuery {
     y: f32,
     scroll_x: f32,
     scroll_y: f32,
+    cursor: bool,
     /// Maps a scroll-removed layout point through ancestor transforms to the scene.
     to_scene: Affine,
 }
@@ -40,6 +41,7 @@ impl HitQuery {
             y,
             scroll_x: 0.0,
             scroll_y: 0.0,
+            cursor: false,
             to_scene: Affine::identity(),
         }
     }
@@ -100,6 +102,34 @@ impl Tree {
         if let Some(root) = self.root {
             let _ = self.hit(root, HitQuery::at_scene(x, y), origin_x, origin_y, out);
         }
+    }
+
+    /// Returns a new cursor only when the pointer's resolved shape changes.
+    pub fn take_cursor(&mut self) -> Option<crate::style::CursorStyle> {
+        use crate::style::CursorStyle;
+
+        let mut next = CursorStyle::Default;
+        if !self.cursors.is_empty()
+            && let (Some(root), Some((x, y))) = (self.root, self.cursor_pointer)
+        {
+            let mut path = std::mem::take(&mut self.cursor_hit);
+            path.clear();
+            let mut query = HitQuery::at_scene(x, y);
+            query.cursor = true;
+            self.hit(root, query, self.origin.0, self.origin.1, &mut path);
+            next = path
+                .entries()
+                .iter()
+                .rev()
+                .find_map(|entry| self.cursors.get(&entry.id).copied())
+                .unwrap_or_default();
+            self.cursor_hit = path;
+        }
+        if next == self.cursor_sent {
+            return None;
+        }
+        self.cursor_sent = next;
+        Some(next)
     }
 
     pub(super) fn hit_root(&self, x: f32, y: f32) -> Option<NodeId> {
@@ -205,6 +235,9 @@ impl Tree {
         if !inside {
             path.pop();
             return None;
+        }
+        if query.cursor && self.cursors.contains_key(&id) {
+            return Some(id);
         }
         match role {
             Hit::Opaque | Hit::Region => Some(id),

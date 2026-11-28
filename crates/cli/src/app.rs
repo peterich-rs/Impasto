@@ -37,12 +37,67 @@ pub(crate) struct PluginOptions {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MacConfig {
+    pub window: Option<MacWindowConfig>,
     pub usage_descriptions: BTreeMap<String, String>,
     pub entitlements: BTreeMap<String, bool>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MacWindowConfig {
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub min_width: Option<f64>,
+    pub min_height: Option<f64>,
+    pub title: Option<String>,
+    pub autosave_name: Option<String>,
+}
+
+impl MacWindowConfig {
+    fn validate(&self) -> Result<()> {
+        for (key, size) in [
+            ("width", self.width),
+            ("height", self.height),
+            ("min_width", self.min_width),
+            ("min_height", self.min_height),
+        ] {
+            if size.is_some_and(|size| !(200.0..=8192.0).contains(&size)) {
+                bail!("macos.window.{key} 必须在 200 到 8192 点之间");
+            }
+        }
+        if self
+            .min_width
+            .is_some_and(|size| size > self.width.unwrap_or(360.0))
+            || self
+                .min_height
+                .is_some_and(|size| size > self.height.unwrap_or(640.0))
+        {
+            bail!("macos.window 的最小尺寸不能超过初始尺寸");
+        }
+        if self.autosave_name.as_ref().is_some_and(|name| {
+            name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        }) {
+            bail!("macos.window.autosave_name 只能包含字母、数字、点、下划线和连字符");
+        }
+        if self
+            .title
+            .as_ref()
+            .is_some_and(|title| title.contains('\0'))
+        {
+            bail!("macos.window.title 不能包含 NUL");
+        }
+        Ok(())
+    }
+}
+
 impl MacConfig {
     fn validate(&self) -> Result<()> {
+        if let Some(window) = &self.window {
+            window.validate()?;
+        }
         for (name, value) in &self.usage_descriptions {
             if !name.starts_with("NS")
                 || !name.ends_with("UsageDescription")
@@ -306,4 +361,29 @@ pub fn validate_name(name: &str) -> Result<()> {
         bail!("应用名必须以小写字母开头，且只含小写字母、数字、-、_");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod mac_window_tests {
+    use super::*;
+
+    #[test]
+    fn validates_autosaved_content_size() -> Result<()> {
+        let config: MacConfig = toml::from_str(
+            r#"
+            [window]
+            width = 1360
+            height = 860.0
+            min_width = 840
+            autosave_name = "impasto.devtools.main"
+        "#,
+        )?;
+        config.validate()?;
+
+        let invalid: MacConfig = toml::from_str("[window]\nwidth = 600\nmin_width = 720")?;
+        assert!(invalid.validate().is_err());
+        let invalid: MacConfig = toml::from_str("[window]\nautosave_name = 'a/b'")?;
+        assert!(invalid.validate().is_err());
+        Ok(())
+    }
 }

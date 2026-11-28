@@ -640,6 +640,12 @@ fn keyword(name: &str, word: &str) -> Result<Option<Property>, StyleError> {
         ("blend", "src-over") => Property::Blend(crate::scene::BlendMode::SrcOver),
         ("blend", "multiply") => Property::Blend(crate::scene::BlendMode::Multiply),
         ("blend", "screen") => Property::Blend(crate::scene::BlendMode::Screen),
+        ("cursor", value) => {
+            let Some(cursor) = super::CursorStyle::parse(value) else {
+                return Ok(None);
+            };
+            Property::Cursor(cursor)
+        }
         ("objectFit", "fill") => Property::ObjectFit(crate::scene::ContentMode::Fill),
         ("objectFit", "contain") => Property::ObjectFit(crate::scene::ContentMode::Fit),
         ("objectFit", "cover") => Property::ObjectFit(crate::scene::ContentMode::Crop),

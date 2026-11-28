@@ -169,3 +169,9 @@ let generic = match family {
    - 验证旧示例（默认不配 `[macos.window]`）使用 `IMPASTO_DUMP=/tmp/frame.png just host` 保持 `360×640` 无回归；
    - 使用 `--width 1360 --height 860` 参数与包含 `"Monospace"` 文本的验证页跑一次 `IMPASTO_DUMP` 截图，确认宽屏渲染、等宽对齐正常；
    - 使用带有 `.pftrace` 过滤条件的测试页面手动触发 macOS `pickFiles` / `saveFile` 与 `⌘Q` / `⌘W` / `⌘C` / `⌘V` 菜单响应。
+
+## 8. 桌面示例入口
+
+`impasto devtools` 打开 macOS 桌面示例并列出本机会话和已登记的 USB 设备。`impasto run --devtools` 将本次启动的目标传给示例。`impasto devtools --html` 保留原来的浏览器客户端。
+
+[桌面示例](../examples/devtools-desktop/app.toml) 接入 Protocol v2，并展示已连接目标的窗口与最近帧信息。其 [Rust 模块](../examples/devtools-desktop/rust/src/lib.rs) 持有凭据、连接和符号表。选中文件交给 Rust 从暂存副本流式读取，读取完成或失败后清理副本。

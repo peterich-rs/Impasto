@@ -192,6 +192,10 @@ pub struct Tree {
     refresh_pending: Vec<NodeId>,
     /// Developer diagnostics. Off by default; see `tree/debug.rs`.
     debug: debug::DebugState,
+    cursors: HashMap<NodeId, crate::style::CursorStyle>,
+    cursor_pointer: Option<(f32, f32)>,
+    cursor_hit: crate::input::HitPath,
+    cursor_sent: crate::style::CursorStyle,
     style_nodes: HashMap<u32, style::NodeStyle>,
     style_queue: Vec<NodeId>,
     style_source_owners: HashMap<crate::style::StyleSourceId, NodeId>,

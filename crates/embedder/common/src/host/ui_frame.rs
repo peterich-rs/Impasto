@@ -546,6 +546,9 @@ fn run_session(
             if let Some(hub) = &runtime.telemetry {
                 hub.note_js_samples(runtime.frame_number, session.take_js_stack_samples());
             }
+            if let Some(cursor) = session.take_cursor() {
+                runtime.services.borrow().set_cursor(cursor);
+            }
             again = output.again;
             leave = output.exit;
             let faults = session.take_faults();

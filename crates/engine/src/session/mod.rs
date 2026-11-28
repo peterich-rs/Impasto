@@ -301,6 +301,11 @@ pub trait Session {
     fn take_back_enabled(&mut self) -> Option<bool> {
         None
     }
+    /// Takes a changed pointer cursor after processing input and style updates.
+    fn take_cursor(&mut self) -> Option<crate::style::CursorStyle> {
+        None
+    }
+
     /// Keyboard visibility or a new editing state. `None` means nothing changed.
     fn take_ime(&mut self) -> Option<ImeUpdate> {
         None
