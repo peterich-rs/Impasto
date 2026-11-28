@@ -1,19 +1,25 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use devtools_protocol::{DeviceKind, DeviceSessionEntry, LocalSessionEntry};
 use impasto::ImpastoType;
 use serde::de::DeserializeOwned;
 
-#[derive(Clone, ImpastoType)]
+#[derive(Clone, PartialEq, Eq, ImpastoType)]
 pub struct TargetSummary {
     pub id: String,
     pub name: String,
     pub platform: String,
+    pub pid: Option<u32>,
+    pub project_root: Option<String>,
+    pub framework_root: Option<String>,
+    pub has_source_map: bool,
 }
 
+#[derive(Clone)]
 pub(crate) enum Target {
     Local(LocalSessionEntry),
     Device(DeviceSessionEntry),
@@ -26,6 +32,16 @@ impl Target {
                 id: entry.pid.to_string(),
                 name: entry.app_name.clone(),
                 platform: entry.platform.clone(),
+                pid: Some(entry.pid),
+                project_root: entry
+                    .project_root
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                framework_root: entry
+                    .framework_root
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                has_source_map: self.symbol_path().is_some_and(Path::is_file),
             },
             Self::Device(entry) => {
                 let platform = match entry.device_kind {
@@ -36,8 +52,48 @@ impl Target {
                     id: format!("{platform}:{}", entry.serial),
                     name: entry.package.clone(),
                     platform: platform.to_owned(),
+                    pid: None,
+                    project_root: Some(entry.project_root.display().to_string()),
+                    framework_root: None,
+                    has_source_map: self.symbol_path().is_some_and(Path::is_file),
                 }
             }
+        }
+    }
+
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local(left), Self::Local(right)) => {
+                left.app_name == right.app_name
+                    && left.platform == right.platform
+                    && left.project_root == right.project_root
+            }
+            (Self::Device(left), Self::Device(right)) => {
+                left.serial == right.serial
+                    && left.package == right.package
+                    && std::mem::discriminant(&left.device_kind)
+                        == std::mem::discriminant(&right.device_kind)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn roots(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        match self {
+            Self::Local(entry) => (entry.project_root.clone(), entry.framework_root.clone()),
+            Self::Device(entry) => (Some(entry.project_root.clone()), None),
+        }
+    }
+
+    pub(crate) fn same_registration(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local(left), Self::Local(right)) => {
+                left.pid == right.pid && left.token == right.token
+            }
+            (Self::Device(left), Self::Device(right)) => {
+                left.token == right.token && self.matches(other)
+            }
+            _ => false,
         }
     }
 
@@ -62,7 +118,7 @@ impl Target {
     pub(crate) fn symbol_path(&self) -> Option<&Path> {
         match self {
             Self::Local(entry) => entry.source_map.as_deref(),
-            Self::Device(_) => None,
+            Self::Device(entry) => entry.source_map.as_deref(),
         }
     }
 }
@@ -161,6 +217,28 @@ fn platform_tool(name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
+fn tunnel_command(command: &mut Command) -> std::io::Result<Output> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "USB tunnel command timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 pub(crate) enum Tunnel {
     Adb { serial: String, port: u16 },
     Iproxy(Child),
@@ -171,17 +249,15 @@ impl Tunnel {
         let remote = entry.remote_port;
         match entry.device_kind {
             DeviceKind::Android => {
-                let output = Command::new(platform_tool("adb"))
-                    .args([
-                        "-s",
-                        &entry.serial,
-                        "forward",
-                        "--no-rebind",
-                        "tcp:0",
-                        &format!("tcp:{remote}"),
-                    ])
-                    .output()
-                    .map_err(|error| format!("Start adb forward: {error}"))?;
+                let output = tunnel_command(Command::new(platform_tool("adb")).args([
+                    "-s",
+                    &entry.serial,
+                    "forward",
+                    "--no-rebind",
+                    "tcp:0",
+                    &format!("tcp:{remote}"),
+                ]))
+                .map_err(|error| format!("Start adb forward: {error}"))?;
                 if !output.status.success() {
                     return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
                 }
@@ -222,11 +298,13 @@ impl Drop for Tunnel {
     fn drop(&mut self) {
         match self {
             Self::Adb { serial, port } => {
-                let _ = Command::new(platform_tool("adb"))
-                    .args(["-s", serial, "forward", "--remove", &format!("tcp:{port}")])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                let _ = tunnel_command(Command::new(platform_tool("adb")).args([
+                    "-s",
+                    serial,
+                    "forward",
+                    "--remove",
+                    &format!("tcp:{port}"),
+                ]));
             }
             Self::Iproxy(child) => {
                 let _ = child.kill();

@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@impasto/clipboard": "workspace:*",
     "@impasto/file-system": "workspace:*",
     "@impasto/solid-renderer": "workspace:*",
     "@impasto/solid-ui": "workspace:*"

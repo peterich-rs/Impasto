@@ -149,6 +149,7 @@ pub fn run(options: RunOptions) -> Result<()> {
                                             &app.android_id(),
                                             config,
                                             &app.root,
+                                            &app.root.join("build/android/bundle/debug"),
                                         )?;
                                         if options.devtools && installed.is_none() {
                                             crate::devtools::launch_native(Some(&attach))?;

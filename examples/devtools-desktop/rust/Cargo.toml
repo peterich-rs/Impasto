@@ -11,6 +11,14 @@ devtools-protocol = { path = "../../../crates/devtools-protocol" }
 devtools-symbols = { path = "../../../crates/devtools-symbols" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "2"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+flate2 = "1"
+zstd = "0.13"
+futures-channel = "0.3"
+futures-util = "0.3"
+tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 
 [lints.rust]
