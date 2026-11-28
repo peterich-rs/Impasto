@@ -13,7 +13,6 @@ import {
   type StyleInput,
 } from "@impasto/solid-renderer";
 import { StyledText } from "../styled-text.ts";
-import { colorBytes } from "../colors.ts";
 import { sceneApi } from "../scene-ext.ts";
 import { bindFocusRing } from "../focus.ts";
 import { Role } from "../semantics.ts";
@@ -68,7 +67,6 @@ export function FieldShell(props: FieldProps): NodeHandle {
     }[]
   >([]);
   let node = 0;
-  let box = 0;
   const controller = createFieldController({
     textEdit: (op, extra) => {
       const id = leaf();
@@ -228,7 +226,7 @@ export function FieldShell(props: FieldProps): NodeHandle {
     }
     scrollIntoView(id, 0);
   }
-  bindFocusRing(() => box, focused);
+  bindFocusRing(() => node, focused);
   createTrackedEffect(() => {
     if (!focused()) return;
     onCleanup(onFrame((targetMs) => {
@@ -306,15 +304,6 @@ export function FieldShell(props: FieldProps): NodeHandle {
   createTrackedEffect(() => {
     writeSemantics();
   });
-  createTrackedEffect(() => {
-    const color = colorBytes(border());
-    if (box !== 0) {
-      scene.patchStyle(box, {
-        outlineWidth: 1,
-        outlineColor: color,
-      });
-    }
-  });
   const minHeight = (): number => {
     if (props.rows !== undefined && props.rows > 0) {
       return props.rows * LINE;
@@ -371,6 +360,15 @@ export function FieldShell(props: FieldProps): NodeHandle {
               return {
                 width: "100%",
                 minHeight: minHeight(),
+                backgroundColor: theme().color.surface,
+                borderRadius: theme().shape.l,
+                borderWidth: 1,
+                borderColor: border(),
+                paddingLeft: theme().space.l,
+                paddingRight: theme().space.l,
+                paddingTop: multiline() ? theme().space.m : 0,
+                paddingBottom: multiline() ? theme().space.m : 0,
+                justifyContent: multiline() ? "flex-start" : "center",
               };
             },
             get class() {
@@ -499,78 +497,54 @@ export function FieldShell(props: FieldProps): NodeHandle {
           paint();
         }}
       >
-        <HostView
-          ref={(handle) => {
-            if (handle === null) return;
-            box = handle;
-            scene.patchStyle(handle, {
-              outlineWidth: 1,
-              outlineColor: colorBytes(border()),
-            });
-          }}
+        <HostStack
           style={{
-            backgroundColor: theme().color.surface,
-            borderRadius: theme().shape.l,
             width: "100%",
-            minWidth: undefined,
-            minHeight: minHeight(),
+            opacity: (blocked() ? 102 : 255) / 255,
           }}
         >
-          <HostStack
-            style={{
-              opacity: (blocked() ? 102 : 255) / 255,
-            }}
-          >
+          <HostScroll axis={multiline() ? "vertical" : "horizontal"}>
             <HostView
               style={{
-                padding: theme().space.l,
-                width: "100%",
+                paddingRight: 2,
               }}
             >
-              <HostScroll axis={multiline() ? "vertical" : "horizontal"}>
-                <HostView
-                  style={{
-                    paddingRight: 2,
+              <HostStack>
+                <StyledText
+                  class={props.textProps?.class}
+                  classList={props.textProps?.classList}
+                  style={props.textProps?.style}
+                  defaults={{
+                    fontSize: theme().typography.body.size,
+                    color: hint()
+                      ? theme().color.textMuted
+                      : theme().color.text,
+                    fontWeight: theme().typography.body.weight,
+                    softWrap: multiline(),
+                    textOverflow: multiline() ? "clip" : "visible",
+                    maxLines: multiline() ? props.maxLines : undefined,
                   }}
                 >
-                  <HostStack>
-                    <StyledText
-                      class={props.textProps?.class}
-                      classList={props.textProps?.classList}
-                      style={props.textProps?.style}
-                      defaults={{
-                        fontSize: theme().typography.body.size,
-                        color: hint()
-                          ? theme().color.textMuted
-                          : theme().color.text,
-                        fontWeight: theme().typography.body.weight,
-                        softWrap: multiline(),
-                        textOverflow: multiline() ? "clip" : "visible",
-                        maxLines: multiline() ? props.maxLines : undefined,
-                      }}
-                    >
-                      {shown()}
-                    </StyledText>
-                    <CaretLayer
-                      rects={rects}
-                      caretX={caretX}
-                      caretY={caretY}
-                      caretH={caretH}
-                      showCaret={() =>
-                        focused() &&
-                        blink() &&
-                        controller.selection().start ===
-                          controller.selection().end
-                      }
-                      accent={() => theme().color.accent}
-                      transparent={() => theme().color.transparent}
-                    />
-                  </HostStack>
-                </HostView>
-              </HostScroll>
+                  {shown()}
+                </StyledText>
+                <CaretLayer
+                  rects={rects}
+                  caretX={caretX}
+                  caretY={caretY}
+                  caretH={caretH}
+                  showCaret={() =>
+                    focused() &&
+                    blink() &&
+                    controller.selection().start ===
+                      controller.selection().end
+                  }
+                  accent={() => theme().color.accent}
+                  transparent={() => theme().color.transparent}
+                />
+              </HostStack>
             </HostView>
-          </HostStack>
-        </HostView>
+          </HostScroll>
+        </HostStack>
       </HostView>
       {shownError() ? (
         <StyledText
