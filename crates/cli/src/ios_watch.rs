@@ -97,15 +97,12 @@ impl Target for RunDevice {
                 )?)
             }
             Self::Physical(udid) => {
-                let files = Files::new(udid.clone(), package.clone(), token.clone())?;
+                let files = Files::new(udid.clone(), package, token.clone())?;
                 #[cfg(target_os = "macos")]
                 if let Some(usb_id) = self.usb_identifier(udid) {
                     let port = 20_000 + u16::from_str_radix(&token[..4], 16)? % 30_000;
                     launch.port = Some(port);
-                    let app_id = package.clone();
-                    let relaunch = udid.clone();
-                    let relaunch_package = package;
-                    let relaunch_token = token.clone();
+                    let app_id = files.package.clone();
                     let verbose = options.verbose;
                     let mut attempts = 0;
                     let mut current_port = port;
@@ -131,10 +128,10 @@ impl Target for RunDevice {
                                     }
                                     if attempts % 16 == 0 {
                                         let _ = super::launch_physical(
-                                            &relaunch,
-                                            &relaunch_package,
+                                            &files.udid,
+                                            &files.package,
                                             &Launch {
-                                                token: &relaunch_token,
+                                                token: &files.token,
                                                 address: None,
                                                 port: Some(port),
                                                 files: false,
