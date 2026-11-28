@@ -380,17 +380,17 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePrepareDevelopme
     with_env(&mut env, |env| {
         let (Some(token), Some(caches)) = (java_string(env, &token)?, java_string(env, &caches)?)
         else {
-            return Ok(0);
+            return Ok(false);
         };
         let prepared = embedder::dev_channel::prepare(
             token,
             std::path::Path::new(&caches),
             embedder::dev_channel::Logging {
                 terminal: false,
-                verbose: verbose != 0,
+                verbose,
             },
         );
-        Ok(u8::from(prepared.is_ok()))
+        Ok(prepared.is_ok())
     })
 }
 

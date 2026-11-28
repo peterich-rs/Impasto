@@ -130,6 +130,7 @@ impl Development {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn suppress_console(&self) -> bool {
         self.logging.terminal
     }
