@@ -12,3 +12,4 @@ export function send(
 }
 
 export const Http = { send };
+export const isHttpHostAvailable = () => false;

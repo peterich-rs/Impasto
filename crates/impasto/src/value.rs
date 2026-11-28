@@ -400,6 +400,12 @@ impl<T: IntoPluginValue> TypedSink<T> {
         self.sink.max_piece_bytes()
     }
 
+    /// Sends immediately when the reader has stream credit.
+    pub fn try_send(&mut self, item: T) -> Result<(), TypedSendError> {
+        let value = item.into_value().map_err(TypedSendError::Encode)?;
+        self.sink.try_send(value).map_err(TypedSendError::Transport)
+    }
+
     /// Sends from a blocking platform callback and waits for stream credit.
     pub fn send_blocking(
         &mut self,

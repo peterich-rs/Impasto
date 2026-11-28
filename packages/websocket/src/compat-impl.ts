@@ -166,7 +166,7 @@ export function createWebSocketClass(transport: WebSocketTransport) {
             }
           } else if (ev.type === "message") {
             let payload: string | ArrayBuffer | unknown;
-            if (ev.text) {
+            if (typeof ev.data === "string") {
               payload = ev.data;
             } else {
               const bytes =

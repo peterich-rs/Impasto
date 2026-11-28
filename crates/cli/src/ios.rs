@@ -234,6 +234,7 @@ struct PreparedApplication {
     platform: IosPlatform,
     architecture: &'static str,
     verbose: bool,
+    info_plist: Option<PathBuf>,
     plugin_manifest: Option<Vec<u8>>,
     _lock: fs::File,
     _native: NativeBuild,
@@ -255,6 +256,11 @@ impl PreparedApplication {
             .arg("-derivedDataPath")
             .arg(self.path.join("xcode"))
             .arg(format!("ARCHS={}", self.architecture));
+        if let Some(plist) = &self.info_plist {
+            let mut argument = std::ffi::OsString::from("INFOPLIST_FILE=");
+            argument.push(plist);
+            command.arg(argument);
+        }
         if !self.verbose {
             command.arg("-quiet");
         }
@@ -345,6 +351,51 @@ fn prepare_application(
             "DEVELOPMENT_TEAM = {team}\nTARGETED_DEVICE_FAMILY = {families}\n{signing}{domains}#include? \"{configuration}.iphoneos.xcconfig\"\n#include? \"{configuration}.iphonesimulator.xcconfig\"\n",
         ),
     )?;
+    let background_modes = native
+        .inputs()
+        .projects
+        .iter()
+        .flat_map(|project| project.background_modes.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let info_plist = if background_modes.is_empty() {
+        None
+    } else {
+        let source = app.root.join("ios/Runner/Info.plist");
+        let destination = path.join("PluginInfo.plist");
+        let document = plist_json(&source)?;
+        let configured = document.get("UIBackgroundModes");
+        let mut modes = configured
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if configured.is_some_and(|value| !value.is_array()) {
+            bail!("UIBackgroundModes 必须是字符串数组");
+        }
+        for mode in background_modes {
+            if !modes
+                .iter()
+                .any(|existing| existing.as_str() == Some(&mode))
+            {
+                modes.push(Value::String(mode));
+            }
+        }
+        fs::copy(&source, &destination)?;
+        let mut update = Command::new("plutil");
+        update
+            .args([
+                if configured.is_some() {
+                    "-replace"
+                } else {
+                    "-insert"
+                },
+                "UIBackgroundModes",
+                "-json",
+            ])
+            .arg(serde_json::to_string(&modes)?)
+            .arg(&destination);
+        toolchain::run(update, "合并 iOS 插件后台模式")?;
+        Some(destination)
+    };
     let plugin_manifest = manifest_snapshot(Some(&native))?;
     Ok(PreparedApplication {
         path,
@@ -354,6 +405,7 @@ fn prepare_application(
         platform,
         architecture,
         verbose: options.verbose,
+        info_plist,
         plugin_manifest,
         _lock: lock,
         _native: native,

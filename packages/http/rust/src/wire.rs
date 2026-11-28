@@ -11,6 +11,8 @@ use impasto::{Bytes as JsBytes, CancelToken, ImpastoType, TypedSendError, TypedS
 #[cfg(not(target_os = "ios"))]
 mod openwire_transport;
 #[cfg(not(target_os = "ios"))]
+mod pinning;
+#[cfg(not(target_os = "ios"))]
 pub(crate) use openwire_transport::OpenWireClient;
 
 pub const HTTP_BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -25,7 +27,7 @@ pub enum RedirectMode {
     Manual,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpRequest {
     pub method: String,
     pub url: String,
@@ -35,6 +37,18 @@ pub struct HttpRequest {
     pub timeout_ms: Option<u64>,
     pub redirect: RedirectMode,
     pub max_body_bytes: Option<usize>,
+    pub extra: RequestExtras,
+}
+
+#[derive(Clone, Default)]
+pub struct RequestExtras {
+    pub upload: Option<std::path::PathBuf>,
+    pub progress: bool,
+    #[cfg(not(target_os = "ios"))]
+    pub upload_reporter: Option<std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>>,
+    pub cookies: Option<std::sync::Arc<crate::options::CookieJar>>,
+    #[cfg(target_os = "ios")]
+    pub pins: Option<std::sync::Arc<crate::options::Pins>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +67,8 @@ pub enum HttpFailure {
     Canceled,
     TooLarge,
     BadUrl,
+    TlsPinMismatch,
+    Io,
 }
 
 impl HttpFailure {
@@ -63,6 +79,8 @@ impl HttpFailure {
             Self::Canceled => "canceled",
             Self::TooLarge => "too-large",
             Self::BadUrl => "bad-url",
+            Self::TlsPinMismatch => "tls-pin-mismatch",
+            Self::Io => "io",
         }
     }
 }
@@ -91,6 +109,11 @@ pub enum HttpPiece<'a> {
         headers: &'a [(String, String)],
     },
     Chunk(&'a [u8], bool),
+    #[cfg(target_os = "ios")]
+    Upload {
+        loaded: u64,
+        total: Option<u64>,
+    },
 }
 
 pub(crate) struct ResponseSink {

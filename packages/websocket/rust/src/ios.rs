@@ -8,13 +8,13 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-use crate::socket::{WebSocketCommand, WebSocketEvent, WebSocketTransport};
+use crate::socket::{WebSocketCommand, WebSocketEvent, WebSocketSettings, WebSocketTransport};
 use block2::RcBlock;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{
-    NSArray, NSData, NSError, NSString, NSURL, NSURLSession, NSURLSessionConfiguration,
+    NSData, NSError, NSMutableURLRequest, NSString, NSURL, NSURLSession, NSURLSessionConfiguration,
     NSURLSessionDelegate, NSURLSessionTask, NSURLSessionTaskDelegate,
     NSURLSessionWebSocketCloseCode, NSURLSessionWebSocketDelegate, NSURLSessionWebSocketMessage,
     NSURLSessionWebSocketTask,
@@ -31,6 +31,7 @@ enum NativeEvent {
     Open(String),
     Data(bool, Vec<u8>),
     Sent(Result<(), String>),
+    Pong(Result<(), String>),
     Terminal(Result<(), String>),
 }
 
@@ -99,7 +100,12 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(url: &str, protocols: &[String], events: Sender<NativeEvent>) -> Result<Self, String> {
+    fn new(
+        url: &str,
+        protocols: &[String],
+        settings: &WebSocketSettings,
+        events: Sender<NativeEvent>,
+    ) -> Result<Self, String> {
         let url = NSURL::URLWithString(&NSString::from_str(url))
             .filter(|url| {
                 matches!(
@@ -108,10 +114,17 @@ impl Connection {
                 ) && url.host().is_some()
             })
             .ok_or_else(|| "invalid WebSocket URL".to_owned())?;
-        let protocols: Vec<_> = protocols
-            .iter()
-            .map(|name| NSString::from_str(name))
-            .collect();
+        let request = NSMutableURLRequest::requestWithURL(&url);
+        if !protocols.is_empty() {
+            request.addValue_forHTTPHeaderField(
+                &NSString::from_str(&protocols.join(", ")),
+                &NSString::from_str("Sec-WebSocket-Protocol"),
+            );
+        }
+        for (name, value) in settings.headers.iter().flatten() {
+            request
+                .addValue_forHTTPHeaderField(&NSString::from_str(value), &NSString::from_str(name));
+        }
         let configuration = NSURLSessionConfiguration::ephemeralSessionConfiguration();
         configuration.setTimeoutIntervalForRequest(CONNECT_TIMEOUT.as_secs_f64());
         configuration.setHTTPShouldSetCookies(false);
@@ -124,11 +137,22 @@ impl Connection {
                 None,
             )
         };
-        let task =
-            session.webSocketTaskWithURL_protocols(&url, &NSArray::from_retained_slice(&protocols));
+        let task = session.webSocketTaskWithRequest(&request);
         task.setMaximumMessageSize(MAX_MESSAGE_BYTES);
         task.resume();
         Ok(Self { session, task })
+    }
+
+    fn ping(&self, sender: &Sender<NativeEvent>) {
+        let sender = sender.clone();
+        let handler = RcBlock::new(move |error: *mut NSError| {
+            // SAFETY: Foundation lends the error only for this callback.
+            let result =
+                unsafe { error.as_ref() }.map_or(Ok(()), |_| Err("WebSocket ping failed".into()));
+            let _ = sender.send(NativeEvent::Pong(result));
+        });
+        // SAFETY: Foundation copies the block, which only captures a thread-safe sender.
+        unsafe { self.task.sendPingWithPongReceiveHandler(&handler) };
     }
 
     fn receive(&self, sender: &Sender<NativeEvent>) {
@@ -199,23 +223,37 @@ impl WebSocketTransport for WebSocket {
         &self,
         url: &str,
         protocols: &[String],
+        settings: &WebSocketSettings,
         commands: Receiver<WebSocketCommand>,
         active: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(WebSocketEvent) -> bool,
     ) -> Result<(), String> {
         let (sender, receive) = mpsc::channel();
-        let connection = autoreleasepool(|_| Connection::new(url, protocols, sender.clone()))?;
+        let connection =
+            autoreleasepool(|_| Connection::new(url, protocols, settings, sender.clone()))?;
         let started = Instant::now();
         let mut opened = false;
         // The worker starts another send/receive only after its previous callback.
         // At most those two callbacks and the native lifecycle events can be queued.
         let mut sending: Option<Instant> = None;
+        let mut next_ping = None;
+        let mut pong_deadline: Option<Instant> = None;
         while active() {
             if !opened && started.elapsed() >= CONNECT_TIMEOUT {
                 return Err("iOS WebSocket handshake timed out".into());
             }
             if sending.is_some_and(|since| since.elapsed() >= SEND_TIMEOUT) {
                 return Err("iOS WebSocket send timed out".into());
+            }
+            if pong_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err("WebSocket heartbeat timed out".into());
+            }
+            if next_ping.is_some_and(|deadline| Instant::now() >= deadline)
+                && let Some(heartbeat) = settings.heartbeat
+            {
+                autoreleasepool(|_| connection.ping(&sender));
+                pong_deadline = Some(Instant::now() + heartbeat.timeout());
+                next_ping = None;
             }
             if sending.is_none() {
                 match commands.try_recv() {
@@ -232,6 +270,9 @@ impl WebSocketTransport for WebSocket {
             match receive.recv_timeout(POLL_INTERVAL) {
                 Ok(NativeEvent::Open(protocol)) => {
                     opened = true;
+                    next_ping = settings
+                        .heartbeat
+                        .map(|heartbeat| Instant::now() + heartbeat.interval());
                     if !emit(WebSocketEvent::Open { protocol }) {
                         return Err("socket event queue is full".into());
                     }
@@ -242,6 +283,13 @@ impl WebSocketTransport for WebSocket {
                         return Err("socket event queue is full".into());
                     }
                     autoreleasepool(|_| connection.receive(&sender));
+                }
+                Ok(NativeEvent::Pong(result)) => {
+                    result?;
+                    pong_deadline = None;
+                    next_ping = settings
+                        .heartbeat
+                        .map(|heartbeat| Instant::now() + heartbeat.interval());
                 }
                 Ok(NativeEvent::Sent(result)) => {
                     sending = None;
@@ -316,6 +364,7 @@ mod tests {
         let result = WebSocket.run(
             &format!("ws://{address}"),
             &[],
+            &WebSocketSettings::default(),
             commands,
             &|| started.elapsed() < Duration::from_secs(4),
             &mut |event| {

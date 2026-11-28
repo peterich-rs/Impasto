@@ -1,5 +1,8 @@
 //! OpenWire transport, redirects and HTTP framing.
 
+use crate::options::{Pins, ProxyOptions, error};
+use futures_util::StreamExt as _;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -20,16 +23,54 @@ const MAX_REDIRECTS: usize = 20;
 pub(crate) struct OpenWireClient {
     handle: tokio::runtime::Handle,
     client: Client,
+    pins: Option<Arc<Pins>>,
 }
 
 impl OpenWireClient {
     pub fn new() -> Result<Self, String> {
-        let handle = crate::runtime_handle()?;
-        let client = Client::builder()
-            .follow_redirects(false)
+        Self::with_config(None, None).map_err(|error| error.message)
+    }
+
+    pub(crate) fn with_config(
+        proxy: Option<&ProxyOptions>,
+        pins: Option<Arc<Pins>>,
+    ) -> Result<Self, crate::HttpError> {
+        let handle =
+            crate::runtime_handle().map_err(|_| error("network", "HTTP runtime is unavailable"))?;
+        let mut builder = Client::builder().follow_redirects(false);
+        if let Some(proxy) = proxy {
+            use openwire::Proxy;
+            let target = Proxy::all(&proxy.url)
+                .map_err(|_| error("bad-url", "Unsupported HTTP proxy URL"))?;
+            let bypass = proxy.bypass.clone().unwrap_or_default();
+            let exclusions = bypass
+                .into_iter()
+                .map(|rule| {
+                    if rule.contains('/') {
+                        let cidr = rule
+                            .parse::<ipnet::IpNet>()
+                            .map_err(|_| error("bad-url", "Invalid proxy CIDR bypass"))?;
+                        Ok(Bypass::Network(cidr))
+                    } else {
+                        Ok(Bypass::Domain(
+                            rule.trim_start_matches('.').to_ascii_lowercase(),
+                        ))
+                    }
+                })
+                .collect::<Result<_, crate::HttpError>>()?;
+            builder = builder.proxy_selector(ExplicitProxy { target, exclusions });
+        }
+        if let Some(pins) = &pins {
+            builder = builder.tls_connector(super::pinning::connector(Arc::clone(pins))?);
+        }
+        let client = builder
             .build()
-            .map_err(|error| error.to_string())?;
-        Ok(Self { handle, client })
+            .map_err(|_| error("network", "HTTP transport is unavailable"))?;
+        Ok(Self {
+            handle,
+            client,
+            pins,
+        })
     }
 
     async fn open_head(
@@ -54,9 +95,71 @@ impl OpenWireClient {
             .timeout_ms
             .map(|ms| Instant::now() + Duration::from_millis(ms));
         let mut redirects = 0usize;
+        let mut upload = request.extra.upload.as_ref();
 
         loop {
-            let wire_request = build_hop_request(&method, &current_uri, &headers, &body)?;
+            let target = current_uri.to_string();
+            if current_uri.scheme_str() == Some("http")
+                && self
+                    .pins
+                    .as_ref()
+                    .is_some_and(|pins| current_uri.host().is_some_and(|host| pins.required(host)))
+            {
+                return Err(HttpError::new(
+                    HttpFailure::TlsPinMismatch,
+                    "Pinned host requires HTTPS",
+                ));
+            }
+            let mut hop_headers = headers.clone();
+            if let Some(jar) = &request.extra.cookies
+                && !hop_headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+                && let Some(value) = jar.value(&target)
+            {
+                hop_headers.push(("cookie".into(), value));
+            }
+            let upload_body = if let Some(path) = upload {
+                let file = tokio::fs::File::open(path)
+                    .await
+                    .map_err(|_| HttpError::new(HttpFailure::Io, "Upload file is unavailable"))?;
+                let total = file
+                    .metadata()
+                    .await
+                    .map_err(|_| HttpError::new(HttpFailure::Io, "Upload file is unavailable"))?
+                    .len();
+                let report = request.extra.upload_reporter.clone();
+                let mut loaded = 0u64;
+                let mut previous = 0u64;
+                let mut prior = Instant::now();
+                let stream = tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024).map(
+                    move |piece| {
+                        let bytes = piece.map_err(|failure| {
+                            WireError::body("Upload file read failed", failure)
+                        })?;
+                        loaded += bytes.len() as u64;
+                        if let Some(report) = &report
+                            && (loaded >= total
+                                || loaded.saturating_sub(previous) >= 64 * 1024
+                                || prior.elapsed() >= Duration::from_millis(50))
+                        {
+                            report(loaded, total);
+                            prior = Instant::now();
+                            previous = loaded;
+                        }
+                        Ok(http_body::Frame::data(bytes))
+                    },
+                );
+                hop_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-length"));
+                hop_headers.push(("content-length".into(), total.to_string()));
+                Some(RequestBody::from_body(http_body_util::StreamBody::new(
+                    stream,
+                )))
+            } else {
+                None
+            };
+            let wire_request =
+                build_hop_request(&method, &current_uri, &hop_headers, &body, upload_body)?;
             let remaining = remaining_until(deadline)?;
 
             let mut call = self.client.new_call(wire_request).follow_redirects(false);
@@ -74,6 +177,9 @@ impl OpenWireClient {
             .await?
             .map_err(map_wire_error)?;
 
+            if let Some(jar) = &request.extra.cookies {
+                jar.update(&target, &collect_headers(response.headers()));
+            }
             let status = response.status();
             if is_redirect_status(status)
                 && let Some(location) = header_location(response.headers())
@@ -100,6 +206,9 @@ impl OpenWireClient {
                             strip_cross_origin_headers(&mut headers);
                         }
                         apply_redirect_method(&status, &mut method, &mut headers, &mut body);
+                        if method == Method::GET || method == Method::HEAD {
+                            upload = None;
+                        }
                         current_uri = next_uri;
                         continue;
                     }
@@ -246,6 +355,8 @@ impl HttpClient for OpenWireClient {
                     headers = h.to_vec();
                 }
                 HttpPiece::Chunk(bytes, _) => body.extend_from_slice(bytes),
+                #[cfg(target_os = "ios")]
+                HttpPiece::Upload { .. } => {}
             }
             true
         })?;
@@ -368,6 +479,7 @@ fn build_hop_request(
     uri: &Uri,
     headers: &[(String, String)],
     body: &[u8],
+    supplied: Option<RequestBody>,
 ) -> Result<Request<RequestBody>, HttpError> {
     let mut builder = Request::builder().method(method.clone()).uri(uri.clone());
     for (name, value) in headers {
@@ -377,7 +489,9 @@ fn build_hop_request(
             .map_err(|error| HttpError::new(HttpFailure::BadUrl, error.to_string()))?;
         builder = builder.header(header_name, header_value);
     }
-    let body = if *method == Method::GET || *method == Method::HEAD || body.is_empty() {
+    let body = if let Some(supplied) = supplied {
+        supplied
+    } else if *method == Method::GET || *method == Method::HEAD || body.is_empty() {
         RequestBody::empty()
     } else {
         RequestBody::from_bytes(Bytes::copy_from_slice(body))
@@ -563,14 +677,57 @@ fn hop_by_hop(name: &str) -> bool {
         || name.eq_ignore_ascii_case("upgrade")
 }
 
+enum Bypass {
+    Domain(String),
+    Network(ipnet::IpNet),
+}
+struct ExplicitProxy {
+    target: openwire::Proxy,
+    exclusions: Vec<Bypass>,
+}
+
+impl openwire::ProxySelector for ExplicitProxy {
+    fn select(&self, uri: &Uri) -> Result<openwire::ProxySelection, WireError> {
+        use openwire::ProxySelection;
+        let host = uri.host().unwrap_or_default();
+        let skip = self.exclusions.iter().any(|rule| match rule {
+            Bypass::Network(network) => host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| network.contains(&ip)),
+            Bypass::Domain(domain) => {
+                domain == "*"
+                    || domain == host
+                    || host
+                        .strip_suffix(domain)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            }
+        });
+        if skip {
+            Ok(ProxySelection::direct())
+        } else {
+            Ok(ProxySelection::new().push_proxy(self.target.clone()))
+        }
+    }
+}
+
 fn map_wire_error(error: WireError) -> HttpError {
-    let kind = match error.kind() {
-        WireErrorKind::Canceled => HttpFailure::Canceled,
-        WireErrorKind::Timeout => HttpFailure::Timeout,
-        WireErrorKind::InvalidRequest => HttpFailure::BadUrl,
-        _ => HttpFailure::Network,
+    use std::error::Error as _;
+    let mut cause = error.source();
+    while let Some(source) = cause {
+        if source.to_string().contains(super::pinning::MISMATCH) {
+            return HttpError::new(HttpFailure::TlsPinMismatch, super::pinning::MISMATCH);
+        }
+        cause = source.source();
+    }
+    let (kind, message) = match error.kind() {
+        WireErrorKind::Canceled => (HttpFailure::Canceled, "AbortError"),
+        WireErrorKind::Timeout => (HttpFailure::Timeout, "HTTP deadline elapsed"),
+        WireErrorKind::InvalidRequest => (HttpFailure::BadUrl, "Invalid HTTP request"),
+        WireErrorKind::Tls => (HttpFailure::Network, "TLS validation failed"),
+        _ => (HttpFailure::Network, "HTTP transport failed"),
     };
-    HttpError::new(kind, error.to_string())
+    HttpError::new(kind, message)
 }
 
 #[cfg(test)]
@@ -589,6 +746,7 @@ mod redirect_tests {
             timeout_ms: Some(5_000),
             redirect,
             max_body_bytes: None,
+            extra: Default::default(),
         }
     }
 
@@ -703,6 +861,7 @@ mod tests {
             timeout_ms: None,
             redirect: RedirectMode::Follow,
             max_body_bytes: None,
+            extra: Default::default(),
         }
     }
 
@@ -772,6 +931,8 @@ mod tests {
             &mut |piece| {
                 match piece {
                     HttpPiece::Head { status, .. } => head = Some(status),
+                    #[cfg(target_os = "ios")]
+                    HttpPiece::Upload { .. } => {}
                     HttpPiece::Chunk(bytes, done) => {
                         body.extend_from_slice(bytes);
                         if done {

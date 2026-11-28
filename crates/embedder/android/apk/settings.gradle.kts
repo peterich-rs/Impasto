@@ -19,7 +19,7 @@ include(":app")
 include(":impasto-host")
 project(":impasto-host").projectDir = file("../host")
 
-listOf("clipboard", "connectivity", "file-system", "haptics", "linking", "permissions", "share", "system-info")
+listOf("biometrics", "geolocator", "image-picker", "notifications", "clipboard", "connectivity", "file-system", "haptics", "linking", "permissions", "share", "system-info")
     .forEach { plugin ->
         val path = ":impasto_${plugin.replace('-', '_')}"
         include(path)

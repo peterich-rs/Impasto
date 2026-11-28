@@ -35,6 +35,10 @@ glue.resolve("plugins.properties").takeIf { it.isFile }?.reader()?.use { config.
 dependencies {
     implementation(project(":impasto-host"))
     if (!config.containsKey("framework")) {
+        implementation(project(":impasto_biometrics"))
+        implementation(project(":impasto_image_picker"))
+        implementation(project(":impasto_geolocator"))
+        implementation(project(":impasto_notifications"))
         implementation(project(":impasto_clipboard"))
         implementation(project(":impasto_connectivity"))
         implementation(project(":impasto_file_system"))

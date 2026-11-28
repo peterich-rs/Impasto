@@ -6,6 +6,11 @@
   "exports": {
     ".": "./src/index.ts",
     "./fetch": "./src/fetch.ts",
-    "./polyfill": "./src/polyfill.ts"
+    "./polyfill": "./src/polyfill.ts",
+    "./testing": "./src/testing.ts",
+    "./native": "./src/native.stub.ts"
+  },
+  "dependencies": {
+    "@impasto/file-system": "workspace:*"
   }
 }

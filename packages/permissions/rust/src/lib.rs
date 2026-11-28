@@ -329,6 +329,18 @@ pub async fn request(
     client(ctx)?.request(permissions, None).await
 }
 
+/// Requests notifications through the same platform queue as all permission requests.
+pub async fn request_notification(
+    ctx: &PluginContext,
+    options: NotificationPermissionOptions,
+) -> Result<PermissionStatus, PermissionError> {
+    client(ctx)?
+        .request(&[Permission::Notification], Some(options))
+        .await?
+        .remove(&Permission::Notification)
+        .ok_or_else(|| PermissionError::Platform("missing notification response".into()))
+}
+
 /// Reads the associated system-wide service switch.
 pub async fn service_status(
     ctx: &PluginContext,
