@@ -65,6 +65,21 @@ impl Host {
         self.inner().tree.borrow_mut().discard_if_unattached(id);
     }
 
+    pub(super) fn resources_snapshot(&self) -> javascript::runtime::JsResourcesSnapshot {
+        use javascript::runtime::{TimerKind, TimerSnapshot};
+        let now = self.runtime.clock_ms();
+        let raf = self.raf.borrow();
+        self.runtime
+            .resources_snapshot(raf.iter().filter(|timer| timer.active).map(|timer| {
+                TimerSnapshot {
+                    id: timer.id,
+                    kind: TimerKind::AnimationFrame,
+                    due_in_ms: timer.due.saturating_sub(now),
+                    interval_ms: 0,
+                }
+            }))
+    }
+
     pub(super) fn inner(&self) -> &Inner {
         &self.inner
     }
@@ -344,6 +359,8 @@ fn trace_user_timing(entry: javascript::runtime::UserTiming<'_>) {
 }
 
 pub(in crate::js::player) struct JsVm {
+    live_sampling: Cell<bool>,
+    live_samples: RefCell<Vec<javascript::runtime::StackSample>>,
     pub(super) host: Rc<Host>,
 }
 impl JsVm {
@@ -379,11 +396,31 @@ impl JsVm {
         Ok(applied)
     }
 
+    pub(super) fn set_sampler(&self, config: javascript::runtime::SamplerConfig) -> bool {
+        let applied = self.host.runtime.set_sampler_config(config);
+        self.live_sampling.set(applied && config.enabled);
+        if !self.live_sampling.get() {
+            self.live_samples.borrow_mut().clear();
+        }
+        applied
+    }
+
+    pub(super) fn take_live_samples(&self) -> Vec<javascript::runtime::StackSample> {
+        std::mem::take(&mut *self.live_samples.borrow_mut())
+    }
+
     pub(super) fn record_stack_samples(&self) {
         for sample in self.host.runtime.take_stack_samples() {
             let age_ns = u64::try_from(sample.at.elapsed().as_nanos()).unwrap_or(u64::MAX);
             tracing::event!(name: "js_stack_sample", target: "impasto::js_profile",
-                tracing::Level::TRACE, trace_event = true, queue = "ui", age_ns, js_stack = sample.stack.as_str());
+                tracing::Level::TRACE, trace_event = true, queue = "ui", age_ns,
+                js_entry = sample.entry, js_stack = sample.stack.as_str());
+            if self.live_sampling.get() {
+                let mut live = self.live_samples.borrow_mut();
+                if live.len() < 512 {
+                    live.push(sample);
+                }
+            }
         }
     }
 
@@ -446,7 +483,11 @@ impl JsVm {
                 modules::AppLoader::new(app_dir, Arc::clone(&host.inner.config.registry)),
             )
             .map_err(|_| Error::Runtime)?;
-        Ok(Self { host })
+        Ok(Self {
+            host,
+            live_sampling: Cell::new(false),
+            live_samples: RefCell::default(),
+        })
     }
 
     pub(super) fn install(&self, scene: &str) -> Result<(), Error> {

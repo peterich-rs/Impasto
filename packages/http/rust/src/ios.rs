@@ -17,18 +17,20 @@ use crate::wire::{
     RedirectMode,
 };
 use block2::DynBlock;
+use impasto::network::{ConnectionMeta, HopLog, NetworkTiming, RedirectHop};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{
-    NSArray, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSMutableURLRequest, NSNumber,
-    NSString, NSURL, NSURLAuthenticationChallenge, NSURLCredential, NSURLCredentialPersistence,
-    NSURLErrorBadURL as BAD_URL, NSURLErrorCancelled as CANCELLED, NSURLErrorTimedOut as TIMED_OUT,
-    NSURLErrorUnsupportedURL as UNSUPPORTED_URL, NSURLRequest, NSURLRequestCachePolicy,
-    NSURLResponse, NSURLSession, NSURLSessionAuthChallengeDisposition as AuthDisposition,
-    NSURLSessionConfiguration, NSURLSessionDataDelegate, NSURLSessionDataTask,
-    NSURLSessionDelegate, NSURLSessionResponseDisposition, NSURLSessionTask,
-    NSURLSessionTaskDelegate,
+    NSArray, NSData, NSDate, NSDictionary, NSError, NSHTTPURLResponse, NSMutableURLRequest,
+    NSNumber, NSString, NSURL, NSURLAuthenticationChallenge, NSURLCredential,
+    NSURLCredentialPersistence, NSURLErrorBadURL as BAD_URL, NSURLErrorCancelled as CANCELLED,
+    NSURLErrorTimedOut as TIMED_OUT, NSURLErrorUnsupportedURL as UNSUPPORTED_URL, NSURLRequest,
+    NSURLRequestCachePolicy, NSURLResponse, NSURLSession,
+    NSURLSessionAuthChallengeDisposition as AuthDisposition, NSURLSessionConfiguration,
+    NSURLSessionDataDelegate, NSURLSessionDataTask, NSURLSessionDelegate,
+    NSURLSessionResponseDisposition, NSURLSessionTask, NSURLSessionTaskDelegate,
+    NSURLSessionTaskMetrics, NSURLSessionTaskTransactionMetrics,
 };
 
 pub(super) struct Http {
@@ -72,6 +74,7 @@ enum Received {
 
 struct ReceiverState {
     send: SyncSender<Received>,
+    hops: Option<HopLog>,
     redirects: AtomicUsize,
     redirect_mode: RedirectMode,
     max_bytes: usize,
@@ -198,6 +201,22 @@ define_class!(
             }
         }
 
+        #[unsafe(method(URLSession:task:didFinishCollectingMetrics:))]
+        fn URLSession_task_didFinishCollectingMetrics(
+            &self,
+            _: &NSURLSession,
+            _: &NSURLSessionTask,
+            metrics: &NSURLSessionTaskMetrics,
+        ) {
+            if let Some(log) = &self.ivars().hops {
+                autoreleasepool(|_| {
+                    for transaction in metrics.transactionMetrics().iter() {
+                        log.add(hop_metrics(&transaction));
+                    }
+                });
+            }
+        }
+
         #[unsafe(method(URLSession:task:didCompleteWithError:))]
         fn URLSession_task_didCompleteWithError(
             &self,
@@ -287,6 +306,7 @@ impl Receiver {
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(ReceiverState {
             send,
+            hops: request.hops.clone(),
             redirects: AtomicUsize::new(0),
             redirect_mode: request.redirect,
             max_bytes: request.max_body_bytes.unwrap_or(HTTP_BODY_LIMIT),
@@ -303,6 +323,103 @@ impl Receiver {
         });
         // SAFETY: this is an allocated NSObject subclass initialized once.
         unsafe { msg_send![super(this), init] }
+    }
+}
+
+fn elapsed(start: Option<Retained<NSDate>>, end: Option<Retained<NSDate>>) -> Option<f64> {
+    let ms = end?.timeIntervalSinceDate(start.as_deref()?) * 1000.0;
+    (ms.is_finite() && ms >= 0.0).then_some(ms)
+}
+
+fn hop_metrics(metrics: &NSURLSessionTaskTransactionMetrics) -> RedirectHop {
+    let request = metrics.request();
+    let response = metrics.response();
+    let response = response.as_deref().and_then(|response| {
+        let object: &AnyObject = response;
+        object.downcast_ref::<NSHTTPURLResponse>()
+    });
+    let reused = metrics.isReusedConnection();
+    let protocol = metrics.networkProtocolName().map(|name| name.to_string());
+    let remote_addr = metrics.remoteAddress().map(|address| {
+        let address = address.to_string();
+        match metrics.remotePort() {
+            Some(port) if address.contains(':') => {
+                format!("[{address}]:{}", port.unsignedShortValue())
+            }
+            Some(port) => format!("{address}:{}", port.unsignedShortValue()),
+            None => address,
+        }
+    });
+    let tls_version =
+        metrics
+            .negotiatedTLSProtocolVersion()
+            .map(|version| match version.unsignedShortValue() {
+                0x0301 => "TLS 1.0".to_owned(),
+                0x0302 => "TLS 1.1".to_owned(),
+                0x0303 => "TLS 1.2".to_owned(),
+                0x0304 => "TLS 1.3".to_owned(),
+                other => format!("0x{other:04x}"),
+            });
+    let tls_cipher = metrics
+        .negotiatedTLSCipherSuite()
+        .map(|suite| format!("0x{:04x}", suite.unsignedShortValue()));
+    RedirectHop {
+        index: 0,
+        method: request
+            .HTTPMethod()
+            .map_or_else(String::new, |method| method.to_string()),
+        url: request
+            .URL()
+            .and_then(|url| url.absoluteString())
+            .map_or_else(String::new, |url| url.to_string()),
+        status: response
+            .and_then(|response| u16::try_from(response.statusCode()).ok())
+            .unwrap_or_default(),
+        location: response
+            .and_then(|response| response.valueForHTTPHeaderField(&NSString::from_str("Location")))
+            .map(|location| location.to_string()),
+        timing: NetworkTiming {
+            dns_ms: (!reused)
+                .then(|| {
+                    elapsed(
+                        metrics.domainLookupStartDate(),
+                        metrics.domainLookupEndDate(),
+                    )
+                })
+                .flatten(),
+            tcp_ms: (!reused)
+                .then(|| {
+                    elapsed(
+                        metrics.connectStartDate(),
+                        metrics
+                            .secureConnectionStartDate()
+                            .or_else(|| metrics.connectEndDate()),
+                    )
+                })
+                .flatten(),
+            tls_ms: (!reused)
+                .then(|| {
+                    elapsed(
+                        metrics.secureConnectionStartDate(),
+                        metrics.secureConnectionEndDate(),
+                    )
+                })
+                .flatten(),
+            request_sent_ms: elapsed(metrics.requestStartDate(), metrics.requestEndDate()),
+            waiting_ttfb_ms: elapsed(metrics.requestEndDate(), metrics.responseStartDate()),
+            download_ms: elapsed(metrics.responseStartDate(), metrics.responseEndDate()),
+            total_ms: elapsed(metrics.fetchStartDate(), metrics.responseEndDate())
+                .unwrap_or_default(),
+            ..Default::default()
+        },
+        connection: ConnectionMeta {
+            reused,
+            protocol,
+            remote_addr,
+            tls_version,
+            tls_cipher,
+            ..Default::default()
+        },
     }
 }
 
@@ -550,30 +667,7 @@ impl Drop for RunningTask {
 
 impl HttpClient for Http {
     fn perform(&self, request: &HttpRequest) -> Result<HttpResponse, HttpError> {
-        let mut head = None;
-        let mut body = Vec::new();
-        self.stream(request, &mut |piece| {
-            match piece {
-                HttpPiece::Head {
-                    status,
-                    url,
-                    redirected,
-                    headers,
-                } => head = Some((status, url.to_owned(), redirected, headers.to_vec())),
-                HttpPiece::Chunk(bytes, _) => body.extend_from_slice(bytes),
-                HttpPiece::Upload { .. } => {}
-            }
-            true
-        })?;
-        let (status, url, redirected, headers) =
-            head.ok_or_else(|| HttpError::new(HttpFailure::Network, "no HTTP response"))?;
-        Ok(HttpResponse {
-            status,
-            url,
-            redirected,
-            headers,
-            body,
-        })
+        crate::wire::collect_response(request, |sink| self.stream(request, sink))
     }
 
     fn stream(
@@ -646,7 +740,7 @@ impl HttpClient for Http {
                             redirected,
                             headers: &headers,
                         }) {
-                            return Ok(());
+                            return Err(aborted());
                         }
                     }
                     Received::Upload { loaded, total } => {
@@ -656,7 +750,7 @@ impl HttpClient for Http {
                     }
                     Received::Body(bytes) => {
                         if !sink(HttpPiece::Chunk(&bytes, false)) {
-                            return Ok(());
+                            return Err(aborted());
                         }
                     }
                     Received::Completed(result) => {
@@ -800,6 +894,7 @@ mod tests {
             Ok(())
         });
         let request = HttpRequest {
+            hops: None,
             method: "GET".into(),
             url: format!("http://{address}"),
             headers: Vec::new(),
@@ -817,6 +912,7 @@ mod tests {
         let transfer = client.stream(&request, &mut |piece| {
             match piece {
                 HttpPiece::Head { status: code, .. } => status = code,
+                HttpPiece::Upload { .. } => {}
                 HttpPiece::Chunk(bytes, last) => {
                     body.extend_from_slice(bytes);
                     if body.len() == FIRST_BODY && !last {

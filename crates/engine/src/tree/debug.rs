@@ -37,6 +37,8 @@ pub struct LayoutIssue {
 /// Debug-only state on [`Tree`]. All fields default off/empty.
 #[derive(Default)]
 pub(crate) struct DebugState {
+    pub(super) repaint: Option<Box<super::repaint::RepaintTracker>>,
+    pub(super) overlay: super::repaint::RemoteOverlayState,
     pub(crate) scan_overflow: bool,
     pub(crate) issues: Vec<LayoutIssue>,
     pub(crate) new_issues: Vec<LayoutIssue>,
@@ -80,7 +82,7 @@ impl Tree {
 
     /// True when the scan runs after each layout.
     pub fn debug_scan_enabled(&self) -> bool {
-        self.debug.scan_overflow
+        self.debug.scan_overflow || self.remote_scan_enabled()
     }
 
     /// Report Row/Column children that exceed the container on the main axis.
@@ -350,7 +352,7 @@ impl Tree {
             return;
         };
         *remaining = remaining.saturating_sub(1);
-        let rect = self.rect(id).unwrap_or(super::Rect {
+        let rect = self.scene_rect(id).unwrap_or(super::Rect {
             x: 0.0,
             y: 0.0,
             w: 0.0,
@@ -371,6 +373,12 @@ impl Tree {
         let focusable = node.flags.contains(super::node::NodeFlags::FOCUSABLE);
         out.push_str(",\"focusable\":");
         out.push_str(if focusable { "true" } else { "false" });
+        if let Some(stats) = self.repaint_stats(id) {
+            out.push_str(",\"totalRepaints\":");
+            push_u64(out, stats.total_repaints);
+            out.push_str(",\"totalLayouts\":");
+            push_u64(out, stats.total_layouts);
+        }
         if let Some(source) = self.debug.sources.get(&id.index) {
             use std::fmt::Write as _;
             out.push_str(",\"source\":{\"path\":\"");
@@ -428,10 +436,7 @@ impl Tree {
         out.push_str(",\"y\":");
         push_f32(&mut out, y);
         out.push_str("},\"chain\":[");
-        let mut chain: Vec<NodeId> = Vec::new();
-        if let Some(root) = self.root {
-            self.probe_walk(root, x, y, &mut chain);
-        }
+        let chain = self.debug_probe_chain(x, y);
         let mut first = true;
         for id in chain {
             let Ok(node) = self.node(id) else {
@@ -451,6 +456,14 @@ impl Tree {
         out
     }
 
+    pub(super) fn debug_probe_chain(&self, x: f32, y: f32) -> Vec<NodeId> {
+        let mut chain = Vec::new();
+        if let Some(root) = self.root {
+            self.probe_walk(root, x, y, &mut chain);
+        }
+        chain
+    }
+
     /// Depth-first hit chain, pushing every containing ancestor.
     fn probe_walk(&self, id: NodeId, x: f32, y: f32, chain: &mut Vec<NodeId>) -> bool {
         if self.is_debug_owned(id) {
@@ -459,15 +472,20 @@ impl Tree {
         let Ok(node) = self.node(id) else {
             return false;
         };
-        let Ok(rect) = self.rect(id) else {
-            return false;
-        };
-        if x < rect.x || y < rect.y || x > rect.x + rect.w || y > rect.y + rect.h {
+        if !self.point_hits_node(id, x, y) {
             return false;
         }
         chain.push(id);
         // Children are tested front-to-back (last child first). The first
         // branch that takes the point is the innermost hit.
+        if let Some(children) = self.ordered_children(id, true) {
+            for child in children {
+                if self.probe_walk(child, x, y, chain) {
+                    return true;
+                }
+            }
+            return true;
+        }
         let mut child = node.last_child;
         while let Some(cid) = child {
             if self.probe_walk(cid, x, y, chain) {

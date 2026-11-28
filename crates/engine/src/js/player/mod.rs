@@ -447,6 +447,12 @@ impl Session for JsSession {
     }
 
     fn runtime_sample(&self) -> Option<crate::session::RuntimeSample> {
+        let mut sample = self.runtime_counters()?;
+        sample.heap_bytes = self.vm.host.runtime.heap_bytes();
+        Some(sample)
+    }
+
+    fn runtime_counters(&self) -> Option<crate::session::RuntimeSample> {
         let counts = self.vm.host.runtime.counts();
         Some(crate::session::RuntimeSample {
             promises: counts.promises,
@@ -454,8 +460,28 @@ impl Session for JsSession {
             requests: counts.requests,
             queued_events: counts.queued_events,
             queued_bytes: counts.queued_bytes,
-            heap_bytes: self.vm.host.runtime.heap_bytes(),
+            heap_bytes: None,
         })
+    }
+
+    fn js_memory_detail(&self) -> Option<crate::session::JsMemoryDetail> {
+        self.vm.host.runtime.memory_detail()
+    }
+
+    fn js_resources_snapshot(&self) -> Option<crate::session::JsResourcesSnapshot> {
+        Some(self.vm.host.resources_snapshot())
+    }
+
+    fn run_js_gc(&mut self) -> Option<crate::session::JsGcResult> {
+        self.vm.host.runtime.run_gc()
+    }
+
+    fn set_js_sampler_config(&mut self, config: crate::session::SamplerConfig) -> bool {
+        self.vm.set_sampler(config)
+    }
+
+    fn take_js_stack_samples(&mut self) -> Vec<crate::session::StackSample> {
+        self.vm.take_live_samples()
     }
 
     fn set_trace(&mut self, enabled: bool) {
@@ -1098,6 +1124,7 @@ impl Session for JsSession {
                 paint(host)
             };
             let mut tree = inner.tree.borrow_mut();
+            tree.advance_overlay();
             let record_started = std::time::Instant::now();
             if self.prefetching_list {
                 inner.drivers.borrow().refresh_compositor_windows(&mut tree);
@@ -1144,6 +1171,7 @@ impl Session for JsSession {
                 None
             };
             let scene_delta = tree.take_scene_delta();
+            let repaints = tree.take_repaints();
             let generation = tree.image_generation();
             let images = if generation != self.image_generation {
                 self.image_generation = generation;
@@ -1339,6 +1367,7 @@ impl Session for JsSession {
                     trace,
                 }),
                 layout_report,
+                repaints,
             }
         }
     }
@@ -1402,7 +1431,7 @@ impl Session for JsSession {
         let (visual, motion) = {
             let tree = inner.tree.borrow();
             (
-                tree.needs_layout() || tree.needs_paint(),
+                tree.needs_layout() || tree.needs_paint() || tree.overlay_animating(),
                 tree.motion_active(),
             )
         };
@@ -1424,6 +1453,9 @@ impl Session for JsSession {
 
         let inner = &self.inner;
         let host = &self.vm.host;
+        if inner.tree.borrow().overlay_visible() {
+            return Err(CompositorBlockReason::PendingUiWork);
+        }
         if host.observes_frame() {
             return Err(CompositorBlockReason::GlobalFrameHook);
         }
@@ -1489,8 +1521,40 @@ impl Session for JsSession {
             .min_by(f64::total_cmp)
     }
 
+    fn take_cursor(&mut self) -> Option<crate::style::CursorStyle> {
+        self.inner.tree.borrow_mut().take_cursor()
+    }
+
+    fn begin_repaint_frame(&mut self, enabled: bool, frame_number: u64) {
+        self.inner
+            .tree
+            .borrow_mut()
+            .begin_repaint_frame(enabled, frame_number);
+    }
+
+    fn set_remote_overlay(&mut self, config: crate::tree::RemoteOverlayConfig) {
+        self.inner.settings_frame.set(true);
+        self.inner.tree.borrow_mut().set_remote_overlay(config);
+    }
+
+    fn repaint_leaderboard(&self, limit: usize) -> Vec<crate::tree::NodeRepaintStats> {
+        self.inner.tree.borrow().repaint_leaderboard(limit)
+    }
+
+    fn take_picked_view(&mut self) -> Option<crate::tree::PickedViewEvent> {
+        self.inner.tree.borrow_mut().take_picked_view()
+    }
+
     fn inspector_snapshot(&self) -> Option<String> {
-        Some(self.inner.tree.borrow().debug_snapshot_limited(512))
+        self.inspector_snapshot_limited(512)
+    }
+
+    fn inspector_snapshot_limited(&self, max_nodes: usize) -> Option<String> {
+        Some(self.inner.tree.borrow().debug_snapshot_limited(max_nodes))
+    }
+
+    fn inspector_probe(&self, x: f32, y: f32) -> Option<String> {
+        Some(self.inner.tree.borrow().debug_probe(x, y))
     }
 }
 

@@ -23,15 +23,20 @@ use scheduler::Scheduler;
 mod builder;
 mod catalog;
 mod delivery;
+mod diagnostics;
 pub(crate) mod modules;
 pub(crate) mod quickjs;
 pub(crate) mod resources;
 pub(crate) mod scheduler;
 
+pub use crate::host::{
+    JsGcResult, JsMemoryDetail, JsResourcesSnapshot, RuntimeCounts, SamplerConfig, StackSample,
+    TimerKind, TimerSnapshot,
+};
 pub use builder::RuntimeBuilder;
 pub use catalog::{CatalogError, ModuleCatalog};
 pub use modules::NativeFactory;
-pub use quickjs::{ExtensionContext, JsDiagnostic, Saved, StackSample, TrustedBytecode};
+pub use quickjs::{ExtensionContext, JsDiagnostic, Saved, TrustedBytecode};
 pub use scheduler::{DrivePolicy, RuntimeLimits};
 
 /// QuickJS capabilities available to trusted native extensions.
@@ -130,28 +135,6 @@ pub struct DriveReport {
     pub jobs_ran: u32,
     pub events_delivered: u32,
     pub schedule: ScheduleState,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RuntimeCounts {
-    pub promises: usize,
-    pub timers: usize,
-    pub tickets: usize,
-    pub rejections: usize,
-    pub listeners: usize,
-    pub requests: usize,
-    pub queued_events: usize,
-    pub queued_bytes: usize,
-    pub peak_promises: usize,
-    pub peak_timers: usize,
-    pub peak_listeners: usize,
-    pub peak_tickets: usize,
-    pub peak_rejections: usize,
-    pub peak_requests: usize,
-    pub peak_queued_events: usize,
-    pub peak_queued_bytes: usize,
-    pub discarded_events: usize,
-    pub rejection_overflows: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -662,8 +645,11 @@ impl Runtime {
             return Err(JobStop::Failed);
         };
         let report = run_job_batch(runtime, self.state.limits.job_batch, failed)?;
-        if report.pending && self.state.drive_policy == DrivePolicy::LegacyStrict {
-            return Err(JobStop::Limit);
+        if report.pending {
+            self.state.vm.note_job_limit();
+            if self.state.drive_policy == DrivePolicy::LegacyStrict {
+                return Err(JobStop::Limit);
+            }
         }
         Ok(report)
     }

@@ -97,6 +97,7 @@ impl NativeHttpRequest {
             });
         }
         Ok(wire::HttpRequest {
+            hops: None,
             method,
             url: self.url,
             headers: self.headers.unwrap_or_default(),
@@ -126,6 +127,7 @@ impl From<wire::HttpError> for HttpError {
 
 fn transport_request(request: HttpRequest, cancel: CancelToken) -> wire::HttpRequest {
     wire::HttpRequest {
+        hops: None,
         method: request.method,
         url: request.url,
         headers: request.headers,
@@ -271,8 +273,24 @@ impl HttpPlugin {
         let transport: Arc<dyn wire::HttpClient> = Arc::clone(&wire) as _;
         let send = Arc::clone(&transport);
         let stream = Arc::clone(&transport);
+        let diagnostics = ctx.diagnostics_sink();
+        let send_trace = diagnostics.clone();
+        let stream_trace = diagnostics.clone();
         let client = HttpClient::new(ctx.runtime().clone(), move |request, cancel| {
-            let result = send.perform(&transport_request(request, cancel))?;
+            let mut request = transport_request(request, cancel);
+            let mut trace = trace::start(send_trace.as_ref(), &mut request, "rust-http");
+            let result = if trace.is_some() {
+                wire::collect_response(&request, |output| {
+                    send.stream(&request, &mut |piece| {
+                        trace::piece(&mut trace, &piece);
+                        output(piece)
+                    })
+                })
+            } else {
+                send.perform(&request)
+            };
+            trace::finish(trace, &result);
+            let result = result?;
             Ok(HttpResponse {
                 status: result.status,
                 url: result.url,
@@ -282,8 +300,10 @@ impl HttpPlugin {
             })
         })
         .with_stream(move |request, cancel, mut output| {
-            let request = transport_request(request, cancel);
+            let mut request = transport_request(request, cancel);
+            let mut trace = trace::start(stream_trace.as_ref(), &mut request, "rust-http");
             let result = stream.stream(&request, &mut |piece| {
+                trace::piece(&mut trace, &piece);
                 let piece = match piece {
                     HttpPiece::Head {
                         status,
@@ -307,6 +327,7 @@ impl HttpPlugin {
                 };
                 pollster::block_on(output.send(Ok(piece)))
             });
+            trace::finish(trace, &result);
             if let Err(error) = result {
                 let _ = pollster::block_on(output.send(Err(error.into())));
             }
@@ -315,7 +336,7 @@ impl HttpPlugin {
         Ok(Self {
             context: ctx.clone(),
             registry: Arc::default(),
-            trace: ctx.diagnostics_sink(),
+            trace: diagnostics,
             wire,
         })
     }
@@ -382,9 +403,12 @@ impl HttpPlugin {
     ) -> Result<(), HttpError> {
         let mut request = request.request(cancel)?;
         let transport = self.transport(id, &mut request)?;
-        tokio::task::spawn_blocking(move || transfer::stream(&*transport, &request, sink))
-            .await
-            .map_err(unavailable)?
+        let diagnostics = self.trace.clone();
+        tokio::task::spawn_blocking(move || {
+            transfer::stream(&*transport, request, sink, diagnostics.as_ref())
+        })
+        .await
+        .map_err(unavailable)?
     }
     pub async fn download(
         &self,
@@ -397,8 +421,9 @@ impl HttpPlugin {
         let mut request = request.request(cancel)?;
         let transport = self.transport(id, &mut request)?;
         let ctx = self.context.clone();
+        let diagnostics = self.trace.clone();
         tokio::task::spawn_blocking(move || {
-            transfer::download(&ctx, &*transport, request, file, sink)
+            transfer::download(&ctx, &*transport, request, file, sink, diagnostics.as_ref())
         })
         .await
         .map_err(unavailable)?
@@ -414,9 +439,10 @@ impl HttpPlugin {
         let mut request = request.request(cancel)?;
         let transport = self.transport(id, &mut request)?;
         let ctx = self.context.clone();
+        let diagnostics = self.trace.clone();
         tokio::task::spawn_blocking(move || {
             transfer::upload(&ctx, &mut request, file)?;
-            transfer::stream(&*transport, &request, sink)
+            transfer::stream(&*transport, request, sink, diagnostics.as_ref())
         })
         .await
         .map_err(unavailable)?
@@ -428,19 +454,17 @@ impl HttpPlugin {
         sink: TypedSink<NativeHttpEvent>,
         cancel: CancelToken,
     ) -> Result<(), HttpError> {
-        let request = request.request(cancel)?;
+        let mut request = request.request(cancel)?;
         if request.extra.progress {
             let transport = self.default_transport();
+            let diagnostics = self.trace.clone();
             return tokio::task::spawn_blocking(move || {
-                transfer::stream(&*transport, &request, sink)
+                transfer::stream(&*transport, request, sink, diagnostics.as_ref())
             })
             .await
             .map_err(unavailable)?;
         }
-        let trace = self
-            .trace
-            .as_ref()
-            .map(|sink| trace::RequestTrace::new(Arc::clone(sink), &request));
+        let trace = trace::start(self.trace.as_ref(), &mut request, "fetch");
         let sink = ResponseSink::new(sink, trace);
         #[cfg(target_os = "ios")]
         {

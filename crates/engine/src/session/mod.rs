@@ -1,5 +1,9 @@
 //! 帧调度、输入交付和宿主服务的契约。
 
+pub use javascript::host::{
+    JsGcResult, JsMemoryDetail, JsResourcesSnapshot, RuntimeCounts, SamplerConfig, StackSample,
+    TimerKind, TimerSnapshot,
+};
 use std::sync::Arc;
 
 pub use javascript::host::{Credit, CreditPool, Delivery, RequestKey, Route, RuntimeKey};
@@ -137,6 +141,8 @@ pub struct FrameOutput {
     pub phases: Option<FramePhases>,
     /// Current overflow report as JSON, when the debug scan is on.
     pub layout_report: Option<String>,
+    /// Optional per-view recording work for the current UI frame.
+    pub repaints: Option<crate::tree::FrameRepaintBatch>,
 }
 
 impl FrameOutput {
@@ -154,6 +160,7 @@ impl FrameOutput {
             images: None,
             phases: None,
             layout_report: None,
+            repaints: None,
         }
     }
 }
@@ -188,6 +195,36 @@ pub trait Session {
     fn runtime_sample(&self) -> Option<RuntimeSample> {
         None
     }
+    /// Resource counts without an allocator walk.
+    fn runtime_counters(&self) -> Option<RuntimeSample> {
+        self.runtime_sample()
+    }
+
+    /// Detailed memory breakdown available between script turns.
+    fn js_memory_detail(&self) -> Option<JsMemoryDetail> {
+        None
+    }
+
+    /// Snapshot of active asynchronous resources.
+    fn js_resources_snapshot(&self) -> Option<JsResourcesSnapshot> {
+        None
+    }
+
+    /// Performs an owner-thread garbage collection.
+    fn run_js_gc(&mut self) -> Option<JsGcResult> {
+        None
+    }
+
+    /// Configures the cooperative stack sampler.
+    fn set_js_sampler_config(&mut self, _config: SamplerConfig) -> bool {
+        false
+    }
+
+    /// Drains live profiler samples collected in the current UI turn.
+    fn take_js_stack_samples(&mut self) -> Vec<StackSample> {
+        Vec::new()
+    }
+
     /// Registers an effect source for sessions with a paint tree.
     ///
     /// # Errors
@@ -264,6 +301,11 @@ pub trait Session {
     fn take_back_enabled(&mut self) -> Option<bool> {
         None
     }
+    /// Takes a changed pointer cursor after processing input and style updates.
+    fn take_cursor(&mut self) -> Option<crate::style::CursorStyle> {
+        None
+    }
+
     /// Keyboard visibility or a new editing state. `None` means nothing changed.
     fn take_ime(&mut self) -> Option<ImeUpdate> {
         None
@@ -312,6 +354,32 @@ pub trait Session {
         None
     }
     /// A bounded scene snapshot for the host's developer inspector.
+    /// Sets repaint demand and the frame identity before the session advances.
+    fn begin_repaint_frame(&mut self, _enabled: bool, _frame_number: u64) {}
+
+    /// Updates the diagnostic overlay and picker.
+    fn set_remote_overlay(&mut self, _config: crate::tree::RemoteOverlayConfig) {}
+
+    /// Returns retained per-view repaint statistics for this session.
+    fn repaint_leaderboard(&self, _limit: usize) -> Vec<crate::tree::NodeRepaintStats> {
+        Vec::new()
+    }
+
+    /// Takes the most recent remote pointer selection.
+    fn take_picked_view(&mut self) -> Option<crate::tree::PickedViewEvent> {
+        None
+    }
+
+    /// Returns a fresh snapshot bounded by the caller's node budget.
+    fn inspector_snapshot_limited(&self, _max_nodes: usize) -> Option<String> {
+        self.inspector_snapshot()
+    }
+
+    /// Returns the hit-test route at a point in scene coordinates.
+    fn inspector_probe(&self, _x: f32, _y: f32) -> Option<String> {
+        None
+    }
+
     fn inspector_snapshot(&self) -> Option<String> {
         None
     }

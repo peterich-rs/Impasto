@@ -64,6 +64,11 @@ impl Poster {
         self.inbox.post(command);
     }
 
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn post_devtools(&self, command: Command) -> bool {
+        self.inbox.post_devtools(command)
+    }
+
     /// Delete one image cache key and arm a single frame so the next paint requests it again.
     pub fn reload_image(&self, source: &str) {
         self.inbox.post(Command::ReloadImage(source.to_owned()));
@@ -318,7 +323,7 @@ fn install_panic_hook(hub: Arc<crate::diagnostics::DiagnosticsHub>) {
     }));
 }
 
-fn host_os_version() -> String {
+pub(crate) fn host_os_version() -> String {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("/usr/bin/sw_vers")
@@ -824,20 +829,28 @@ fn run_boot(
         mono_ns();
     }
     let capture_runner = Arc::clone(&runners.io);
-    crate::log_sub::install(boot.log_dir.as_deref(), boot.devtools.clone());
+    crate::log_sub::install(boot.log_dir.as_deref(), telemetry.clone());
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     let remote = match (remote, telemetry.clone()) {
-        (Some(config), Some(hub)) => match crate::diagnostics::remote::Server::start(config, hub) {
-            Ok(server) => Some(server),
-            Err(error) => {
-                tracing::warn!(target: "impasto::devtools", %error, "DevTools listener unavailable");
-                None
+        (Some(config), Some(hub)) => {
+            match crate::diagnostics::remote::Server::start(
+                config,
+                hub,
+                Poster {
+                    inbox: Arc::clone(inbox),
+                },
+            ) {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    tracing::warn!(target: "impasto::devtools", %error, "DevTools listener unavailable");
+                    None
+                }
             }
-        },
+        }
         _ => None,
     };
     let upload = Arc::new(Mutex::new(None));
-    if let Some(hub) = boot.devtools.as_ref() {
+    if let Some(hub) = telemetry.as_ref() {
         install_panic_hook(Arc::clone(hub));
     }
     let load_image: ImageLoader = Arc::new({
@@ -845,16 +858,18 @@ fn run_boot(
         let inbox = Arc::clone(inbox);
         let upload = Arc::clone(&upload);
         let io = Arc::clone(&runners.io);
+        let telemetry = telemetry.clone();
         move |request| {
             let decoder = Arc::clone(&decoder);
             let inbox = Arc::clone(&inbox);
             let upload = Arc::clone(&upload);
+            let telemetry = telemetry.clone();
             let request_id = request.generation;
             tracing::event!(name: "image_requested", target: "impasto::io", tracing::Level::DEBUG,
                 trace_event = true, request_id);
             io.post(Box::new(move || {
                 let _job = tracing::debug_span!(target: "impasto::io", "image_job", request_id, queue = "io").entered();
-                let result = decode_one(decoder.as_ref(), &request, &upload);
+                let result = decode_one(decoder.as_ref(), &request, &upload, telemetry.as_ref());
                 tracing::event!(name: "image_ready", target: "impasto::io", tracing::Level::DEBUG,
                     trace_event = true, request_id);
                 inbox.post(Command::ImageReady(result));
@@ -901,13 +916,14 @@ fn decode_one(
     decoder: &dyn ImageDecoder,
     request: &ImageRequest,
     upload: &Mutex<Option<raster::TextureFactory>>,
+    telemetry: Option<&Arc<TelemetryHub>>,
 ) -> ImageReady {
     let result = if request.source.starts_with("https://") {
         let body = {
             let _span =
                 tracing::debug_span!(target: "impasto::io", "image_fetch", request_id = request.generation)
                     .entered();
-            images::remote::fetch(&request.source)
+            images::remote::fetch(&request.source, telemetry)
         };
         let _span =
             tracing::debug_span!(target: "impasto::io", "image_decode", request_id = request.generation)
@@ -964,6 +980,11 @@ struct Installed {
 }
 
 pub(crate) struct UiHost {
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    overlay_owner: Option<u64>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    sampler_owner: Option<u64>,
+    last_runtime_sample: Option<Instant>,
     shaper: Rc<RefCell<raster::ParleyShaper>>,
     graphics: RasterPort,
     active_surface: Option<SurfaceId>,
@@ -1272,7 +1293,7 @@ fn open_ui(
             .devtools
             .as_ref()
             .map_or_else(String::new, |_| host_os_version()),
-        diagnostics: boot.devtools.clone(),
+        diagnostics: links.telemetry.clone(),
         source_map: boot.devtools_source_map,
     };
     let (registry, plugins) = crate::plugins::attach(
@@ -1366,6 +1387,11 @@ fn open_ui(
     let busy = Arc::new(crate::watchdog::Busy::new());
     crate::watchdog::spawn("ui", Arc::downgrade(&busy), boot.devtools.clone());
     Ok(UiHost {
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        overlay_owner: None,
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        sampler_owner: None,
+        last_runtime_sample: None,
         graphics,
         shaper,
         active_surface: None,
@@ -1619,6 +1645,8 @@ fn dispatch_command(
     acks: &Arc<Acks>,
 ) -> Result<bool, BootError> {
     match command {
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        command @ Command::Devtools { .. } => session_cmds::handle(runtime, command),
         Command::Shutdown => Ok(true),
         Command::Deadline { .. } => Ok(false),
         Command::UpdateSource { revision, source } => {

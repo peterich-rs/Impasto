@@ -107,6 +107,7 @@
 - `textOverflow` (`text`): `"clip" | "ellipsis" | "visible"`
 - `underline` (`text`): `boolean`
 - `lineThrough` (`text`): `boolean`
+- `cursor` (`paint`): `"auto" | "default" | "pointer" | "text" | "col-resize" | "row-resize" | "grab" | "grabbing" | "move" | "not-allowed" | "crosshair"`
 - `objectFit` (`paint`): `"fill" | "contain" | "cover"`
 
 ## 类族

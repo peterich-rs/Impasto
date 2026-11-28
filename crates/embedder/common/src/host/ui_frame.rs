@@ -33,14 +33,14 @@ pub(super) fn on_frame(
     let raster_admitted =
         prefetch_generation.is_some() || runtime.frames.has_room(FramePipeline::DEPTH);
     if !raster_admitted && runtime.input.is_paused() {
-        skipped_frame("queue_full");
+        note_admission_failure(runtime, schedule, time.interval_ms, "queue_full");
         return Ok(end_frame(runtime, false, false));
     }
     if prefetch_generation.is_none() && runtime.try_surface {
         surface_cmds::retry(runtime, acks)?;
     }
     if runtime.active_surface.is_none() {
-        skipped_frame("no_surface");
+        note_admission_failure(runtime, schedule, time.interval_ms, "no_surface");
         return Ok(end_frame(runtime, false, false));
     }
     runtime.frame_number = next_frame_number();
@@ -67,6 +67,16 @@ pub(super) fn on_frame(
         tracing::debug!(target: "impasto::frame", id = runtime.frame_number, vsync_us, "Impasto frame");
     } else {
         tracing::debug!(target: "impasto::frame", id = runtime.frame_number, "Impasto frame");
+    }
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    if let Some(session) = runtime.session.as_mut() {
+        session.begin_repaint_frame(
+            runtime
+                .telemetry
+                .as_deref()
+                .is_some_and(crate::diagnostics::TelemetryHub::tracks_repaints),
+            runtime.frame_number,
+        );
     }
     let (paused, gesture_ms) = deliver_frame_input(runtime);
     let session_started = Instant::now();
@@ -233,6 +243,28 @@ fn post_raster_frame(
     Ok(())
 }
 
+fn note_admission_failure(
+    runtime: &UiHost,
+    schedule: Option<ScheduleTiming>,
+    budget_ms: f64,
+    reason: &'static str,
+) {
+    skipped_frame(reason);
+    if let (Some(hub), Some(mut schedule)) = (&runtime.telemetry, schedule)
+        && hub.collects_frames()
+    {
+        schedule.ui_done_ns = mono_ns();
+        schedule.skip_reason = Some(reason);
+        hub.push_frame(crate::diagnostics::FrameSample {
+            number: next_frame_number(),
+            at_ms: crate::timing::mono_ms(),
+            budget_ms,
+            schedule,
+            ..Default::default()
+        });
+    }
+}
+
 pub(super) fn skipped_frame(status: &'static str) {
     tracing::event!(name: "frame_skipped", target: "impasto::frame", tracing::Level::DEBUG,
         trace_event = true, queue = "ui", status);
@@ -356,6 +388,7 @@ fn frame_schedule(
             vsync_ns,
             ui_start_ns,
             topology: Some(runtime.queue_placement),
+            in_flight_depth: u32::try_from(runtime.frames.in_flight).ok(),
             budget_ns: ms_to_ns(time.interval_ms),
             ..ScheduleTiming::default()
         }
@@ -456,10 +489,65 @@ fn run_session(
         Ok(mut output) => {
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
             if let Some(hub) = runtime.telemetry.as_ref() {
+                if let Some(schedule) = schedule {
+                    schedule.repainted_view_count = output.repaints.as_ref().map_or(0, |batch| {
+                        u32::try_from(batch.total_repainted_views).unwrap_or(u32::MAX)
+                    });
+                }
+                hub.note_repaints(output.repaints.take(), session.take_picked_view());
+                if let Some(tree) = output.layers.as_ref().or(runtime.latest.as_ref()) {
+                    hub.note_layers(runtime.frame_number, tree);
+                }
                 hub.refresh_inspector(!output.again, || session.inspector_snapshot());
             }
-            if counters && runtime.frame_number.is_multiple_of(30) {
-                runtime_sample = session.runtime_sample();
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            let reads_runtime = runtime
+                .telemetry
+                .as_deref()
+                .is_some_and(crate::diagnostics::TelemetryHub::reads_runtime);
+            #[cfg(not(any(debug_assertions, feature = "devtools-server")))]
+            let reads_runtime = false;
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            let reads_resources = runtime
+                .telemetry
+                .as_deref()
+                .is_some_and(crate::diagnostics::TelemetryHub::reads_resources);
+            #[cfg(not(any(debug_assertions, feature = "devtools-server")))]
+            let reads_resources = false;
+            if (counters || reads_runtime || reads_resources)
+                && runtime
+                    .last_runtime_sample
+                    .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(1))
+            {
+                runtime.last_runtime_sample = Some(Instant::now());
+                let memory = (counters || reads_runtime)
+                    .then(|| session.js_memory_detail())
+                    .flatten();
+                if counters {
+                    runtime_sample = session.runtime_counters().map(|mut sample| {
+                        sample.heap_bytes = memory
+                            .and_then(|detail| usize::try_from(detail.memory_used_size).ok())
+                            .or(sample.heap_bytes);
+                        sample
+                    });
+                }
+                #[cfg(any(debug_assertions, feature = "devtools-server"))]
+                if let Some(hub) = &runtime.telemetry {
+                    use crate::diagnostics::remote_runtime;
+                    if reads_runtime && let Some(detail) = memory {
+                        hub.note_runtime(serde_json::json!({"kind": "memory", "detail": remote_runtime::memory(detail)}));
+                    }
+                    if reads_resources && let Some(snapshot) = session.js_resources_snapshot() {
+                        hub.note_resources(serde_json::json!({"kind": "async", "detail": remote_runtime::resources(snapshot)}));
+                    }
+                }
+            }
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            if let Some(hub) = &runtime.telemetry {
+                hub.note_js_samples(runtime.frame_number, session.take_js_stack_samples());
+            }
+            if let Some(cursor) = session.take_cursor() {
+                runtime.services.borrow().set_cursor(cursor);
             }
             again = output.again;
             leave = output.exit;

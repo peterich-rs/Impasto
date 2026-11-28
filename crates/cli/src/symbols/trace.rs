@@ -141,22 +141,18 @@ fn delimited(writer: &mut impl Write, tag: u64, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use oxc_sourcemap::SourceMap;
+    use devtools_symbols::SymbolTable;
 
     use super::*;
 
     #[test]
     fn enriches_quickjs_frames_without_replacing_original_trace_payloads() -> Result<()> {
-        let map = SourceMap::from_json_string(
-            r#"{"version":3,"sources":["src/widget.tsx"],"names":[],"mappings":"AACA"}"#,
+        let table = SymbolTable::from_source_map(
+            r#"{"version":3,"sources":["src/widget.tsx"],"names":[],"mappings":"AACA",
+                "x_impasto_functions":[[["OriginalWidget",[1,0,3,0]]]]}"#,
         )?;
-        let names = super::super::FunctionNames {
-            functions: vec![vec![("OriginalWidget".into(), [1, 0, 3, 0])]],
-        };
-        let symbols = super::super::Symbols::new(&map, &names);
-        let remap = |input: &str| {
-            super::super::remap_stack(input, |_, line, column| symbols.lookup(line, column))
-        };
+        let symbols = table.resolver();
+        let remap = |input: &str| symbols.remap(input);
         let mut annotation = Vec::new();
         delimited(&mut annotation, 10, b"js_stack")?;
         delimited(

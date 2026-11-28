@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-impasto.workspace = true
+impasto = { workspace = true, features = ["network-observation"] }
 impasto-file-system = { version = "0.1.0", registry = "impasto" }
 base64 = "0.22"
 cookie = "0.18.2"

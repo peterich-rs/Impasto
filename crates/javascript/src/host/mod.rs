@@ -3,6 +3,7 @@
 //! Module declarations and transport payloads use owned Rust values and `std`.
 
 mod declaration;
+mod diagnostics;
 mod extensions;
 mod io;
 mod modules;
@@ -15,6 +16,10 @@ pub use io::{
 };
 
 pub use declaration::DeclarationError;
+pub use diagnostics::{
+    JsGcResult, JsMemoryDetail, JsResourcesSnapshot, RuntimeCounts, SamplerConfig, StackSample,
+    TimerKind, TimerSnapshot,
+};
 pub use extensions::{CancelToken, NativeResource, StreamEvent, StreamSendError, StreamSink};
 pub use modules::Module as NativeExtension;
 pub use modules::{

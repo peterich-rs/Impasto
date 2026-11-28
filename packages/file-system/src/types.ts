@@ -30,6 +30,7 @@ export interface PickedDirectory { readonly name: string; readonly path: string 
 export interface SaveFileOptions {
   readonly suggestedName: string;
   readonly mimeType?: string;
+  readonly allowedExtensions?: readonly string[];
   readonly bytes?: Uint8Array;
   readonly sourcePath?: string;
   readonly scope?: DirectoryScope;

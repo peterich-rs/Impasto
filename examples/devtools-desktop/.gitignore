@@ -1,0 +1,9 @@
+node_modules/
+.impasto/
+.cargo/config.toml
+rust/Cargo.lock
+build/
+.gradle/
+.kotlin/
+local.properties
+xcuserdata/

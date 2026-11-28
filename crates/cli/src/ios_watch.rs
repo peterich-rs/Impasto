@@ -35,7 +35,7 @@ struct DevelopmentSession {
 }
 
 impl DevelopmentSession {
-    fn launch(app: &App, options: &BuildOptions, device: &RunDevice) -> Result<Self> {
+    fn launch(app: &App, options: &BuildOptions, device: &RunDevice, attach: bool) -> Result<Self> {
         let token = session_id()?;
         let output = app.root.join("build/ios/development").join(&token);
         fs::create_dir_all(&output)?;
@@ -50,7 +50,7 @@ impl DevelopmentSession {
             source,
             local_channel: None,
         };
-        device.install_and_launch(&built.path, &session.package, options, Some(&session.token))?;
+        device.install_and_launch(&built.path, app, options, Some(&session.token), attach)?;
         if let Channel::Local(path) = session.channel(device)? {
             session.local_channel = Some(path);
         }
@@ -359,8 +359,13 @@ impl AppSnapshot {
     }
 }
 
-pub(super) fn run(mut app: App, options: &BuildOptions, device: RunDevice) -> Result<()> {
-    let mut session = DevelopmentSession::launch(&app, options, &device)?;
+pub(super) fn run(
+    mut app: App,
+    options: &BuildOptions,
+    device: RunDevice,
+    attach: bool,
+) -> Result<()> {
+    let mut session = DevelopmentSession::launch(&app, options, &device, attach)?;
     let mut snapshot = AppSnapshot::read(&app)?;
     let mut installed = snapshot.clone();
     eprintln!("impasto: 正在监听 iOS 应用文件。Ctrl-C 退出");
@@ -406,7 +411,7 @@ fn deploy(
     }
     await_connection(device);
     loop {
-        match DevelopmentSession::launch(app, options, device) {
+        match DevelopmentSession::launch(app, options, device, false) {
             Ok(next) => {
                 *session = next;
                 return Ok(());

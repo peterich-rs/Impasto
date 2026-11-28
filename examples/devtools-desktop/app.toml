@@ -1,0 +1,16 @@
+name = "devtools-desktop"
+version = "0.1.0"
+targets = ["macos"]
+
+[macos.window]
+title = "Impasto DevTools"
+width = 1360
+height = 860
+min_width = 840
+min_height = 520
+autosave_name = "impasto.devtools.main"
+
+[dependencies]
+"@impasto/solid-renderer" = "builtin"
+"@impasto/solid-ui" = "builtin"
+"@impasto/file-system" = "builtin"

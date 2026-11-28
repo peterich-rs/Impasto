@@ -72,9 +72,13 @@ pub(crate) fn scaffold(app: &App) -> Result<()> {
         "node_modules/\n.impasto/\n.cargo/config.toml\nrust/Cargo.lock\nbuild/\n.gradle/\n.kotlin/\nlocal.properties\nxcuserdata/\n",
     )?;
     write_new(&app.root.join("tsconfig.json"), TSCONFIG)?;
-    android(app, &framework)?;
+    if app.targets.iter().any(|target| target == "android") {
+        android(app, &framework)?;
+    }
     for platform in ["ios", "macos"] {
-        darwin(app, platform, &framework)?;
+        if app.targets.iter().any(|target| target == platform) {
+            darwin(app, platform, &framework)?;
+        }
     }
     Ok(())
 }

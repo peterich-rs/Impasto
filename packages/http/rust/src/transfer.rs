@@ -5,15 +5,16 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use impasto::{Bytes, CancelToken, ImpastoType, PluginContext, TypedSink};
+use impasto::{Bytes, CancelToken, DiagnosticsSink, ImpastoType, PluginContext, TypedSink};
 use impasto_file_system::{Scope, resolve_path};
 
 use crate::{
     HttpError, NativeHttpEvent,
     options::error,
+    trace,
     wire::{HttpClient, HttpPiece, HttpRequest, ResponseSink},
 };
 
@@ -74,8 +75,9 @@ fn scoped(ctx: &PluginContext, scope: Scope, path: &str) -> Result<PathBuf, Http
 
 pub(crate) fn stream(
     transport: &dyn HttpClient,
-    request: &HttpRequest,
+    mut request: HttpRequest,
     mut sink: TypedSink<NativeHttpEvent>,
+    diagnostics: Option<&Arc<dyn DiagnosticsSink>>,
 ) -> Result<(), HttpError> {
     let limit = sink
         .max_piece_bytes()
@@ -98,13 +100,11 @@ pub(crate) fn stream(
             },
         )?;
     }
-    let sink = std::sync::Arc::new(Mutex::new(sink));
-    #[cfg(not(target_os = "ios"))]
-    let mut request = request.clone();
+    let sink = Arc::new(Mutex::new(sink));
     #[cfg(not(target_os = "ios"))]
     if upload_progress && request.extra.upload.is_some() {
-        let sink = std::sync::Arc::clone(&sink);
-        request.extra.upload_reporter = Some(std::sync::Arc::new(move |loaded, total| {
+        let sink = Arc::clone(&sink);
+        request.extra.upload_reporter = Some(Arc::new(move |loaded, total| {
             if loaded < total
                 && let Ok(mut sink) = sink.try_lock()
             {
@@ -115,8 +115,10 @@ pub(crate) fn stream(
             }
         }));
     }
+    let mut trace = trace::start(diagnostics, &mut request, "fetch");
     let mut delivery_error = None;
     let result = transport.stream(&request, &mut |piece| {
+        trace::piece(&mut trace, &piece);
         let Ok(mut sink) = sink.lock() else {
             return false;
         };
@@ -184,10 +186,9 @@ pub(crate) fn stream(
             true
         }
     });
-    if let Some(error) = delivery_error {
-        return Err(error);
-    }
-    result.map_err(Into::into)
+    let result = delivery_error.map_or_else(|| result.map_err(Into::into), Err);
+    trace::finish_transfer(trace, &result);
+    result
 }
 
 struct Progress {
@@ -298,6 +299,7 @@ pub(crate) fn download(
     mut request: HttpRequest,
     options: DownloadOptions,
     mut sink: TypedSink<NativeHttpEvent>,
+    diagnostics: Option<&Arc<dyn DiagnosticsSink>>,
 ) -> Result<(), HttpError> {
     let scope = options.scope.unwrap_or(Scope::Cache);
     let destination = Destination::reserve(scoped(ctx, scope, &options.destination_path)?)?;
@@ -384,8 +386,10 @@ pub(crate) fn download(
     let mut saved = false;
     let mut resumed = false;
     let mut expected = None;
+    let mut trace = trace::start(diagnostics, &mut request, "fetch");
     let mut delivery_error = None;
     let transferred = transport.stream(&request, &mut |piece| {
+        trace::piece(&mut trace, &piece);
         let deliver = (|| {
             match piece {
                 HttpPiece::Head {
@@ -475,10 +479,9 @@ pub(crate) fn download(
             true
         }
     });
-    if let Some(error) = delivery_error {
-        return Err(error);
-    }
-    transferred.map_err(HttpError::from)?;
+    let outcome = delivery_error.map_or_else(|| transferred.map_err(HttpError::from), Err);
+    trace::finish_transfer(trace, &outcome);
+    outcome?;
     if !saved {
         return Ok(());
     }

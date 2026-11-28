@@ -30,8 +30,8 @@ pub use environment::{
     BREAKPOINTS, CLASS_BYTE_LIMIT, DepMask, Environment, FontSizes, Interaction, Radii, TypeRole,
 };
 pub use property::{
-    FieldMeta, Impact, Key, Property, display_flex, expand_flex, expand_gap, expand_inset,
-    expand_margin, expand_padding, field_metas,
+    CursorStyle, FieldMeta, Impact, Key, Property, display_flex, expand_flex, expand_gap,
+    expand_inset, expand_margin, expand_padding, field_metas,
 };
 pub use resolve::{Resolved, WinningDeclaration, merge_layers};
 

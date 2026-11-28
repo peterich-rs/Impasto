@@ -482,8 +482,7 @@ fn set_flags(hub: &DiagnosticsHub, args: &[PluginValue]) -> Result<PluginValue, 
 }
 
 fn clear_logs(hub: &DiagnosticsHub) -> Result<PluginValue, String> {
-    hub.logs.lock().unwrap_or_else(|p| p.into_inner()).clear();
-    hub.errors.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    hub.clear_logs();
     Ok(PluginValue::Null)
 }
 

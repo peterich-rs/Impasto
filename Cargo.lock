@@ -680,8 +680,11 @@ dependencies = [
  "base64 0.22.1",
  "bundler",
  "clap",
+ "devtools-protocol",
+ "devtools-symbols",
  "engine",
  "flate2",
+ "getrandom 0.4.3",
  "impasto",
  "impasto-bundled-plugins",
  "impasto-intl",
@@ -1132,6 +1135,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "devtools-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "devtools-symbols"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "oxc_sourcemap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1308,8 +1330,10 @@ dependencies = [
  "bundler",
  "bytes",
  "cc",
+ "devtools-protocol",
  "engine",
  "futures-util",
+ "getrandom 0.4.3",
  "http",
  "http-body-util",
  "impasto",
@@ -1323,7 +1347,10 @@ dependencies = [
  "pollster",
  "prost",
  "raster",
+ "serde",
  "serde_json",
+ "subtle",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
@@ -2662,10 +2689,12 @@ version = "0.1.0"
 dependencies = [
  "futures-channel",
  "futures-core",
+ "http",
  "impasto-macros",
  "javascript",
  "jni 0.22.4",
  "objc2",
+ "openwire",
  "serde",
  "serde_json",
  "tracing",

@@ -149,6 +149,7 @@ impl Tree {
 
     /// Diries the picture that owns `id`. A layer also dirties its parent picture.
     pub(super) fn mark_repaint(&mut self, id: NodeId) {
+        self.stage_repaint(id, super::RepaintReason::STYLE_PAINT);
         let owner = self.dirty_picture(id);
         if self.renders_layer_node(id) {
             if let Some(parent) = self.get(id).and_then(|node| node.parent) {
@@ -176,6 +177,7 @@ impl Tree {
         self.invalidate_subtree_layers(id);
         let mut current = Some(id);
         while let Some(node_id) = current {
+            self.stage_repaint(node_id, super::RepaintReason::ANCESTOR_INVALIDATED);
             self.mark_picture_dirty(node_id);
             current = self.get(node_id).and_then(|node| node.parent);
         }
@@ -282,6 +284,7 @@ impl Tree {
                 None => node.flags.remove(NodeFlags::PICTURE_FROM_CANVAS),
             }
         }
+        self.stage_repaint(id, super::RepaintReason::CANVAS_CALLBACK);
         self.repaint_picture_owner(id, was_owner);
         Ok(())
     }
@@ -1323,7 +1326,7 @@ impl Tree {
             self.sync_metrics();
         }
         self.layout_work_ms += started.elapsed().as_secs_f64() * 1000.0;
-        if self.debug.scan_overflow {
+        if self.debug_scan_enabled() {
             self.scan_overflow();
         }
         Ok(())
@@ -1759,6 +1762,7 @@ impl Tree {
             )
         };
         let node = self.node_mut(id)?;
+        let changed = (node.x, node.y, node.w, node.h) != (x, y, w, h);
         node.x = x;
         node.y = y;
         node.w = w;
@@ -1767,6 +1771,9 @@ impl Tree {
         node.content_y = content_y;
         node.content_w = content_w;
         node.content_h = content_h;
+        if changed {
+            self.stage_repaint(id, super::RepaintReason::LAYOUT_GEOMETRY);
+        }
         Ok(())
     }
 

@@ -1,6 +1,7 @@
 //! Ring buffers with a monotonic revision per channel. Producers are the
 //! UI, raster and IO queues, external network callbacks and the log hook.
 
+use super::net_bodies::{BodySide, NetBodyPool};
 use super::telemetry::{ScheduleTiming, TelemetryProfile};
 use super::timeline::{CapturedSpan, SpanLoss, TimelineRecording, TraceDetail};
 use std::path::PathBuf;
@@ -68,10 +69,27 @@ pub struct DiagError {
     pub frame: Option<u64>,
 }
 
-/// One HTTP call or socket lifecycle step.
-#[derive(Clone, Debug)]
+/// One HTTP transfer or WebSocket connection.
+#[derive(Clone, Debug, Default)]
 pub struct NetEntry {
     pub seq: u64,
+    pub(crate) changed_at: u64,
+    pub initiator: String,
+    pub state: NetState,
+    pub final_url: Option<String>,
+    pub redirected: bool,
+    pub head_elapsed_ms: Option<f64>,
+    pub timing: Option<impasto::network::NetworkTiming>,
+    pub connection: Option<impasto::network::ConnectionMeta>,
+    pub redirects: Vec<impasto::network::RedirectHop>,
+    pub request_body_truncated: bool,
+    pub response_body_truncated: bool,
+    pub request_body_evicted: bool,
+    pub response_body_evicted: bool,
+    pub ws_sent: u64,
+    pub ws_received: u64,
+    pub ws_bytes_sent: u64,
+    pub ws_bytes_received: u64,
     pub at_ms: f64,
     pub kind: NetKind,
     pub token: u64,
@@ -87,11 +105,36 @@ pub struct NetEntry {
     pub done_ms: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NetKind {
+    #[default]
     Http,
     Stream,
     Socket,
+}
+
+/// State of a transfer at the latest channel revision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetState {
+    #[default]
+    Pending,
+    Streaming,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct WsFrame {
+    pub seq: u64,
+    pub token: u64,
+    pub at_ms: f64,
+    pub direction: String,
+    pub opcode: String,
+    pub bytes_len: u64,
+    pub preview: Vec<u8>,
+    pub error: Option<String>,
 }
 
 impl NetKind {
@@ -119,6 +162,11 @@ pub struct PhaseSample {
     pub semantics_ms: f64,
     pub laywork_ms: f64,
     pub layout_passes: u32,
+    pub nodes_created: u32,
+    pub ffi_batches: u32,
+    pub ffi_calls: u32,
+    pub style_resolves: u32,
+    pub repaint_boundaries_dirtied: u32,
     pub text_reused: u32,
     pub text_shaped: u32,
     pub pointers: u32,
@@ -139,6 +187,7 @@ pub struct PhaseSample {
 /// Per-frame timing sample, trimmed from [`crate::FrameTiming`].
 #[derive(Clone, Debug)]
 pub struct FrameSample {
+    pub repainted_view_count: u32,
     pub seq: u64,
     pub(crate) changed_at: u64,
     pub schedule: ScheduleTiming,
@@ -180,6 +229,7 @@ pub struct FrameSample {
 impl Default for FrameSample {
     fn default() -> Self {
         Self {
+            repainted_view_count: 0,
             seq: 0,
             changed_at: 0,
             schedule: ScheduleTiming::default(),
@@ -232,6 +282,7 @@ pub(crate) struct Ring<T> {
     buf: VecDeque<T>,
     cap: usize,
     seq: u64,
+    discarded_through: u64,
 }
 
 impl<T: SeqField> Ring<T> {
@@ -240,13 +291,16 @@ impl<T: SeqField> Ring<T> {
             buf: VecDeque::new(),
             cap,
             seq: 0,
+            discarded_through: 0,
         }
     }
 
     pub(crate) fn push(&mut self, make: impl FnOnce(u64) -> T) {
         self.seq = self.seq.saturating_add(1);
-        if self.buf.len() == self.cap {
-            self.buf.pop_front();
+        if self.buf.len() == self.cap
+            && let Some(oldest) = self.buf.pop_front()
+        {
+            self.discarded_through = self.discarded_through.max(oldest.cursor());
         }
         let seq = self.seq;
         self.buf.push_back(make(seq));
@@ -262,7 +316,25 @@ impl<T: SeqField> Ring<T> {
     }
 
     pub(crate) fn clear(&mut self) {
+        self.seq = self.seq.saturating_add(1);
+        self.discarded_through = self.seq;
         self.buf.clear();
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn updates(&self, since: Option<u64>) -> devtools_protocol::ChannelUpdate<T>
+    where
+        T: Clone,
+    {
+        let reset = since.is_none_or(|cursor| cursor < self.discarded_through || cursor > self.seq);
+        devtools_protocol::ChannelUpdate {
+            revision: self.seq,
+            reset,
+            entries: self
+                .tail(if reset { 0 } else { since.unwrap_or_default() })
+                .cloned()
+                .collect(),
+        }
     }
 }
 
@@ -283,7 +355,12 @@ macro_rules! seq_field {
 
 seq_field!(LogEntry);
 seq_field!(DiagError);
-seq_field!(NetEntry);
+impl SeqField for NetEntry {
+    fn cursor(&self) -> u64 {
+        self.changed_at
+    }
+}
+seq_field!(WsFrame);
 impl SeqField for FrameSample {
     fn cursor(&self) -> u64 {
         self.changed_at
@@ -294,8 +371,44 @@ pub const LOG_CAP: usize = 400;
 pub const ERROR_CAP: usize = 100;
 pub const NET_CAP: usize = 150;
 pub const FRAME_CAP: usize = 240;
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+#[derive(Clone)]
+pub(super) struct RepaintUpdate {
+    pub seq: u64,
+    pub batch: Option<Arc<engine::tree::FrameRepaintBatch>>,
+    pub picked: Option<engine::tree::PickedViewEvent>,
+}
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+seq_field!(RepaintUpdate);
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+#[derive(Clone)]
+pub(super) struct RuntimeUpdate {
+    pub seq: u64,
+    pub at_ms: f64,
+    pub observation: Arc<serde_json::Value>,
+}
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+seq_field!(RuntimeUpdate);
+
 /// Process-local telemetry store, shared by the host and its consumers.
 pub struct TelemetryHub {
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) repaints: Mutex<Ring<RepaintUpdate>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    repaint_readers: AtomicU64,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    latest_layers: Mutex<Option<(u64, Arc<engine::scene::LayerTree>)>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) runtime: Mutex<Ring<RuntimeUpdate>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) resources: Mutex<Ring<RuntimeUpdate>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    runtime_readers: AtomicU64,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    resource_readers: AtomicU64,
     profile: AtomicU8,
     capture_phase: AtomicU8,
     capture_gpu: AtomicBool,
@@ -306,18 +419,34 @@ pub struct TelemetryHub {
     pub(crate) logs: Mutex<Ring<LogEntry>>,
     pub(crate) errors: Mutex<Ring<DiagError>>,
     pub(crate) network: Mutex<Ring<NetEntry>>,
+    net_bodies: Mutex<NetBodyPool>,
+    ws_frames: Mutex<Ring<WsFrame>>,
     pub(crate) frames: Mutex<Ring<FrameSample>>,
     /// Bumped by any channel so a reader can skip the whole pull.
     revision: AtomicU64,
     flags: Mutex<DevtoolsFlags>,
     /// Latest window metrics. The platform page reads this.
     metrics: Mutex<engine::session::Metrics>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) refresh_rate: Mutex<Option<f32>>,
     /// Overflow report JSON from the last frame that scanned, or `"[]"`.
     layout_report: Mutex<String>,
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
-    inspector_enabled: AtomicBool,
+    inspector_clients: AtomicU64,
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     inspector: Mutex<Option<(std::time::Instant, Arc<str>)>>,
+}
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+pub(super) struct InspectorClient<'a>(&'a TelemetryHub);
+
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+impl Drop for InspectorClient<'_> {
+    fn drop(&mut self) {
+        if self.0.inspector_clients.fetch_sub(1, Ordering::Relaxed) == 1 {
+            lock(&self.0.inspector).take();
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -335,6 +464,20 @@ impl Default for TelemetryHub {
 impl TelemetryHub {
     pub fn new() -> Self {
         Self {
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            repaints: Mutex::new(Ring::new(FRAME_CAP)),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            repaint_readers: AtomicU64::new(0),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            latest_layers: Mutex::new(None),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            runtime: Mutex::new(Ring::new(300)),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            resources: Mutex::new(Ring::new(300)),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            runtime_readers: AtomicU64::new(0),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            resource_readers: AtomicU64::new(0),
             profile: AtomicU8::new(TelemetryProfile::Counters as u8),
             capture_phase: AtomicU8::new(CAPTURE_IDLE),
             capture_gpu: AtomicBool::new(false),
@@ -345,21 +488,26 @@ impl TelemetryHub {
             logs: Mutex::new(Ring::new(LOG_CAP)),
             errors: Mutex::new(Ring::new(ERROR_CAP)),
             network: Mutex::new(Ring::new(NET_CAP)),
+            net_bodies: Mutex::default(),
+            ws_frames: Mutex::new(Ring::new(1024)),
             frames: Mutex::new(Ring::new(FRAME_CAP)),
             revision: AtomicU64::new(1),
             flags: Mutex::new(DevtoolsFlags::default()),
             metrics: Mutex::new(engine::session::Metrics::new(0.0, 0.0, 1.0)),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            refresh_rate: Mutex::new(None),
             layout_report: Mutex::new("[]".to_owned()),
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
-            inspector_enabled: AtomicBool::new(false),
+            inspector_clients: AtomicU64::new(0),
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
             inspector: Mutex::new(None),
         }
     }
 
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
-    pub(crate) fn enable_inspector(&self) {
-        self.inspector_enabled.store(true, Ordering::Relaxed);
+    pub(super) fn inspect_remote(&self) -> InspectorClient<'_> {
+        self.inspector_clients.fetch_add(1, Ordering::Relaxed);
+        InspectorClient(self)
     }
 
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
@@ -368,7 +516,7 @@ impl TelemetryHub {
         settled: bool,
         snapshot: impl FnOnce() -> Option<String>,
     ) {
-        if !self.inspector_enabled.load(Ordering::Relaxed)
+        if self.inspector_clients.load(Ordering::Relaxed) == 0
             || (!settled
                 && lock(&self.inspector)
                     .as_ref()
@@ -377,7 +525,10 @@ impl TelemetryHub {
             return;
         }
         if let Some(snapshot) = snapshot() {
-            *lock(&self.inspector) = Some((std::time::Instant::now(), snapshot.into()));
+            let mut stored = lock(&self.inspector);
+            if self.inspector_clients.load(Ordering::Relaxed) != 0 {
+                *stored = Some((std::time::Instant::now(), snapshot.into()));
+            }
         }
     }
 
@@ -445,12 +596,95 @@ impl TelemetryHub {
         self.bump();
     }
 
-    pub(crate) fn record_net(&self, mut entry: NetEntry) {
+    pub(super) fn record_net(&self, mut entry: NetEntry) {
         lock(&self.network).push(|seq| {
             entry.seq = seq;
+            entry.changed_at = seq;
             entry
         });
         self.bump();
+    }
+
+    pub(super) fn update_net(&self, token: u64, update: impl FnOnce(&mut NetEntry)) {
+        let mut network = lock(&self.network);
+        if let Some(index) = network.buf.iter().rposition(|entry| entry.token == token) {
+            network.seq = network.seq.saturating_add(1);
+            let seq = network.seq;
+            let entry = &mut network.buf[index];
+            update(entry);
+            entry.changed_at = seq;
+            self.bump();
+        }
+    }
+
+    pub(super) fn note_body(&self, token: u64, side: BodySide, body: Vec<u8>) {
+        let evicted = lock(&self.net_bodies).insert((token, side), body);
+        for (token, side) in evicted {
+            match side {
+                BodySide::Request => {
+                    self.update_net(token, |entry| entry.request_body_evicted = true)
+                }
+                BodySide::Response => {
+                    self.update_net(token, |entry| entry.response_body_evicted = true)
+                }
+                BodySide::Socket(_) => {}
+            }
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn net_body(&self, token: u64, side: BodySide) -> Option<Arc<[u8]>> {
+        lock(&self.net_bodies).get((token, side))
+    }
+
+    pub(super) fn record_ws(&self, mut frame: WsFrame, body: Option<Vec<u8>>) {
+        let mut frames = lock(&self.ws_frames);
+        let token = frame.token;
+        let mut occurrences = 0;
+        if let Some(index) = frames
+            .buf
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, entry)| {
+                if entry.token == token {
+                    occurrences += 1;
+                }
+                (occurrences == 200).then_some(index)
+            })
+            && let Some(oldest) = frames.buf.remove(index)
+        {
+            frames.discarded_through = frames.discarded_through.max(oldest.seq);
+        }
+        frames.push(|seq| {
+            frame.seq = seq;
+            frame
+        });
+        let seq = frames.seq;
+        drop(frames);
+        if let Some(body) = body {
+            self.note_body(token, BodySide::Socket(seq), body);
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn ws_updates(
+        &self,
+        token: u64,
+        since: Option<u64>,
+    ) -> devtools_protocol::ChannelUpdate<WsFrame> {
+        let frames = lock(&self.ws_frames);
+        let reset =
+            since.is_none_or(|since| since < frames.discarded_through || since > frames.seq);
+        devtools_protocol::ChannelUpdate {
+            revision: frames.seq,
+            reset,
+            entries: frames
+                .tail(if reset { 0 } else { since.unwrap_or_default() })
+                .filter(|frame| frame.token == token)
+                .cloned()
+                .collect(),
+        }
     }
 
     /// Returns the current logs revision and entries newer than the supplied cursor.
@@ -496,6 +730,7 @@ impl TelemetryHub {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
+        self.bump();
     }
 
     pub fn network_snapshot(&self) -> Vec<NetEntry> {
@@ -511,6 +746,159 @@ impl TelemetryHub {
             }
         }
         self.profile.store(profile as u8, Ordering::Relaxed);
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        if profile != TelemetryProfile::DeepInspect {
+            *lock(&self.latest_layers) = None;
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_refresh_rate(&self, refresh_rate: Option<f32>) {
+        *lock(&self.refresh_rate) = refresh_rate;
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn latest_frame(&self) -> Option<FrameSample> {
+        lock(&self.frames).buf.back().cloned()
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn frame_detail(&self, id: u64) -> Option<FrameSample> {
+        lock(&self.frames)
+            .buf
+            .iter()
+            .find(|frame| frame.number == id)
+            .cloned()
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn repaint_reader(&self, add: bool) {
+        if add {
+            self.repaint_readers.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.repaint_readers.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn tracks_repaints(&self) -> bool {
+        self.repaint_readers.load(Ordering::Relaxed) != 0
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_repaints(
+        &self,
+        batch: Option<engine::tree::FrameRepaintBatch>,
+        picked: Option<engine::tree::PickedViewEvent>,
+    ) {
+        if batch.is_some() || picked.is_some() {
+            lock(&self.repaints).push(|seq| RepaintUpdate {
+                seq,
+                batch: batch.map(Arc::new),
+                picked,
+            });
+            self.bump();
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn frame_repaints(&self, id: u64) -> Option<Arc<engine::tree::FrameRepaintBatch>> {
+        lock(&self.repaints)
+            .buf
+            .iter()
+            .rev()
+            .filter_map(|entry| entry.batch.as_ref())
+            .find(|batch| batch.frame_number == id)
+            .map(Arc::clone)
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_layers(&self, frame: u64, tree: &Arc<engine::scene::LayerTree>) {
+        if self.profile.load(Ordering::Relaxed) == TelemetryProfile::DeepInspect as u8 {
+            let mut layers = lock(&self.latest_layers);
+            if self.profile.load(Ordering::Relaxed) == TelemetryProfile::DeepInspect as u8 {
+                *layers = Some((frame, Arc::clone(tree)));
+            }
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn retained_layers(
+        &self,
+        frame: Option<u64>,
+    ) -> Option<(u64, Arc<engine::scene::LayerTree>)> {
+        lock(&self.latest_layers)
+            .as_ref()
+            .filter(|(id, _)| frame.is_none_or(|frame| frame == *id))
+            .cloned()
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn runtime_reader(&self, channel: devtools_protocol::Channel, active: bool) {
+        use devtools_protocol::Channel;
+        let readers = match channel {
+            Channel::Runtime => &self.runtime_readers,
+            Channel::Resources => &self.resource_readers,
+            _ => return,
+        };
+        if active {
+            readers.fetch_add(1, Ordering::Relaxed);
+        } else {
+            readers.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn reads_runtime(&self) -> bool {
+        self.runtime_readers.load(Ordering::Relaxed) != 0
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn reads_resources(&self) -> bool {
+        self.resource_readers.load(Ordering::Relaxed) != 0
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_runtime(&self, value: serde_json::Value) {
+        self.record_runtime(&self.runtime, value);
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_resources(&self, value: serde_json::Value) {
+        self.record_runtime(&self.resources, value);
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    fn record_runtime(&self, ring: &Mutex<Ring<RuntimeUpdate>>, value: serde_json::Value) {
+        lock(ring).push(|seq| RuntimeUpdate {
+            seq,
+            at_ms: crate::timing::mono_ms(),
+            observation: Arc::new(value),
+        });
+        self.bump();
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn note_js_samples(
+        &self,
+        frame_id: u64,
+        samples: Vec<engine::session::StackSample>,
+    ) {
+        if samples.is_empty() {
+            return;
+        }
+        let mut ring = lock(&self.resources);
+        for sample in samples {
+            let value = serde_json::json!({
+                "kind": "stack", "frame_id": frame_id, "entry": sample.entry, "stack": sample.stack,
+            });
+            ring.push(|seq| RuntimeUpdate {
+                seq,
+                at_ms: super::telemetry::mono_ns_at(sample.at) as f64 / 1_000_000.0,
+                observation: Arc::new(value),
+            });
+        }
+        self.bump();
     }
 
     pub(crate) fn collects_frames(&self) -> bool {
@@ -532,7 +920,14 @@ impl TelemetryHub {
             _ => TraceDetail::Stages,
         };
         let gpu = std::env::var("IMPASTO_TRACE_GPU").as_deref() != Ok("0");
-        self.begin_capture(Some((path, overwrite)), CaptureOptions { detail, gpu })
+        self.begin_capture(
+            Some((path, overwrite)),
+            CaptureOptions {
+                detail,
+                gpu,
+                js_sampling: detail == TraceDetail::Detailed,
+            },
+        )
     }
 
     pub(super) fn begin_capture(
@@ -546,7 +941,7 @@ impl TelemetryHub {
             return None;
         }
         let id = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
-        let timeline = TimelineRecording::begin(id, options.detail)?;
+        let timeline = TimelineRecording::begin(id, options.detail, options.js_sampling)?;
         *capture = Some(CaptureSlot {
             archive: TraceCapture {
                 id,
@@ -729,9 +1124,16 @@ pub type DiagnosticsHub = TelemetryHub;
 
 impl impasto::DiagnosticsSink for TelemetryHub {
     fn record(&self, source: &str, event: &str, payload: impasto::abi::PluginValue) {
-        if event == "network" {
-            super::plugin_record::network(self, source, payload);
-            return;
+        match event {
+            "network" | "network.start" | "network.head" | "network.finish" => {
+                super::plugin_record::network(self, source, event, payload);
+                return;
+            }
+            "network.ws_frame" => {
+                super::plugin_record::websocket(self, payload);
+                return;
+            }
+            _ => {}
         }
         self.push_log(LogEntry {
             seq: 0,
@@ -758,6 +1160,7 @@ const TRACE_DRAIN: Duration = Duration::from_millis(80);
 pub(super) struct CaptureOptions {
     pub detail: TraceDetail,
     pub gpu: bool,
+    pub js_sampling: bool,
 }
 
 struct CaptureSlot {
@@ -839,6 +1242,7 @@ mod tests {
                 CaptureOptions {
                     detail: TraceDetail::Stages,
                     gpu: true,
+                    js_sampling: false,
                 },
             )
             .unwrap();
@@ -923,10 +1327,13 @@ mod tests {
     #[test]
     fn settled_inspector_frames_replace_a_recent_snapshot() {
         let hub = DiagnosticsHub::new();
-        hub.enable_inspector();
+        let client = hub.inspect_remote();
         hub.refresh_inspector(false, || Some("initial".to_owned()));
         hub.refresh_inspector(true, || Some("settled".to_owned()));
         assert_eq!(hub.inspector().as_deref(), Some("settled"));
+        drop(client);
+        hub.refresh_inspector(true, || panic!("disconnected inspection should not run"));
+        assert!(hub.inspector().is_none());
     }
 
     #[test]
@@ -1001,6 +1408,7 @@ mod tests {
             response_preview: Some(b"hi".to_vec()),
             error: None,
             done_ms: Some(2.0),
+            ..Default::default()
         });
         let entry = lock(&hub.network).tail(0).next().cloned().unwrap();
         assert_eq!(entry.seq, 1);

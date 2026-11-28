@@ -8,7 +8,12 @@ publish.workspace = true
 devtools-server = []
 
 [dependencies]
-impasto.workspace = true
+devtools-protocol.workspace = true
+getrandom = "0.4"
+subtle = "2"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+impasto = { workspace = true, features = ["network-observation"] }
 raster = { workspace = true }
 thiserror = { workspace = true }
 engine = { workspace = true }

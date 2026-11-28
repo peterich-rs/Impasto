@@ -629,3 +629,62 @@ fn handoff_preserves_jobs_and_refreshes_quickjs_stack() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn runtime_diagnostics_report_heap_timers_and_gc() -> Result<(), Box<dyn std::error::Error>> {
+    use javascript::runtime::TimerKind;
+
+    let mut runtime = RuntimeBuilder::new().build()?;
+    let before = runtime.memory_detail().expect("open runtime");
+    runtime.drive(1000)?;
+    runtime.eval_script(
+        "globalThis.kept = Array.from({length: 300}, (_, i) => ({ label: 'value ' + i }));
+         setTimeout(() => {}, 50); setInterval(() => {}, 10);",
+        "diagnostics.js",
+    )?;
+    let grown = runtime.memory_detail().expect("open runtime");
+    assert!(grown.obj_count > before.obj_count);
+    assert!(grown.str_size > before.str_size);
+    let snapshot = runtime.resources_snapshot([]);
+    assert_eq!(snapshot.active_timers.len(), 2);
+    assert_eq!(snapshot.active_timers[0].kind, TimerKind::Interval);
+    assert_eq!(snapshot.active_timers[0].due_in_ms, 10);
+    assert_eq!(snapshot.active_timers[1].kind, TimerKind::Timeout);
+    runtime.eval_script("globalThis.kept = null;", "release.js")?;
+    let gc = runtime.run_gc().expect("open runtime");
+    assert_eq!(
+        gc.freed_bytes,
+        gc.before
+            .memory_used_size
+            .saturating_sub(gc.after.memory_used_size)
+    );
+    assert!(gc.after.obj_count < grown.obj_count);
+    Ok(())
+}
+
+#[test]
+fn sampler_configuration_caps_entries_and_labels_script_turn()
+-> Result<(), Box<dyn std::error::Error>> {
+    use javascript::runtime::SamplerConfig;
+
+    let mut runtime = RuntimeBuilder::new().stack_sampling(|| false).build()?;
+    assert!(runtime.set_sampler_config(SamplerConfig {
+        enabled: true,
+        interval_us: 100,
+        max_depth: 1,
+        max_samples: 2
+    }));
+    runtime.eval_script(
+        "const end = Date.now() + 15; while (Date.now() < end) {}",
+        "sample.js",
+    )?;
+    let samples = runtime.take_stack_samples();
+    assert!(!samples.is_empty());
+    assert!(samples.len() <= 2);
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.entry == "eval" && sample.stack.lines().count() <= 1)
+    );
+    Ok(())
+}

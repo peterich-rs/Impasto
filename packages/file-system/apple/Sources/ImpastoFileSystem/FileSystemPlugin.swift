@@ -16,6 +16,7 @@ private struct SaveOptions: Decodable {
     let path: String
     let suggestedName: String
     let mimeType: String?
+    let allowedExtensions: [String]?
 }
 
 private struct ImportedFile: Encodable, Sendable {
@@ -101,8 +102,10 @@ public final class ImpastoFileSystemPlugin: NSObject, ImpastoPlugin {
             case "video", "video/*": return .movie
             case "document", "*/*": return .data
             default:
-                let type = filter.hasPrefix(".") ? UTType(filenameExtension: String(filter.dropFirst())) : UTType(mimeType: filter)
-                guard let type else { throw CocoaError(.fileReadUnsupportedScheme) }
+                if filter.hasPrefix(".") {
+                    return UTType(filenameExtension: String(filter.dropFirst()), conformingTo: .data) ?? .data
+                }
+                guard let type = UTType(mimeType: filter) else { throw CocoaError(.fileReadUnsupportedScheme) }
                 return type
             }
         }
@@ -138,7 +141,13 @@ public final class ImpastoFileSystemPlugin: NSObject, ImpastoPlugin {
         guard let window = host?.window else { throw MissingWindow() }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = options.suggestedName
-        if let mime = options.mimeType, let type = UTType(mimeType: mime) { panel.allowedContentTypes = [type] }
+        let extensions = options.allowedExtensions ?? []
+        if !extensions.isEmpty {
+            panel.allowedContentTypes = extensions.map { UTType(filenameExtension: $0, conformingTo: .data) ?? .data }
+            panel.allowsOtherFileTypes = false
+        } else if let mime = options.mimeType, let type = UTType(mimeType: mime) {
+            panel.allowedContentTypes = [type]
+        }
         self.panel = panel
         pending = request
         panel.beginSheetModal(for: window) { [weak self] response in

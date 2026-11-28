@@ -771,6 +771,15 @@ impl Tree {
         }
         self.apply_presentation(id, prepared.presentation)?;
         self.apply_box_flags(id, &prepared.resolved)?;
+        match prepared.resolved.property(Key::Cursor) {
+            Some(Property::Cursor(cursor)) if *cursor != crate::style::CursorStyle::Auto => {
+                self.cursors.insert(id, *cursor);
+            }
+            _ if !self.cursors.is_empty() => {
+                self.cursors.remove(&id);
+            }
+            _ => {}
+        }
         if let Some(slot) = self.style_nodes.get_mut(&id.index) {
             slot.computed = prepared.resolved;
             slot.computed_ready = true;
@@ -841,6 +850,9 @@ impl Tree {
             .is_some_and(|image| Some(image.mode) != next.image);
         if !(paint_changed || transform_changed || text_changed || image_changed) {
             return Ok(());
+        }
+        if !same_layer_effects {
+            self.stage_repaint(id, super::RepaintReason::EFFECT_LAYER);
         }
         let node = self.node_mut(id)?;
         if paint_changed {

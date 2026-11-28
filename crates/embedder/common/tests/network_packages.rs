@@ -367,6 +367,21 @@ if (!abortedOk) throw new Error("AbortController did not cancel in-flight HTTP r
         .find(|e| e.url.ends_with("/post"))
         .expect("/post entry recorded");
     assert_eq!(post_entry.status, Some(200));
+    assert_eq!(post_entry.initiator, "fetch");
+    assert_eq!(post_entry.state, embedder::NetState::Completed);
+    assert!(
+        post_entry
+            .timing
+            .as_ref()
+            .is_some_and(|timing| timing.total_ms >= 0.0)
+    );
+    assert!(
+        post_entry
+            .connection
+            .as_ref()
+            .is_some_and(|connection| connection.protocol.as_deref() == Some("http/1.1"))
+    );
+
     assert!(
         post_entry
             .request_headers
@@ -538,6 +553,11 @@ for (const socket of pool) {{
     assert!(
         !socket_entries.is_empty(),
         "expected WebSocket DevTools NetEntries"
+    );
+    assert!(
+        socket_entries
+            .iter()
+            .any(|entry| entry.ws_sent > 0 && entry.ws_received > 0)
     );
 }
 

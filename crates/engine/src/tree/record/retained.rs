@@ -25,6 +25,7 @@ impl Tree {
     }
 
     pub(in crate::tree) fn update_rect_slot(&mut self, id: NodeId) -> bool {
+        self.stage_repaint(id, super::super::RepaintReason::STYLE_PAINT);
         let Some(node) = self.get(id) else {
             return false;
         };
@@ -62,6 +63,7 @@ impl Tree {
     }
 
     pub(in crate::tree) fn update_clip_radius(&mut self, id: NodeId) -> bool {
+        self.stage_repaint(id, super::super::RepaintReason::CLIP_OR_RADIUS);
         self.get(id).is_some_and(|node| {
             node.fill().is_none()
                 && node.stroke_width() <= 0.0
@@ -87,6 +89,7 @@ impl Tree {
     }
 
     pub(in crate::tree) fn update_transform_slot(&mut self, id: NodeId) -> bool {
+        self.stage_repaint(id, super::super::RepaintReason::TRANSFORM_OR_OPACITY);
         let Some(&(layer, [x, y, w, h])) = self.retained_layers.transforms.get(&id) else {
             return false;
         };
@@ -108,6 +111,7 @@ impl Tree {
     }
 
     pub(in crate::tree) fn update_opacity_slot(&mut self, id: NodeId, alpha: u8) -> bool {
+        self.stage_repaint(id, super::super::RepaintReason::TRANSFORM_OR_OPACITY);
         let Some(&layer) = self.retained_layers.opacity.get(&id) else {
             return false;
         };
@@ -190,18 +194,30 @@ impl Tree {
                 index: owner.picture,
                 id: prior.id,
             });
+            self.commit_picture_repaint(
+                node,
+                super::super::PaintPath::PicturePatch,
+                picture.id,
+                picture.commands().len(),
+            );
             self.layers.pictures[owner.picture] = Arc::clone(&picture);
             self.pictures.insert(node, picture);
             changed_layers.push(owner.layer);
         }
         self.retained_layers.picture_patches = owners;
-        for (id, kind) in self.retained_layers.pending.drain() {
+        let mut pending = std::mem::take(&mut self.retained_layers.pending);
+        for (id, kind) in pending.drain() {
             let layer = &mut self.layers.layers[id.0 as usize];
             if layer.kind != kind {
                 layer.kind = kind;
                 changed_layers.push(id);
+                if let Some(LayerKey::Node(node, _)) = self.retained_layers.keys.get(id.0 as usize)
+                {
+                    self.commit_repaint(*node, super::super::PaintPath::FastLayerPatch, None, 0);
+                }
             }
         }
+        self.retained_layers.pending = pending;
         changed_layers.sort_unstable_by_key(|layer| layer.0);
         let changed: Arc<[_]> = changed_layers.into();
         self.retained_layers.delta = Some(crate::scene::SceneDelta {

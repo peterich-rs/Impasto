@@ -31,7 +31,8 @@ use engine::session::Metrics;
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use diagnostics::telemetry::{ScheduleTiming, TelemetryProfile, mono_ns};
 pub use diagnostics::{
-    DiagnosticsHub, FrameSample, LogEntry, LogSource, NetEntry, NetKind, PhaseSample, TelemetryHub,
+    DiagnosticsHub, FrameSample, LogEntry, LogSource, NetEntry, NetKind, NetState, PhaseSample,
+    TelemetryHub,
 };
 pub use engine::session::{FrameTime, Lifecycle};
 pub use error::{BootError, SessionError};
@@ -123,6 +124,8 @@ pub trait Services: Send {
         None
     }
     fn back_enabled(&self, _enabled: bool) {}
+    /// Applies a pointer cursor. Hosts without a desktop pointer may ignore it.
+    fn set_cursor(&self, _cursor: engine::style::CursorStyle) {}
     fn window_session(&self) -> WindowSession {
         WindowSession::default()
     }

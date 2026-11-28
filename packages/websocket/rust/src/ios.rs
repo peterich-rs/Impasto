@@ -8,7 +8,9 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-use crate::socket::{WebSocketCommand, WebSocketEvent, WebSocketSettings, WebSocketTransport};
+use crate::socket::{
+    TransportEvents, WebSocketCommand, WebSocketEvent, WebSocketSettings, WebSocketTransport,
+};
 use block2::RcBlock;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
@@ -181,17 +183,17 @@ impl Connection {
         unsafe { self.task.receiveMessageWithCompletionHandler(&handler) }
     }
 
-    fn send(&self, text: bool, data: Vec<u8>, sender: &Sender<NativeEvent>) -> Result<(), String> {
+    fn send(&self, text: bool, data: &[u8], sender: &Sender<NativeEvent>) -> Result<(), String> {
         let message = if text {
-            let text = String::from_utf8(data).map_err(|error| error.to_string())?;
+            let text = std::str::from_utf8(data).map_err(|error| error.to_string())?;
             NSURLSessionWebSocketMessage::initWithString(
                 NSURLSessionWebSocketMessage::alloc(),
-                &NSString::from_str(&text),
+                &NSString::from_str(text),
             )
         } else {
             NSURLSessionWebSocketMessage::initWithData(
                 NSURLSessionWebSocketMessage::alloc(),
-                &NSData::with_bytes(&data),
+                &NSData::with_bytes(data),
             )
         };
         let sender = sender.clone();
@@ -226,7 +228,7 @@ impl WebSocketTransport for WebSocket {
         settings: &WebSocketSettings,
         commands: Receiver<WebSocketCommand>,
         active: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(WebSocketEvent) -> bool,
+        TransportEvents { emit, mut sent }: TransportEvents<'_>,
     ) -> Result<(), String> {
         let (sender, receive) = mpsc::channel();
         let connection =
@@ -236,6 +238,7 @@ impl WebSocketTransport for WebSocket {
         // The worker starts another send/receive only after its previous callback.
         // At most those two callbacks and the native lifecycle events can be queued.
         let mut sending: Option<Instant> = None;
+        let mut observed = None;
         let mut next_ping = None;
         let mut pong_deadline: Option<Instant> = None;
         while active() {
@@ -258,7 +261,8 @@ impl WebSocketTransport for WebSocket {
             if sending.is_none() {
                 match commands.try_recv() {
                     Ok(WebSocketCommand::Send { text, data }) => {
-                        autoreleasepool(|_| connection.send(text, data, &sender))?;
+                        autoreleasepool(|_| connection.send(text, &data, &sender))?;
+                        observed = sent.is_some().then_some((text, data));
                         sending = Some(Instant::now());
                     }
                     Ok(WebSocketCommand::Close { .. }) | Err(TryRecvError::Disconnected) => {
@@ -294,6 +298,10 @@ impl WebSocketTransport for WebSocket {
                 Ok(NativeEvent::Sent(result)) => {
                     sending = None;
                     result?;
+                    if let (Some(observer), Some((text, bytes))) = (sent.as_mut(), observed.take())
+                    {
+                        observer(text, &bytes);
+                    }
                 }
                 Ok(NativeEvent::Terminal(result)) => {
                     // A native receive may race with the delegate's normal peer-close notice.
@@ -367,25 +375,28 @@ mod tests {
             &WebSocketSettings::default(),
             commands,
             &|| started.elapsed() < Duration::from_secs(4),
-            &mut |event| {
-                let command = match event {
-                    WebSocketEvent::Open { protocol } => {
-                        assert!(protocol.is_empty());
-                        WebSocketCommand::Send {
-                            text: true,
-                            data: b"hello".to_vec(),
+            TransportEvents {
+                emit: &mut |event| {
+                    let command = match event {
+                        WebSocketEvent::Open { protocol } => {
+                            assert!(protocol.is_empty());
+                            WebSocketCommand::Send {
+                                text: true,
+                                data: b"hello".to_vec(),
+                            }
                         }
-                    }
-                    WebSocketEvent::Message { text, data } => {
-                        messages.borrow_mut().push((text, data));
-                        WebSocketCommand::Close {
-                            code: Some(1000),
-                            reason: String::new(),
+                        WebSocketEvent::Message { text, data } => {
+                            messages.borrow_mut().push((text, data));
+                            WebSocketCommand::Close {
+                                code: Some(1000),
+                                reason: String::new(),
+                            }
                         }
-                    }
-                    WebSocketEvent::Close { .. } | WebSocketEvent::Error(_) => return true,
-                };
-                send.send(command).is_ok()
+                        WebSocketEvent::Close { .. } | WebSocketEvent::Error(_) => return true,
+                    };
+                    send.send(command).is_ok()
+                },
+                sent: None,
             },
         );
         let server = server

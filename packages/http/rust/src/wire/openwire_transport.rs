@@ -12,6 +12,7 @@ use http_body_util::BodyExt as _;
 use openwire::{Client, RequestBody, ResponseBody, WireError, WireErrorKind};
 
 use impasto::CancelToken;
+use impasto::network::{OpenWireHop, OpenWireObserver};
 
 use super::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
@@ -19,6 +20,7 @@ use super::{
 };
 
 const MAX_REDIRECTS: usize = 20;
+type ResponseHead = (Response<ResponseBody>, String, bool, Option<OpenWireHop>);
 
 pub(crate) struct OpenWireClient {
     handle: tokio::runtime::Handle,
@@ -64,6 +66,7 @@ impl OpenWireClient {
             builder = builder.tls_connector(super::pinning::connector(Arc::clone(pins))?);
         }
         let client = builder
+            .event_listener_factory(OpenWireObserver)
             .build()
             .map_err(|_| error("network", "HTTP transport is unavailable"))?;
         Ok(Self {
@@ -73,10 +76,7 @@ impl OpenWireClient {
         })
     }
 
-    async fn open_head(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<(Response<ResponseBody>, String, bool), HttpError> {
+    async fn open_head(&self, request: &HttpRequest) -> Result<ResponseHead, HttpError> {
         if request.cancel.is_cancelled() {
             return Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
         }
@@ -158,9 +158,13 @@ impl OpenWireClient {
             } else {
                 None
             };
-            let wire_request =
+            let mut wire_request =
                 build_hop_request(&method, &current_uri, &hop_headers, &body, upload_body)?;
             let remaining = remaining_until(deadline)?;
+            let hop = request
+                .hops
+                .clone()
+                .map(|log| OpenWireHop::install(&mut wire_request, log));
 
             let mut call = self.client.new_call(wire_request).follow_redirects(false);
             if let Some(timeout) = remaining {
@@ -181,13 +185,16 @@ impl OpenWireClient {
                 jar.update(&target, &collect_headers(response.headers()));
             }
             let status = response.status();
+            if let Some(hop) = &hop {
+                hop.response(status.as_u16(), header_location(response.headers()));
+            }
             if is_redirect_status(status)
                 && let Some(location) = header_location(response.headers())
             {
                 match request.redirect {
                     RedirectMode::Manual => {
                         let final_url = current_uri.to_string();
-                        return Ok((response, final_url, redirects > 0));
+                        return Ok((response, final_url, redirects > 0, hop));
                     }
                     RedirectMode::Error => {
                         return Err(HttpError::new(
@@ -216,7 +223,7 @@ impl OpenWireClient {
             }
 
             let final_url = current_uri.to_string();
-            return Ok((response, final_url, redirects > 0));
+            return Ok((response, final_url, redirects > 0, hop));
         }
     }
 
@@ -225,60 +232,41 @@ impl OpenWireClient {
         request: HttpRequest,
         mut sink: ResponseSink,
     ) -> Result<(), PublicError> {
-        let cancel = request.cancel.clone();
+        let outcome = self.stream_async(&request, &mut sink).await;
+        sink.complete(outcome)
+    }
+
+    async fn stream_async(
+        &self,
+        request: &HttpRequest,
+        sink: &mut ResponseSink,
+    ) -> Result<(), HttpError> {
         let deadline = request
             .timeout_ms
             .map(|ms| Instant::now() + Duration::from_millis(ms));
         let limit = request.max_body_bytes.unwrap_or(HTTP_BODY_LIMIT);
-
-        let (response, final_url, redirected) = match self.open_head(&request).await {
-            Ok(head) => head,
-            Err(err) => {
-                return sink.complete(Err(err));
-            }
-        };
-
-        let status = response.status().as_u16();
+        let (response, final_url, redirected, _hop) = self.open_head(request).await?;
         let headers = collect_headers(response.headers());
-        if let Err(err) = sink
-            .send_head_async(status, &final_url, redirected, &headers)
-            .await
-        {
-            return sink.complete(Err(err));
-        }
-
-        let (_, mut body) = response.into_parts();
+        sink.send_head_async(response.status().as_u16(), &final_url, redirected, &headers)
+            .await?;
+        let mut body = response.into_body();
         let mut received: usize = 0;
-
-        loop {
-            let next_frame =
-                race_with_cancel_and_deadline(&cancel, deadline, || {}, body.frame()).await;
-            match next_frame {
-                Err(err) => {
-                    return sink.complete(Err(err));
+        while let Some(frame) =
+            race_with_cancel_and_deadline(&request.cancel, deadline, || {}, body.frame()).await?
+        {
+            let frame = frame.map_err(map_wire_error)?;
+            if let Some(data) = frame.data_ref() {
+                received = received.saturating_add(data.len());
+                if received > limit {
+                    return Err(HttpError::new(
+                        HttpFailure::TooLarge,
+                        "response body exceeds limit",
+                    ));
                 }
-                Ok(None) => {
-                    return sink.complete(Ok(()));
-                }
-                Ok(Some(Err(err))) => {
-                    return sink.complete(Err(map_wire_error(err)));
-                }
-                Ok(Some(Ok(frame))) => {
-                    if let Some(data) = frame.data_ref() {
-                        received = received.saturating_add(data.len());
-                        if received > limit {
-                            return sink.complete(Err(HttpError::new(
-                                HttpFailure::TooLarge,
-                                "response body exceeds limit",
-                            )));
-                        }
-                        if let Err(err) = sink.send_chunk_async(data).await {
-                            return sink.complete(Err(err));
-                        }
-                    }
-                }
+                sink.send_chunk_async(data).await?;
             }
         }
+        Ok(())
     }
 
     async fn stream_sync(
@@ -290,7 +278,7 @@ impl OpenWireClient {
         let deadline = request
             .timeout_ms
             .map(|ms| Instant::now() + Duration::from_millis(ms));
-        let (response, final_url, redirected) = self.open_head(request).await?;
+        let (response, final_url, redirected, _hop) = self.open_head(request).await?;
         let status = response.status().as_u16();
         let headers = collect_headers(response.headers());
         if !sink(HttpPiece::Head {
@@ -336,37 +324,7 @@ impl OpenWireClient {
 
 impl HttpClient for OpenWireClient {
     fn perform(&self, request: &HttpRequest) -> Result<HttpResponse, HttpError> {
-        let mut status = 0;
-        let mut url = request.url.clone();
-        let mut redirected = false;
-        let mut headers = Vec::new();
-        let mut body = Vec::new();
-        self.stream(request, &mut |piece| {
-            match piece {
-                HttpPiece::Head {
-                    status: s,
-                    url: u,
-                    redirected: r,
-                    headers: h,
-                } => {
-                    status = s;
-                    url = u.to_owned();
-                    redirected = r;
-                    headers = h.to_vec();
-                }
-                HttpPiece::Chunk(bytes, _) => body.extend_from_slice(bytes),
-                #[cfg(target_os = "ios")]
-                HttpPiece::Upload { .. } => {}
-            }
-            true
-        })?;
-        Ok(HttpResponse {
-            status,
-            url,
-            redirected,
-            headers,
-            body,
-        })
+        super::collect_response(request, |sink| self.stream(request, sink))
     }
 
     fn stream(
@@ -735,9 +693,32 @@ mod redirect_tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Mutex;
+
+    use impasto::abi::PluginValue;
+    use impasto::{DiagnosticsSink, FromPluginValue as _, network::NetworkEvent};
+
+    #[derive(Default)]
+    struct RedirectTrace(Mutex<Vec<(u16, String)>>);
+
+    impl DiagnosticsSink for RedirectTrace {
+        fn record(&self, _: &str, event: &str, payload: PluginValue) {
+            if event == "network.finish" {
+                let hops = NetworkEvent::from_value(payload)
+                    .unwrap()
+                    .redirects
+                    .unwrap();
+                self.0
+                    .lock()
+                    .unwrap()
+                    .extend(hops.into_iter().map(|hop| (hop.status, hop.url)));
+            }
+        }
+    }
 
     fn get_request(url: String, redirect: RedirectMode) -> HttpRequest {
         HttpRequest {
+            hops: None,
             method: "GET".to_owned(),
             url,
             headers: vec![("Authorization".to_owned(), "Bearer secret".to_owned())],
@@ -822,9 +803,13 @@ mod redirect_tests {
             .expect_err("redirect error mode must fail");
         assert_eq!(err.kind, HttpFailure::Network);
 
-        let followed = client
-            .perform(&get_request(url, RedirectMode::Follow))
-            .unwrap_or_else(|e| panic!("{}", e.message));
+        let trace_sink = Arc::new(RedirectTrace::default());
+        let diagnostics: Arc<dyn DiagnosticsSink> = Arc::clone(&trace_sink) as _;
+        let mut request = get_request(url.clone(), RedirectMode::Follow);
+        let trace = crate::trace::start(Some(&diagnostics), &mut request, "fetch");
+        let followed = client.perform(&request);
+        crate::trace::finish(trace, &followed);
+        let followed = followed.unwrap_or_else(|e| panic!("{}", e.message));
         assert_eq!(followed.status, 200);
         assert!(followed.redirected);
         assert_eq!(
@@ -832,6 +817,10 @@ mod redirect_tests {
             format!("http://127.0.0.1:{target_port}/final")
         );
         assert_eq!(followed.body, b"done");
+        assert_eq!(
+            *trace_sink.0.lock().unwrap(),
+            [(302, url), (200, followed.url)]
+        );
 
         let seen_request = target_server
             .join()
@@ -853,6 +842,7 @@ mod tests {
 
     fn request(url: &str) -> HttpRequest {
         HttpRequest {
+            hops: None,
             method: "GET".to_owned(),
             url: url.to_owned(),
             headers: Vec::new(),
@@ -931,8 +921,6 @@ mod tests {
             &mut |piece| {
                 match piece {
                     HttpPiece::Head { status, .. } => head = Some(status),
-                    #[cfg(target_os = "ios")]
-                    HttpPiece::Upload { .. } => {}
                     HttpPiece::Chunk(bytes, done) => {
                         body.extend_from_slice(bytes);
                         if done {

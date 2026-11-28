@@ -12,6 +12,7 @@ mod node;
 pub(crate) mod picture_id;
 mod platform_view;
 mod record;
+mod repaint;
 mod scroll;
 mod scroll_rules;
 mod semantics;
@@ -32,6 +33,10 @@ pub use node::{
     Inset, Justify, PanelAlign, RowCrossAlign, ScrollEdge, SubtreeSpace, TrackSize,
 };
 pub use platform_view::PlatformViewPlacement;
+pub use repaint::{
+    FrameRepaintBatch, FrameRepaintRecord, NodeRepaintStats, PaintPath, PickedViewEvent,
+    RemoteOverlayConfig, RepaintReason,
+};
 pub use scroll::ScrollSample;
 pub use text::TextLink;
 
@@ -187,6 +192,10 @@ pub struct Tree {
     refresh_pending: Vec<NodeId>,
     /// Developer diagnostics. Off by default; see `tree/debug.rs`.
     debug: debug::DebugState,
+    cursors: HashMap<NodeId, crate::style::CursorStyle>,
+    cursor_pointer: Option<(f32, f32)>,
+    cursor_hit: crate::input::HitPath,
+    cursor_sent: crate::style::CursorStyle,
     style_nodes: HashMap<u32, style::NodeStyle>,
     style_queue: Vec<NodeId>,
     style_source_owners: HashMap<crate::style::StyleSourceId, NodeId>,

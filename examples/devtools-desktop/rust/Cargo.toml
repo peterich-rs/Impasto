@@ -1,0 +1,22 @@
+[package]
+name = "devtools-desktop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+impasto = { version = "0.1.0", registry = "impasto" }
+impasto-file-system = { version = "0.1.0", registry = "impasto" }
+devtools-protocol = { path = "../../../crates/devtools-protocol" }
+devtools-symbols = { path = "../../../crates/devtools-symbols" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+
+[lints.rust]
+unsafe_code = "deny"
+unused_qualifications = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

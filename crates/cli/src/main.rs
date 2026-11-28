@@ -75,6 +75,9 @@ enum Command {
         /// Enable component hot updates for the running debug app.
         #[arg(long, conflicts_with = "release")]
         watch: bool,
+        /// Open Impasto DevTools attached to the launched debug app.
+        #[arg(long, conflicts_with = "release")]
+        devtools: bool,
     },
     /// Pack a release artifact. Defaults to release; `--debug` keeps ESM.
     Build {
@@ -241,12 +244,14 @@ fn main() -> ExitCode {
             verbose,
             trace,
             watch,
+            devtools,
         } => finish(run::run(run::RunOptions {
             device,
             release,
             verbose,
             trace,
             watch,
+            devtools,
         })),
         Command::Build {
             target,

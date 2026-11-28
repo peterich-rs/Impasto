@@ -2,62 +2,79 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+use crate::runtime::{SamplerConfig, StackSample};
 
 use rquickjs::{Context, Runtime, qjs};
 
-const INTERVAL: Duration = Duration::from_millis(1);
-const MAX_DEPTH: usize = 8;
-const MAX_SAMPLES: usize = 32;
-const MAX_STACK_BYTES: usize = 2048;
-
-/// A sample of the generated JavaScript stack at a VM checkpoint.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StackSample {
-    pub at: Instant,
-    /// QuickJS frames, in leaf-to-root order, using generated file locations.
-    pub stack: String,
-}
+const MAX_DEPTH: usize = 64;
+const MAX_SAMPLES: usize = 512;
+const MAX_STACK_BYTES: usize = 8192;
 
 pub(super) struct Sampler {
     // The capture context shares the VM stack but has its own Error intrinsics.
     // Application Error.prepareStackTrace and stackTraceLimit must never run here.
     context: Context,
     enabled: Box<dyn Fn() -> bool>,
+    forced: AtomicBool,
+    interval_us: AtomicU64,
+    max_depth: AtomicUsize,
+    max_samples: AtomicUsize,
     last: Cell<Option<Instant>>,
     pending: RefCell<Vec<StackSample>>,
 }
 
 impl Sampler {
     pub fn new(runtime: &Runtime, enabled: Box<dyn Fn() -> bool>) -> rquickjs::Result<Self> {
+        let config = SamplerConfig::default();
         Ok(Self {
             context: Context::full(runtime)?,
             enabled,
+            forced: AtomicBool::new(config.enabled),
+            interval_us: AtomicU64::new(config.interval_us),
+            max_depth: AtomicUsize::new(config.max_depth),
+            max_samples: AtomicUsize::new(config.max_samples),
             last: Cell::new(None),
             pending: RefCell::default(),
         })
     }
 
-    pub fn poll(&self) {
-        if !(self.enabled)() {
+    pub(super) fn set_config(&self, config: SamplerConfig) {
+        self.interval_us
+            .store(config.interval_us.clamp(100, 1_000_000), Ordering::Relaxed);
+        self.max_depth
+            .store(config.max_depth.clamp(1, MAX_DEPTH), Ordering::Relaxed);
+        self.max_samples
+            .store(config.max_samples.clamp(1, MAX_SAMPLES), Ordering::Relaxed);
+        self.forced.store(config.enabled, Ordering::Relaxed);
+        self.reset_interval();
+    }
+
+    pub fn poll(&self, entry: &'static str) {
+        if !self.forced.load(Ordering::Relaxed) && !(self.enabled)() {
             return;
         }
         let now = Instant::now();
-        if self
-            .last
-            .get()
-            .is_some_and(|last| now.duration_since(last) < INTERVAL)
-        {
+        if self.last.get().is_some_and(|last| {
+            now.duration_since(last)
+                < Duration::from_micros(self.interval_us.load(Ordering::Relaxed))
+        }) {
             return;
         }
         self.last.set(Some(now));
         let Ok(mut pending) = self.pending.try_borrow_mut() else {
             return;
         };
-        if pending.len() < MAX_SAMPLES
-            && let Some(stack) = self.capture()
+        if pending.len() < self.max_samples.load(Ordering::Relaxed)
+            && let Some(stack) = self.capture(self.max_depth.load(Ordering::Relaxed))
         {
-            pending.push(StackSample { at: now, stack });
+            pending.push(StackSample {
+                at: now,
+                entry,
+                stack,
+            });
         }
     }
 
@@ -73,7 +90,7 @@ impl Sampler {
         unsafe_code,
         reason = "Stack inspection must use the owner thread's already locked QuickJS runtime"
     )]
-    fn capture(&self) -> Option<String> {
+    fn capture(&self, depth: usize) -> Option<String> {
         let ctx = self.context.as_raw().as_ptr();
         // SAFETY: the interrupt runs with this live runtime locked by its owner.
         // The private context is never evaluated by the application. Its original
@@ -94,7 +111,7 @@ impl Sampler {
                     } else {
                         let stack = CStr::from_ptr(raw).to_string_lossy();
                         let mut bounded = String::new();
-                        for line in stack.lines().take(MAX_DEPTH) {
+                        for line in stack.lines().take(depth) {
                             if bounded.len() + line.len() + 1 > MAX_STACK_BYTES {
                                 break;
                             }
