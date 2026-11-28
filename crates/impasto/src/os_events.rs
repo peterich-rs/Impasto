@@ -37,6 +37,7 @@ struct Topic {
     subscribers: HashMap<u64, Arc<Subscriber>>,
     starting: Option<HashMap<u64, oneshot::Sender<Result<(), String>>>>,
     overflow_reported: bool,
+    latest: Option<String>,
 }
 
 struct Subscriber {
@@ -150,6 +151,13 @@ impl NativeEventChannel {
                 buffer.events.push_back(payload.to_owned());
                 wakes.extend(buffer.waker.take());
             }
+            if topic
+                .subscribers
+                .values()
+                .any(|subscriber| subscriber.latest)
+            {
+                topic.latest = Some(payload.to_owned());
+            }
             overflow && !std::mem::replace(&mut topic.overflow_reported, true)
         };
         if overflow {
@@ -230,11 +238,22 @@ impl Channel {
                     subscribers: HashMap::new(),
                     starting: Some(HashMap::new()),
                     overflow_reported: false,
+                    latest: None,
                 });
             if entry.params != params {
                 return Err(format!(
                     "native event topic {topic} is in use with different parameters"
                 ));
+            }
+            if subscriber.latest
+                && let Some(latest) = &entry.latest
+            {
+                subscriber
+                    .buffer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .events
+                    .push_back(latest.clone());
             }
             entry.subscribers.insert(id, subscriber);
             let ready = entry.starting.as_mut().map(|waiters| {
@@ -446,6 +465,15 @@ mod tests {
         };
         assert!(channel.emit("test/changes", "first"));
         assert!(channel.emit("test/changes", "second"));
+        let replay =
+            std::pin::pin!(channel.subscribe_latest("test/changes", "{}", 1)).poll(&mut cx);
+        let Poll::Ready(Ok(mut replay)) = replay else {
+            panic!("a second state subscriber did not attach");
+        };
+        assert_eq!(
+            Pin::new(&mut replay).poll_next(&mut cx),
+            Poll::Ready(Some("second".into()))
+        );
         assert_eq!(
             Pin::new(&mut newest).poll_next(&mut cx),
             Poll::Ready(Some("second".into()))
@@ -455,6 +483,7 @@ mod tests {
             Poll::Ready(Some("first".into()))
         );
         drop(newest);
+        drop(replay);
         assert_eq!(*sent.lock().unwrap(), [START]);
         channel.close();
         assert_eq!(*sent.lock().unwrap(), [START, STOP]);

@@ -5,10 +5,15 @@
   "dependencies": {
     "@impasto/app-state": "workspace:*",
     "@impasto/async-storage": "workspace:*",
+    "@impasto/clipboard": "workspace:*",
+    "@impasto/connectivity": "workspace:*",
     "@impasto/file-system": "workspace:*",
+    "@impasto/haptics": "workspace:*",
     "@impasto/linking": "workspace:*",
     "@impasto/permissions": "workspace:*",
+    "@impasto/share": "workspace:*",
     "@impasto/solid-renderer": "workspace:*",
-    "@impasto/solid-ui": "workspace:*"
+    "@impasto/solid-ui": "workspace:*",
+    "@impasto/system-info": "workspace:*"
   }
 }

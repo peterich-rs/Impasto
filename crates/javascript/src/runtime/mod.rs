@@ -574,10 +574,13 @@ impl Runtime {
         self.state.scheduler.turn.get()
     }
 
+    /// Next JavaScript timer in the scheduler's clock domain.
+    pub fn next_timer_ms(&self) -> Option<i64> {
+        self.state.scheduler.next_timer_ms()
+    }
+
     pub fn next_deadline_ms(&self) -> Option<i64> {
-        self.state
-            .scheduler
-            .next_timer_ms()
+        self.next_timer_ms()
             .into_iter()
             .chain(self.state.resources.borrow().deadline())
             .min()

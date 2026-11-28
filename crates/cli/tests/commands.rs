@@ -208,13 +208,17 @@ test("click re-renders text", async () => {
             r#"
 import { AppState } from "@impasto/app-state";
 import { AsyncStorage } from "@impasto/async-storage";
-import { Clipboard } from "@impasto/clipboard";
+import { Clipboard, hasHtml, read, write } from "@impasto/clipboard";
+import { getStatus } from "@impasto/connectivity";
 import { store } from "@impasto/devtools";
 import { FileSystem } from "@impasto/file-system";
+import { isSupported } from "@impasto/haptics";
 import { Linking } from "@impasto/linking";
 import { Permission } from "@impasto/permissions";
+import { shareText } from "@impasto/share";
 import { boot } from "@impasto/solid-renderer";
 import { View } from "@impasto/solid-ui";
+import { getDeviceInfo } from "@impasto/system-info";
 
 boot(() => <View />);
 Clipboard.setString("copied");
@@ -248,6 +252,20 @@ async function check() {
     throw new Error("declared module events");
   }
   if ((await Permission.camera.status) !== "denied") throw new Error("permission status");
+  if ((await getStatus()).isConnected || await isSupported() || !(await getDeviceInfo()).architecture) {
+    throw new Error("unhosted capability defaults");
+  }
+  await write({ text: "rich", html: "<strong>rich</strong>" });
+  if (!(await hasHtml()) || (await read()).html !== "<strong>rich</strong>" || Clipboard.getString() !== "rich") {
+    throw new Error("clipboard formats");
+  }
+  let shareError = "";
+  try { await shareText("fixture"); } catch (error) { shareError = String(error); }
+  if (!shareError.includes("[share:host-unavailable]")) throw new Error("share needs a window");
+  await FileSystem.writeText("fixture.txt", "cache", { scope: "cache", atomic: true });
+  if (await FileSystem.exists("fixture.txt") || await FileSystem.readText("fixture.txt", "cache") !== "cache") {
+    throw new Error("file system scope boundaries");
+  }
   for (const size of [16, 8192]) {
     const bytes: Uint8Array = await FileSystem.read(`${size}.bin`);
     if (!(bytes instanceof Uint8Array) || bytes.length !== size || bytes[0] !== 65) {
@@ -256,7 +274,7 @@ async function check() {
   }
   console.log("capabilities passed");
 }
-void check();
+void check().catch(error => console.error(error));
 "#,
         )
         .expect("capabilities app");
@@ -269,10 +287,13 @@ void check();
             "app-state",
             "async-storage",
             "clipboard",
+            "connectivity",
             "devtools",
-            "file-system",
+            "haptics",
             "linking",
             "permissions",
+            "share",
+            "system-info",
         ] {
             manifest["dependencies"][format!("@impasto/{name}")] = "0.1.0".into();
         }
@@ -282,8 +303,10 @@ void check();
         )
         .expect("dependencies");
         success(sandbox.cli(&["analyze", "--platform", "macos"]));
-        fs::write(sandbox.0.join("16.bin"), [65; 16]).expect("small file");
-        fs::write(sandbox.0.join("8192.bin"), [65; 8192]).expect("large file");
+        let paths = impasto::AppPaths::isolated(&sandbox.0).expect("sandbox directories");
+        let documents = paths.document_dir().expect("documents");
+        fs::write(documents.join("16.bin"), [65; 16]).expect("small file");
+        fs::write(documents.join("8192.bin"), [65; 8192]).expect("large file");
         for debug in [true, false] {
             let mut args = vec!["build", "bundle", "--platform", "macos"];
             if debug {
@@ -296,7 +319,7 @@ void check();
             let publish = tx.clone();
             let context = impasto::PluginContext::new(
                 impasto::Runtime::default(),
-                impasto::AppPaths::new(Some(sandbox.0.clone()), None, None),
+                paths.clone(),
                 move |event| publish.send(engine::session::IoEvent::Host(event)).is_ok(),
             );
             context.insert_extension(impasto::DiagnosticsSource::new(|_, _| {
@@ -318,9 +341,12 @@ void check();
             let completed = Arc::new(AtomicBool::new(false));
             let log: engine::js::ConsoleLog = Box::new({
                 let completed = Arc::clone(&completed);
-                move |_, line| {
+                move |level, line| {
                     if line == "capabilities passed" {
                         completed.store(true, Ordering::Relaxed);
+                    }
+                    if level >= 3 {
+                        eprintln!("{line}");
                     }
                 }
             });
@@ -344,11 +370,14 @@ void check();
             context.dispatch_lifecycle(impasto::Lifecycle::Inactive);
             context.dispatch_window_focus(true);
             context.dispatch_window_focus(false);
-            for step in 0..8 {
+            for step in 0..32 {
                 for event in rx.try_iter() {
                     session.io_event(event);
                 }
                 session.frame(engine::session::FrameTime::at(f64::from(step) * 16.0));
+                if completed.load(Ordering::Relaxed) {
+                    break;
+                }
             }
             let faults = session.take_faults();
             assert!(faults.is_empty(), "{faults:?}");

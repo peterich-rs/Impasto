@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider
+            android:name="dev.impasto.plugins.share.ShareFileProvider"
+            android:authorities="${applicationId}.impasto.share.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/impasto_share_paths" />
+        </provider>
+    </application>
+</manifest>

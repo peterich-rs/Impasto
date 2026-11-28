@@ -211,6 +211,7 @@ class ImpastoHost private constructor(
 
     override fun close() {
         detachPlugins(false)
+        retainedPluginState.closePluginStates()
         val handle = release()
         if (handle != 0L) NativeBridge.nativeDetach(handle)
     }
@@ -322,6 +323,7 @@ class ImpastoHost private constructor(
                 } catch (error: IllegalArgumentException) {
                     view.release()
                     NativeBridge.nativeDetach(handle)
+                    session?.close()
                     throw error
                 }
             }
@@ -384,11 +386,18 @@ class ImpastoSession internal constructor(
 
     override fun close() {
         check(Looper.myLooper() == Looper.getMainLooper())
+        pending?.closePluginStates()
         if (handle != 0L) NativeBridge.nativeDetach(handle)
         handle = 0L
         pending = null
         windowSession?.released(this)
     }
+}
+
+private fun MutableMap<String, Any>.closePluginStates() {
+    val states = values.filterIsInstance<AutoCloseable>()
+    clear()
+    states.forEach(AutoCloseable::close)
 }
 
 /** An application session with separate UI, input and lifecycle for each attached window. */

@@ -7,6 +7,10 @@ publish.workspace = true
 
 [dependencies]
 impasto.workspace = true
+base64 = "0.22"
+png = "0.18"
+serde = { version = "1", features = ["derive"] }
+
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "=0.22.4"

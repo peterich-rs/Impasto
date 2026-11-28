@@ -1,37 +1,13 @@
-import type { Linking as LinkingApi } from "@impasto/linking/native";
-
-export const state: {
-  initialUrl: string | null;
-  urlListener: ((event: { url: string }) => void) | null;
-} = {
-  initialUrl: null,
-  urlListener: null,
-};
-
-export function getInitialURL(): string | null {
-  return state.initialUrl;
+import type { OpenUrlOptions, UrlListener } from "./types";
+export function isLinkingHostAvailable() { return false; }
+export function getInitialURL(): string | null { return null; }
+export async function canOpenURL(_url: string): Promise<boolean> { return false; }
+export async function openURL(_url: string, _options?: OpenUrlOptions): Promise<boolean> {
+  throw Object.assign(new Error("Opening links requires a native host"), { code: "host-unavailable" });
 }
-
-export function openURL(_url: string): Promise<void> {
-  return Promise.resolve();
+export function watchUrls(_signal?: AbortSignal): ReadableStream<string> {
+  return new ReadableStream({ start(controller) { controller.close(); } });
 }
-
-export const addEventListener: LinkingApi["addEventListener"] = (type, listener) => {
-  if (type === "url") {
-    state.urlListener = listener;
-  }
-};
-
-export const removeEventListener: LinkingApi["removeEventListener"] = (type, listener) => {
-  if (type === "url" && state.urlListener === listener) {
-    state.urlListener = null;
-  }
-};
-
-export const Linking: LinkingApi = Object.freeze({
-  getInitialURL,
-  openURL,
-  shareText: async () => {},
-  addEventListener,
-  removeEventListener,
-});
+export function addEventListener(_type: "url", _listener: UrlListener): void {}
+export function removeEventListener(_type: "url", _listener: UrlListener): void {}
+export const Linking = Object.freeze({ getInitialURL, canOpenURL, openURL, watchUrls, addEventListener, removeEventListener });

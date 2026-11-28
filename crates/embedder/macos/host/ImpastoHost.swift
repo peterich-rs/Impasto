@@ -131,4 +131,24 @@ public struct ImpastoNativeRequest {
 
     @discardableResult
     public func fail(_ message: String) -> Bool { finish(2, message) }
+
+    public func decodeJSON<T: Decodable>(_ type: T.Type) throws -> T {
+        try JSONDecoder().decode(type, from: Data(payload.utf8))
+    }
+
+    @discardableResult
+    public func resolveJSON(_ value: some Encodable) -> Bool {
+        do {
+            return resolve(String(decoding: try JSONEncoder().encode(value), as: UTF8.self))
+        } catch {
+            return fail(code: "platform", message: error.localizedDescription)
+        }
+    }
+
+    @discardableResult
+    public func fail(code: String, message: String) -> Bool {
+        let payload = try? JSONEncoder().encode(["code": code, "message": message])
+        return fail(payload.map { String(decoding: $0, as: UTF8.self) } ?? message)
+    }
+
 }

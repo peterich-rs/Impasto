@@ -18,12 +18,16 @@ members = [
     "packages/app-state/rust",
     "packages/async-storage/rust",
     "packages/clipboard/rust",
+    "packages/connectivity/rust",
     "packages/camera/rust",
     "packages/devtools/rust",
     "packages/file-system/rust",
+    "packages/haptics/rust",
     "packages/http/rust",
     "packages/linking/rust",
     "packages/permissions/rust",
+    "packages/share/rust",
+    "packages/system-info/rust",
     "packages/websocket/rust",
 ]
 exclude = ["examples/native-order/rust"]
@@ -44,6 +48,9 @@ raster = { path = "crates/raster" }
 javascript = { path = "crates/javascript", default-features = false }
 embedder = { path = "crates/embedder/common" }
 rquickjs = { package = "quickjs-jit", version = "=0.14.2", default-features = false, features = ["std", "loader", "macro", "bindgen"] }
+
+[patch.impasto]
+impasto-file-system = { path = "packages/file-system/rust" }
 
 # Keep the UI and rendering hot paths usable in debuggable builds.
 [profile.dev.package."*"]

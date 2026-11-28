@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     registry::register(&mut registrar);
     let context = impasto::PluginContext::new(
         impasto::Runtime::default(),
-        impasto::AppPaths::new(Some(sandbox.path().to_path_buf()), None, None),
+        impasto::AppPaths::isolated(sandbox.path())?,
         |_| false,
     );
     let mut modules = registrar.build(&context)?;

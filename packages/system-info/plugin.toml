@@ -1,0 +1,21 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[ios]
+path = "apple/ios"
+package = "ImpastoSystemInfo"
+plugin_class = "ImpastoSystemInfoPlugin"
+
+[macos]
+path = "apple/macos"
+package = "ImpastoSystemInfo"
+plugin_class = "ImpastoSystemInfoPlugin"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.systeminfo"
+plugin_class = "SystemInfoPlugin"

@@ -19,11 +19,9 @@ include(":app")
 include(":impasto-host")
 project(":impasto-host").projectDir = file("../host")
 
-include(":impasto_file_system")
-project(":impasto_file_system").projectDir = file("../../../../packages/file-system/android")
-
-include(":impasto_linking")
-project(":impasto_linking").projectDir = file("../../../../packages/linking/android")
-
-include(":impasto_permissions")
-project(":impasto_permissions").projectDir = file("../../../../packages/permissions/android")
+listOf("clipboard", "connectivity", "file-system", "haptics", "linking", "permissions", "share", "system-info")
+    .forEach { plugin ->
+        val path = ":impasto_${plugin.replace('-', '_')}"
+        include(path)
+        project(path).projectDir = file("../../../../packages/$plugin/android")
+    }

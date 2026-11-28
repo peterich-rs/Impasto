@@ -1,6 +1,6 @@
 # 现场记录验收应用
 
-这个应用从 `impasto create android-acceptance` 生成。它声明 `impasto-demo://record/<编号>` 深链，支持从原生文档选择器导入文件、请求相机权限及通过 Sharesheet 分享文本。路由、滚动位置和小型表单状态使用框架的任务快照，手动保存的草稿使用 `AsyncStorage`。系统重建进程后先恢复任务，再处理新交付的深链。
+这个应用从 `impasto create android-acceptance` 生成。它声明 `impasto-demo://record/<编号>` 深链，支持从原生文档选择器导入文件、请求相机权限及通过系统分享面板发送备注和附件。记录页也提供应用内浏览器、网络状态、应用信息、触感反馈及剪贴板格式探测。路由、滚动位置和小型表单状态使用框架的任务快照，手动保存的草稿使用 `AsyncStorage`。系统重建进程后先恢复任务，再处理新交付的深链。
 
 在本目录运行 `impasto analyze` 可检查 TSX。构建需要 JDK 17、Android SDK 35、NDK 28.2.13676358 和 `aarch64-linux-android`、`x86_64-linux-android` 两个 Rust 目标。`[android].abis` 可选择要打包的 ABI。
 

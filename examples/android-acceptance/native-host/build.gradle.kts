@@ -25,6 +25,7 @@ dependencies {
     implementation(fileTree("../build/android/aar") { include("plugin-*-release.aar") })
     implementation(files("../build/android/aar/app-release.aar"))
     implementation("androidx.activity:activity:1.10.1")
+    implementation("androidx.browser:browser:1.8.0")
     implementation("androidx.core:core:1.15.0")
     implementation("androidx.window:window-java:1.2.0")
     implementation("androidx.fragment:fragment:1.8.9")

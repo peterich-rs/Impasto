@@ -39,6 +39,7 @@ struct Bridge {
     view: Mutex<Option<Arc<Global<JObject<'static>>>>>,
     assets: Arc<AssetManager>,
     document_dir: Option<String>,
+    downloads_dir: Option<std::path::PathBuf>,
     font: OnceLock<Vec<u8>>,
     semantics: Mutex<Vec<embedder::ProjectedNode>>,
     semantics_revision: AtomicI64,
@@ -755,6 +756,19 @@ fn cache_log_dir(env: &mut Env, view: &JObject<'_>) -> Option<std::path::PathBuf
 
 fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
     let log_dir = cache_log_dir(env, request.view.as_obj());
+    let downloads_dir = env
+        .call_method(
+            request.view.as_obj(),
+            jni::jni_str!("downloadsDirectory"),
+            jni::jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )
+        .and_then(|value| value.l())
+        .and_then(|value| env.cast_local::<JString>(value))
+        .and_then(|value| value.try_to_string(env))
+        .ok()
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from);
     let document_dir = env
         .call_method(
             request.view.as_obj(),
@@ -808,6 +822,7 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
             view: Mutex::new(Some(Arc::new(request.view))),
             assets: Arc::clone(&request.assets),
             document_dir: (!document_dir.is_empty()).then_some(document_dir),
+            downloads_dir,
             font: OnceLock::new(),
             semantics: Mutex::new(Vec::new()),
             semantics_revision: AtomicI64::new(0),
@@ -943,7 +958,8 @@ fn android_boot(
                 bridge.document_dir.as_ref().map(std::path::PathBuf::from),
                 pipeline_cache.clone(),
                 pipeline_cache.clone(),
-            ),
+            )
+            .with_downloads_dir(bridge.downloads_dir.clone()),
         },
         platform_runner: Some(platform_runner),
         launch_url: Arc::clone(&launch_url),

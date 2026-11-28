@@ -1068,6 +1068,9 @@ pub fn run(
             )
             .with_data_dir(sandbox_directory(
                 objc2_foundation::NSSearchPathDirectory::ApplicationSupportDirectory,
+            ))
+            .with_downloads_dir(sandbox_directory(
+                objc2_foundation::NSSearchPathDirectory::DownloadsDirectory,
             )),
         },
         platform_runner: Some(embedder::PlatformTaskRunner::new(

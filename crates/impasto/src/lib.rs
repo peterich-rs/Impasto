@@ -5,6 +5,7 @@ mod diagnostics;
 pub mod os;
 mod os_channel;
 mod os_events;
+mod os_plugin;
 
 mod runtime;
 mod texture;

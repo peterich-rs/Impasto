@@ -7,16 +7,12 @@ publish.workspace = true
 
 [dependencies]
 impasto.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
-block2 = "0.6.2"
-futures-channel = "0.3"
-objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = [
-    "std", "block2", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSWindow",
-] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSURL"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
+
+[target.'cfg(any(target_vendor = "apple", target_os = "android", target_os = "linux"))'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
 
 [lints]
 workspace = true

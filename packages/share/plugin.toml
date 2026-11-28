@@ -1,0 +1,24 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[ios]
+path = "apple/ios"
+package = "ImpastoShare"
+plugin_class = "ImpastoSharePlugin"
+
+[macos]
+path = "apple/macos"
+package = "ImpastoShare"
+plugin_class = "ImpastoSharePlugin"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.share"
+plugin_class = "SharePlugin"
+
+[dependencies]
+"@impasto/file-system" = "builtin"

@@ -393,7 +393,7 @@ fn modules(root: &Path) -> Result<Vec<engine::session::Module>> {
     impasto_bundled_plugins::register(&mut registrar);
     let context = impasto::PluginContext::new(
         impasto::Runtime::default(),
-        impasto::AppPaths::new(Some(root.to_path_buf()), None, None),
+        impasto::AppPaths::isolated(root)?,
         |_| false,
     );
     registrar

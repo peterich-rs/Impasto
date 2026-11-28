@@ -37,8 +37,13 @@ enabled = ["camera", "photos", "locationWhenInUse", "scheduleExactAlarm"]
 [dependencies]
 "@impasto/app-state" = "builtin"
 "@impasto/async-storage" = "builtin"
+"@impasto/clipboard" = "builtin"
+"@impasto/connectivity" = "builtin"
 "@impasto/file-system" = "builtin"
+"@impasto/haptics" = "builtin"
 "@impasto/linking" = "builtin"
 "@impasto/permissions" = "builtin"
+"@impasto/share" = "builtin"
 "@impasto/solid-renderer" = "builtin"
 "@impasto/solid-ui" = "builtin"
+"@impasto/system-info" = "builtin"
